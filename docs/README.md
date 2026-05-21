@@ -11,52 +11,73 @@ This guide documents the current Hostlet implementation: local setup, Cloudflare
 - `hostlet-caddy`: local reverse proxy on loopback port `18080` for tunnel traffic.
 - `cloudflared`: optional Cloudflare Tunnel connector.
 
-## Recommended Setup With CLI
+## Recommended Production Setup With CLI
 
-1. Install Docker and Docker Compose.
+1. Install Docker, Docker Compose, Git, and curl.
 
-2. Build and run the setup wizard:
+2. Clone Hostlet and install the compiled CLI:
 
 ```bash
-cargo run -p hostlet -- init
+git clone https://github.com/ShaneKanterman04/Hostlet.git
+cd Hostlet
+curl -L https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/hostlet-linux-x64 -o hostlet
+chmod +x hostlet
+sudo mv hostlet /usr/local/bin/hostlet
+```
+
+3. Run the setup wizard:
+
+```bash
+hostlet init
 ```
 
 The wizard asks for:
 
-- public access mode: LAN only or Cloudflare Tunnel
+- Hostlet UI/API access mode: LAN only or Cloudflare Tunnel
 - LAN host/IP or Cloudflare domain settings
 - GitHub OAuth Client ID and secret
 - allowed GitHub username
 - Hostlet repository URL for remote agent installs
 
-It generates all required secrets, writes `.env`, and prints the first setup token. In Cloudflare mode it also validates the zone token and can create/update the Hostlet UI/API CNAME record pointing at the configured tunnel target.
+It generates all required secrets, writes `.env`, and prints the first setup token. In Cloudflare Tunnel UI/API mode it also validates the zone token and can create/update the Hostlet UI/API CNAME record pointing at the configured tunnel target.
 
-3. Start Hostlet:
+4. Start Hostlet:
 
 ```bash
-cargo run -p hostlet -- up
+hostlet up
 ```
 
-For Cloudflare Tunnel mode:
+For Cloudflare Tunnel UI/API mode:
 
 ```bash
-cargo run -p hostlet -- up --tunnel
+hostlet up --tunnel
 ```
 
-4. Check the install:
+5. Check the install:
 
 ```bash
-cargo run -p hostlet -- doctor
+hostlet doctor
 ```
 
 Operational commands:
 
 ```bash
-cargo run -p hostlet -- logs
-cargo run -p hostlet -- backup
-cargo run -p hostlet -- restore backups/hostlet-YYYYMMDDTHHMMSSZ
-cargo run -p hostlet -- down
+hostlet logs
+hostlet backup
+hostlet restore backups/hostlet-YYYYMMDDTHHMMSSZ
+hostlet down
 ```
+
+Developers can run the CLI from source with `cargo run -p hostlet -- <command>`, but production installs should use the compiled release binary.
+
+## Access Modes
+
+Hostlet has two control-plane access modes:
+
+- **LAN only**: the Hostlet UI is opened on the local network, usually `http://HOST_IP:3000`, and the API is on `http://HOST_IP:8080`.
+- **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, OAuth callback, and webhooks share one HTTPS hostname such as `https://hostlet.example.com`.
+
+These modes describe access to Hostlet itself. Deployed apps are private by default in both modes. Public app URLs are controlled per app with **Open tunnel** / **Close tunnel**.
 
 ## Manual Local/LAN Setup
 

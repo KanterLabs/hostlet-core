@@ -7,19 +7,36 @@ Hostlet is a small self-hosted deployment panel for GitHub projects. It runs a w
 Requirements:
 
 - Docker and Docker Compose
+- Git and curl
 - A GitHub OAuth App
 - Optional: a Cloudflare zone and tunnel token for public `*.your-domain.com` app URLs
 
-1. Build the CLI and run the setup wizard:
+1. Clone Hostlet and install the compiled CLI:
 
 ```bash
-cargo run -p hostlet -- init
+git clone https://github.com/ShaneKanterman04/Hostlet.git
+cd Hostlet
+curl -L https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/hostlet-linux-x64 -o hostlet
+chmod +x hostlet
+sudo mv hostlet /usr/local/bin/hostlet
+```
+
+2. Run the setup wizard:
+
+```bash
+hostlet init
 ```
 
 The wizard generates `.env`, asks for GitHub OAuth values, optionally configures Cloudflare Tunnel values, and prints the first setup token.
-In Cloudflare mode it also prepares the Hostlet control-plane hostname so the UI, API, OAuth callback, and webhooks can all work through the tunnel.
 
-2. Create a GitHub OAuth App when prompted.
+Access modes are:
+
+- **LAN only**: the Hostlet UI runs at `http://YOUR_HOST_IP:3000` and the API at `http://YOUR_HOST_IP:8080`.
+- **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, OAuth callback, and webhooks share one HTTPS hostname through Cloudflare Tunnel.
+
+Deployed apps are still private by default in both modes. Making an app public is a separate per-app action.
+
+3. Create a GitHub OAuth App when prompted.
 
 For local/LAN testing, set:
 
@@ -28,26 +45,28 @@ Homepage URL: http://YOUR_HOST_IP:3000
 Authorization callback URL: http://YOUR_HOST_IP:8080/auth/github/callback
 ```
 
-For Cloudflare Tunnel mode, use the HTTPS Hostlet hostname that `hostlet init` asks for:
+For Cloudflare Tunnel UI/API mode, use the HTTPS Hostlet hostname that `hostlet init` asks for:
 
 ```text
 Homepage URL: https://hostlet.example.com
 Authorization callback URL: https://hostlet.example.com/auth/github/callback
 ```
 
-3. Start Hostlet:
+4. Start Hostlet:
 
 ```bash
-cargo run -p hostlet -- up
+hostlet up
 ```
 
-For Cloudflare Tunnel mode:
+For Cloudflare Tunnel UI/API mode:
 
 ```bash
-cargo run -p hostlet -- up --tunnel
+hostlet up --tunnel
 ```
 
-4. Open the UI printed by `hostlet init`.
+5. Open the UI printed by `hostlet init`.
+
+Developers can run the CLI from source with `cargo run -p hostlet -- <command>`, but production installs should use the compiled release binary.
 
 Manual setup is still supported with:
 

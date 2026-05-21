@@ -81,8 +81,8 @@ async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     println!("Hostlet init writes .env and generates local secrets.");
 
     let access_mode = Select::with_theme(&theme)
-        .with_prompt("Public access mode")
-        .items(&["LAN only", "Cloudflare Tunnel"])
+        .with_prompt("Hostlet UI/API access mode")
+        .items(&["LAN only", "Cloudflare Tunnel for Hostlet UI/API"])
         .default(0)
         .interact()?;
 
