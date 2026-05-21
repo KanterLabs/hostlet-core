@@ -1,17 +1,61 @@
-# Hostlet
+<h1 align="center">
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=32&duration=3000&pause=1000&color=2D9CDB&center=true&vCenter=true&width=435&lines=Hostlet" alt="Hostlet" />
+</h1>
 
-Hostlet is a small self-hosted deployment panel for GitHub projects. It runs a web UI, a Rust API, PostgreSQL, a local deployment agent, Caddy, and optional Cloudflare Tunnel support.
+<p align="center">
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=18&duration=3000&pause=1000&color=27AE60&center=true&vCenter=true&width=500&lines=Self-hosted+deployment+that+just+works+%F0%9F%9A%80;Deploy+GitHub+projects+in+30+seconds+%E2%9A%A1;Your+apps%2C+your+server%2C+your+rules+%F0%9F%94%92" alt="Tagline" />
+</p>
 
-## Quick Setup
+<p align="center">
+  <a href="https://github.com/ShaneKanterman04/Hostlet/releases/latest">
+    <img src="https://img.shields.io/github/v/release/ShaneKanterman04/Hostlet?color=2D9CDB&style=for-the-badge&logo=github" alt="Latest Release" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-27AE60?style=for-the-badge" alt="MIT License" />
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/built%20with-Rust-orange?style=for-the-badge&logo=rust&logoColor=white" alt="Built with Rust" />
+  </a>
+  <a href="https://nextjs.org/">
+    <img src="https://img.shields.io/badge/frontend-Next.js-black?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js" />
+  </a>
+  <a href="https://www.docker.com/">
+    <img src="https://img.shields.io/badge/dockerized-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
+  </a>
+</p>
 
-Requirements:
+---
 
-- Docker and Docker Compose
-- Git and curl
+<p align="center">
+  <b>Hostlet</b> is your personal deployment control panel. <br/>
+  Push code to GitHub → watch it deploy. No cloud vendor lock-in. No monthly fees. Just you and your server.
+</p>
+
+## ✨ What You Get
+
+| Feature | Status |
+|---------|--------|
+| 🖥️ Web Dashboard (Next.js) | ✅ Ready |
+| 🦀 Rust API Control Plane | ✅ Ready |
+| 🐳 Docker-based Deployments | ✅ Ready |
+| 🌐 Cloudflare Tunnel Support | ✅ Ready |
+| 🔄 Auto-redeploy on Git Push | ✅ Ready |
+| 🔐 GitHub OAuth Device Flow | ✅ Ready |
+| 📊 Live Deployment Logs | ✅ Ready |
+| 🗄️ PostgreSQL Database | ✅ Ready |
+| 🛡️ Caddy Reverse Proxy | ✅ Ready |
+| 💾 Backup & Restore Scripts | ✅ Ready |
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose
+- Git & curl
 - A GitHub OAuth App with Device Flow enabled
-- Optional: a Cloudflare zone and tunnel token for public `*.your-domain.com` app URLs
+- *(Optional)* Cloudflare zone + tunnel token for public `*.your-domain.com` URLs
 
-1. Clone Hostlet and install the compiled CLI:
+### 1. Install
 
 ```bash
 git clone https://github.com/ShaneKanterman04/Hostlet.git
@@ -21,74 +65,73 @@ chmod +x hostlet
 sudo mv hostlet /usr/local/bin/hostlet
 ```
 
-2. Run the setup wizard:
+### 2. Run the Wizard
 
 ```bash
 hostlet init
 ```
 
-The wizard generates `.env`, asks for the GitHub OAuth Client ID, optionally configures Cloudflare Tunnel values, and prints the first setup token.
+This generates your `.env`, asks for your GitHub OAuth Client ID, optionally configures Cloudflare Tunnel, and prints your first setup token.
 
-Access modes are:
+### 3. Pick Your Mode
 
-- **LAN only**: the Hostlet UI runs at `http://YOUR_HOST_IP:3000` and the API at `http://YOUR_HOST_IP:8080`. Manual deploys work, but GitHub cannot send webhooks to a private LAN URL.
-- **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, and webhooks share one HTTPS hostname through Cloudflare Tunnel.
+| Mode | URL | Webhooks? |
+|------|-----|-----------|
+| **LAN Only** | `http://YOUR_HOST_IP:3000` | Manual deploys only |
+| **Cloudflare Tunnel** | `https://your-domain.com` | Auto-redeploy from GitHub |
 
-Deployed apps are still private by default in both modes. Making an app public is a separate per-app action.
+> 💡 **Pro tip:** Deployed apps stay **private by default** in both modes. You choose which ones go public.
 
-3. Create a GitHub OAuth App when prompted.
+### 4. Create a GitHub OAuth App
 
-Enable **Device Flow** on the OAuth App and copy the Client ID into Hostlet. Hostlet does not use an OAuth callback URL or client secret.
+Enable **Device Flow** on your OAuth App and copy the Client ID into Hostlet.
 
-For local/LAN testing, set:
-
-```text
+For LAN testing:
+```
 Homepage URL: http://YOUR_HOST_IP:3000
 ```
 
-For Cloudflare Tunnel UI/API mode, use the HTTPS Hostlet hostname that `hostlet init` asks for:
-
-```text
+For Cloudflare Tunnel mode:
+```
 Homepage URL: https://hostlet.example.com
 ```
 
-4. Start Hostlet:
+> 🔑 Hostlet uses Device Flow — no callback URL or client secret needed!
+
+### 5. Start Hostlet
 
 ```bash
+# LAN mode
 hostlet up
-```
 
-For Cloudflare Tunnel UI/API mode:
-
-```bash
+# Cloudflare Tunnel mode
 hostlet up --tunnel
 ```
 
-5. Open the UI printed by `hostlet init`.
+Open the UI URL printed by `hostlet init` and you're live! 🎉
 
-Developers can run the CLI from source with `cargo run -p hostlet -- <command>`, but production installs should use the compiled release binary.
+---
 
-Manual setup is still supported with:
+## 🎯 First-Time Setup
 
-```bash
-cp .env.example .env
-```
+1. Paste your setup token (from `hostlet init`)
+2. Set your first-run password
+3. Unlock the panel
+4. Sign in with GitHub
+5. Create an app → Deploy to **This machine**
 
-Set the first-run password, unlock the panel, sign in with GitHub, create an app, and deploy it to `This machine`.
+In LAN mode, deploy manually:
+1. Push changes to GitHub
+2. Open the app in Hostlet
+3. Click **Deploy latest** 🚀
 
-If `HOSTLET_SETUP_TOKEN` is set, paste it into the first-run setup form.
+For automatic deploys, use Cloudflare Tunnel mode or set `PUBLIC_WEBHOOK_URL`.
 
-In LAN mode, deploy changes manually:
+---
 
-1. Push your app changes to GitHub.
-2. Open the app in Hostlet.
-3. Click **Deploy latest**.
+## 🌐 Public App URLs (Optional)
 
-Hostlet will pull the configured repo/branch and deploy the newest commit. Use Cloudflare Tunnel UI/API mode, or set a separate `PUBLIC_WEBHOOK_URL`, if you want GitHub pushes to deploy automatically.
-
-## Optional Public App URLs
-
-Hostlet can publish individual apps through Cloudflare Tunnel. Configure these in `.env`:
+Want public-facing app URLs? Add these to `.env`:
 
 ```bash
 HOSTLET_BASE_DOMAIN=example.com
@@ -99,69 +142,128 @@ CLOUDFLARE_TUNNEL_TARGET=<tunnel-id>.cfargotunnel.com
 CLOUDFLARE_TUNNEL_TOKEN=...
 ```
 
-Apps are private by default. Use **Publish URL** or **Make private** on the app detail page to add or remove the app DNS record.
+Toggle **Publish URL** or **Make private** on any app detail page. You're in control.
 
-## Auto-Redeploy
+---
 
-Auto-redeploy is off by default and only works when GitHub can reach Hostlet from the internet.
+## 🔄 Auto-Redeploy from GitHub
 
-In full tunnel mode, `PUBLIC_API_URL` is the public HTTPS control-plane URL:
+Auto-redeploy is off by default and requires a public webhook endpoint.
 
-```text
+**Full tunnel mode:**
+```
 PUBLIC_API_URL=https://hostlet.example.com
 ```
 
-If you keep the UI/API in LAN mode but still expose only the webhook endpoint through a tunnel, leave `PUBLIC_API_URL` on the LAN URL and set:
-
-```text
+**LAN UI + public webhook:**
+```
+PUBLIC_API_URL=http://YOUR_LAN_IP:8080
 PUBLIC_WEBHOOK_URL=https://hostlet.example.com
 ```
 
-These LAN/local values are valid for Device Flow sign-in and manual deploys, but not for GitHub webhook delivery unless `PUBLIC_WEBHOOK_URL` points at a public HTTPS tunnel:
+### Enable auto-redeploy:
 
-```text
-PUBLIC_API_URL=http://localhost:8080
-PUBLIC_API_URL=http://10.0.0.194:8080
-PUBLIC_API_URL=http://192.168.1.20:8080
-```
+1. Run `hostlet up --tunnel` (or set `PUBLIC_WEBHOOK_URL`)
+2. Enable **Auto redeploy on branch push** for your app
+3. Add a GitHub webhook:
+   ```
+   Payload URL: PUBLIC_WEBHOOK_URL/webhooks/github
+   Content type: application/json
+   Secret: GITHUB_WEBHOOK_SECRET
+   Events: push
+   ```
 
-To enable auto-redeploy:
+Only matching repo/branch pushes trigger deployments. Magic! ✨
 
-1. Run Hostlet with a public control-plane URL, usually `hostlet up --tunnel`, or set `PUBLIC_WEBHOOK_URL` to a public HTTPS tunnel hostname.
-2. Enable **Auto redeploy on branch push** for the app.
-3. Add a GitHub repository webhook:
+---
 
-```text
-Payload URL: PUBLIC_WEBHOOK_URL/webhooks/github
-Content type: application/json
-Secret: GITHUB_WEBHOOK_SECRET
-Events: push
-```
-
-Only matching repo/branch pushes for apps with auto-redeploy enabled start deployments.
-
-## Backup
+## 💾 Backup & Restore
 
 ```bash
+# Create backup
 scripts/backup.sh
+
+# Restore from backup
 HOSTLET_RESTORE_CONFIRM=yes scripts/restore.sh backups/hostlet-YYYYMMDDTHHMMSSZ
 ```
 
-Keep `.env` secrets in a password manager. The backup intentionally stores a checklist, not live secret values.
+> 🔐 Keep `.env` secrets in a password manager. Backups store a checklist, not live secrets.
 
-## Production Compose
+---
 
-Development uses `infra/docker-compose.yml`. Production builds images and avoids source bind mounts:
+## 🏗️ Architecture
 
-```bash
-docker compose -f infra/docker-compose.prod.yml up -d --build
+```
+Browser
+  |
+  | HTTP :3000
+  v
+Next.js Web UI
+  |
+  | HTTP API / WebSocket Logs :8080
+  v
+Rust API Control Plane
+  |
+  | PostgreSQL
+  v
+Postgres DB
+
+Rust API <-- WebSocket/Events --> Hostlet Agent
+                                    |
+                                    | Docker Socket
+                                    v
+                              App Containers
+
+Cloudflare Edge -> cloudflared -> Caddy -> App Container
 ```
 
-Add `--profile tunnel` when running Cloudflare Tunnel from the same host.
+- **Web** (`apps/web`): Next.js dashboard with live logs
+- **API** (`apps/api`): Axum control plane with auth & deployments
+- **Agent** (`apps/agent`): Deployment executor with Docker
+- **CLI** (`apps/cli`): Setup wizard & management commands
 
-## More Docs
+---
 
-- [Full guide](docs/README.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Security](docs/SECURITY.md)
-- [Missing feature report](docs/FEATURE_GAPS.md)
+## 🛠️ Development
+
+```bash
+# Run from source (CLI)
+cargo run -p hostlet -- <command>
+
+# Start all services for development
+pnpm dev
+
+# Or manually
+docker compose -f infra/docker-compose.yml up --build
+```
+
+### Production Deploy
+
+```bash
+# Build production images (no source bind mounts)
+docker compose -f infra/docker-compose.prod.yml up -d --build
+
+# With Cloudflare Tunnel
+docker compose -f infra/docker-compose.prod.yml --profile tunnel up -d --build
+```
+
+---
+
+## 📚 Documentation
+
+- 📖 [Full Guide](docs/README.md)
+- 🏗️ [Architecture](docs/ARCHITECTURE.md)
+- 🔒 [Security](docs/SECURITY.md)
+- 📝 [Feature Gaps](docs/FEATURE_GAPS.md)
+
+---
+
+<p align="center">
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=14&duration=4000&pause=1000&color=888888&center=true&vCenter=true&width=500&lines=Made+with+%E2%9D%A4%EF%B8%8F+by+Shane+Kanterman;Star+%E2%AD%90+this+repo+if+it+helped+you!" alt="Footer" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/ShaneKanterman04/Hostlet/stargazers">
+    <img src="https://img.shields.io/github/stars/ShaneKanterman04/Hostlet?style=social" alt="GitHub Stars" />
+  </a>
+</p>
