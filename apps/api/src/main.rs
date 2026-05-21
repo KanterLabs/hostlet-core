@@ -59,8 +59,8 @@ async fn main() -> anyhow::Result<()> {
                 )
             }),
         )
-        .route("/auth/github/start", get(auth::github_start))
-        .route("/auth/github/callback", get(auth::github_callback))
+        .route("/auth/github/device/start", post(auth::github_device_start))
+        .route("/auth/github/device/poll", post(auth::github_device_poll))
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", post(auth::setup_password))
         .route("/api/unlock", post(auth::unlock))

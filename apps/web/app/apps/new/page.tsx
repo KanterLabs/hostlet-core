@@ -1,10 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { LucideIcon } from "lucide-react";
+import { Box, CheckCircle2, Cpu, GitBranch, HardDrive, Lock, Plus, Search, Server } from "lucide-react";
 import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
+import { Field, PageHeader, StatusPill } from "@/components/ui";
+import { WebhookNotice } from "@/components/WebhookNotice";
+
+type Repo = { full_name: string; private: boolean; default_branch: string; updated_at?: string };
+type ServerRow = { id: string; name: string; kind: string; status: string };
 
 export default function CreateApp() {
   const router = useRouter();
@@ -26,43 +33,56 @@ export default function CreateApp() {
     auto_deploy: false,
   });
   const [repoLink, setRepoLink] = useState("");
-  const [repos, setRepos] = useState<Array<{ full_name: string; private: boolean; default_branch: string; updated_at?: string }>>([]);
+  const [repos, setRepos] = useState<Repo[]>([]);
   const [repoSearch, setRepoSearch] = useState("");
-  const [repoMessage, setRepoMessage] = useState("Loading GitHub repos...");
-  const [servers, setServers] = useState<Array<{ id: string; name: string; kind: string; status: string }>>([]);
+  const [repoMessage, setRepoMessage] = useState("Loading GitHub repositories...");
+  const [servers, setServers] = useState<ServerRow[]>([]);
   const [message, setMessage] = useState("");
-  const [createdAppId, setCreatedAppId] = useState("");
   const [creating, setCreating] = useState(false);
+
   useEffect(() => {
-    api<Array<{ id: string; name: string; kind: string; status: string }>>("/api/servers")
+    api<ServerRow[]>("/api/servers")
       .then((rows) => {
         setServers(rows);
-        const local = rows.find((s) => s.kind === "local");
-        if (local) setForm((f) => ({ ...f, server_id: local.id }));
+        const local = rows.find((server) => server.kind === "local");
+        if (local) setForm((current) => ({ ...current, server_id: local.id }));
       })
       .catch(() => {});
-    api<Array<{ full_name: string; private: boolean; default_branch: string; updated_at?: string }>>("/api/github/repos")
+    api<Repo[]>("/api/github/repos")
       .then((rows) => {
-        if (!Array.isArray(rows)) {
-          throw new Error("GitHub returned an unexpected repository payload.");
-        }
+        if (!Array.isArray(rows)) throw new Error("GitHub returned an unexpected repository payload.");
         setRepos(rows);
         setRepoMessage(rows.length ? "" : "No repositories returned from GitHub.");
       })
-      .catch((e) => setRepoMessage(`Could not load repos. ${e instanceof Error ? e.message : "Paste a repo link instead."}`));
+      .catch((error) => setRepoMessage(`Could not load repos. ${error instanceof Error ? error.message : "Paste a repo link instead."}`));
   }, []);
+
+  const filteredRepos = useMemo(
+    () => repos.filter((repo) => repo.full_name.toLowerCase().includes(repoSearch.toLowerCase())).slice(0, 80),
+    [repos, repoSearch],
+  );
 
   function updateRepoLink(value: string) {
     setRepoLink(value);
     const repo = parseGitHubRepo(value);
     if (!repo) {
-      setForm((f) => ({ ...f, repo_full_name: "" }));
+      setForm((current) => ({ ...current, repo_full_name: "" }));
       return;
     }
-    setForm((f) => ({
-      ...f,
+    setForm((current) => ({
+      ...current,
       repo_full_name: repo,
-      name: f.name || repo.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
+      name: current.name || repo.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
+    }));
+  }
+
+  function selectRepo(repo: Repo) {
+    setRepoLink(`https://github.com/${repo.full_name}`);
+    setForm((current) => ({
+      ...current,
+      repo_full_name: repo.full_name,
+      branch: repo.default_branch || current.branch,
+      name: current.name || repo.full_name.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
     }));
   }
 
@@ -71,155 +91,184 @@ export default function CreateApp() {
     setCreating(true);
     setMessage("Creating app...");
     try {
-      const res = await api<{ id: string }>("/api/apps", { method: "POST", body: JSON.stringify({ ...form, server_id: form.server_id || null, env: [] }) });
-      setCreatedAppId(res.id);
-      setMessage("App created. Opening app...");
+      const res = await api<{ id: string }>("/api/apps", {
+        method: "POST",
+        body: JSON.stringify({ ...form, server_id: form.server_id || null, env: [] }),
+      });
+      setMessage("App created. Opening deploy screen...");
       router.push(`/apps/${res.id}`);
-    } catch (e) {
-      setMessage(`Create failed. Check the repo, server id, port, and domain. ${e instanceof Error ? e.message : ""}`);
+    } catch (error) {
+      setMessage(`Create failed. ${error instanceof Error ? error.message : "Check the repo, server, port, and domain."}`);
       setCreating(false);
     }
   }
-  function selectRepo(repo: { full_name: string; default_branch: string }) {
-    setRepoLink(`https://github.com/${repo.full_name}`);
-    setForm((f) => ({
-      ...f,
-      repo_full_name: repo.full_name,
-      branch: repo.default_branch || f.branch,
-      name: f.name || repo.full_name.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
-    }));
-  }
-  const filteredRepos = repos.filter((repo) => repo.full_name.toLowerCase().includes(repoSearch.toLowerCase())).slice(0, 100);
+
+  const selectedServer = servers.find((server) => server.id === form.server_id);
+  const canCreate = !!form.repo_full_name && !!form.name && !!form.branch && !!form.server_id;
+
   return (
-    <main className="grid min-h-screen grid-cols-[220px_1fr]">
+    <main className="app-shell">
       <Nav />
-      <section className="max-w-2xl p-8">
-        <h1 className="text-2xl font-semibold">Create app</h1>
-        <div className="mt-6 grid gap-4">
-          <div className="rounded-lg border border-line bg-white p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <h2 className="text-sm font-medium">Choose a GitHub repo</h2>
-              {form.repo_full_name && <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs text-emerald-800">{form.repo_full_name}</span>}
+      <section className="page">
+        <div className="page-inner">
+          <PageHeader
+            eyebrow="New application"
+            title="Create app"
+            description="Choose a GitHub repo, target machine, runtime settings, and optional automation."
+            actions={<Link className="button-secondary" href="/apps"><Box size={16} />Back to apps</Link>}
+          />
+
+          <WebhookNotice autoDeployEnabled={form.auto_deploy} className="mb-6" />
+
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="space-y-6">
+              <section className="panel p-4">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <GitBranch size={18} />
+                    <h2 className="font-semibold">Repository</h2>
+                  </div>
+                  {form.repo_full_name && <StatusPill status="success" label={form.repo_full_name} />}
+                </div>
+                <label className="block">
+                  <span className="flex items-center gap-2"><Search size={15} />Search repositories</span>
+                  <input className="mt-1" value={repoSearch} onChange={(event) => setRepoSearch(event.target.value)} placeholder="owner/repo" />
+                </label>
+                {repoMessage && <p className="muted mt-3">{repoMessage}</p>}
+                {filteredRepos.length > 0 && (
+                  <div className="mt-3 max-h-80 overflow-y-auto rounded-md border border-line">
+                    {filteredRepos.map((repo) => (
+                      <button
+                        key={repo.full_name}
+                        type="button"
+                        onClick={() => selectRepo(repo)}
+                        className={`flex w-full items-center justify-between rounded-none border-b border-line bg-white px-3 py-2 text-left text-ink shadow-none last:border-b-0 hover:bg-panel ${
+                          form.repo_full_name === repo.full_name ? "bg-emerald-50" : ""
+                        }`}
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium">{repo.full_name}</span>
+                          <span className="text-xs text-neutral-600">{repo.private ? "Private" : "Public"} · {repo.default_branch}</span>
+                        </span>
+                        {form.repo_full_name === repo.full_name && <CheckCircle2 size={17} className="text-action" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-4">
+                  <Field label="GitHub repo link" value={repoLink} onChange={updateRepoLink} placeholder="https://github.com/owner/repo" />
+                  {repoLink && !form.repo_full_name && <p className="mt-2 text-sm text-red-700">Paste a GitHub URL, SSH URL, or owner/repo.</p>}
+                </div>
+              </section>
+
+              <section className="panel p-4">
+                <div className="mb-4 flex items-center gap-2">
+                  <Server size={18} />
+                  <h2 className="font-semibold">Target and route</h2>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="App name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} placeholder="my-app" />
+                  <Field label="Branch" value={form.branch} onChange={(value) => setForm({ ...form, branch: value })} placeholder="main" />
+                  <label className="block">
+                    <span>Deploy target</span>
+                    <select className="mt-1" value={form.server_id} onChange={(event) => setForm({ ...form, server_id: event.target.value })}>
+                      {servers.map((server) => <option key={server.id} value={server.id}>{server.name}{server.kind === "local" ? " (default)" : ""}</option>)}
+                      {servers.length === 0 && <option value="">This machine</option>}
+                    </select>
+                  </label>
+                  <Field label="Domain" value={form.domain} onChange={(value) => setForm({ ...form, domain: value })} placeholder="optional for local deploys" />
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <Toggle checked={form.public_exposure} onChange={(value) => setForm({ ...form, public_exposure: value })} icon={Lock} label="Publish app URL" />
+                  <Toggle checked={form.auto_deploy} onChange={(value) => setForm({ ...form, auto_deploy: value })} icon={GitBranch} label="Auto redeploy" />
+                </div>
+              </section>
+
+              <section className="panel p-4">
+                <div className="mb-4 flex items-center gap-2">
+                  <Cpu size={18} />
+                  <h2 className="font-semibold">Runtime</h2>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="Root directory" value={form.root_directory} onChange={(value) => setForm({ ...form, root_directory: value })} placeholder="." />
+                  <Field label="Container port" type="number" value={String(form.container_port)} onChange={(value) => setForm({ ...form, container_port: Number(value) })} />
+                  <Field label="Health path" value={form.health_path} onChange={(value) => setForm({ ...form, health_path: value })} />
+                  <label className="block">
+                    <span>Memory limit</span>
+                    <select className="mt-1" value={form.memory_limit_mb} onChange={(event) => setForm({ ...form, memory_limit_mb: Number(event.target.value) })}>
+                      <option value={256}>256 MB</option>
+                      <option value={512}>512 MB</option>
+                      <option value={1024}>1 GB</option>
+                      <option value={2048}>2 GB</option>
+                      <option value={4096}>4 GB</option>
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span>CPU limit</span>
+                    <select className="mt-1" value={form.cpu_limit} onChange={(event) => setForm({ ...form, cpu_limit: Number(event.target.value) })}>
+                      <option value={0.25}>0.25 CPU</option>
+                      <option value={0.5}>0.5 CPU</option>
+                      <option value={1}>1 CPU</option>
+                      <option value={2}>2 CPUs</option>
+                      <option value={4}>4 CPUs</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="mt-4 grid gap-4">
+                  <Field label="Install command" value={form.install_command} onChange={(value) => setForm({ ...form, install_command: value })} placeholder="auto, npm install, pnpm install" />
+                  <Field label="Build command" value={form.build_command} onChange={(value) => setForm({ ...form, build_command: value })} placeholder="optional, npm run build" />
+                  <Field label="Start command" value={form.start_command} onChange={(value) => setForm({ ...form, start_command: value })} placeholder="npm start, vite preview --host 0.0.0.0 --port $PORT" />
+                </div>
+              </section>
             </div>
-            <input value={repoSearch} onChange={(e) => setRepoSearch(e.target.value)} placeholder="Search repositories" />
-            {repoMessage && <p className="muted mt-3">{repoMessage}</p>}
-            {filteredRepos.length > 0 && (
-              <div className="mt-3 max-h-72 overflow-y-auto rounded-md border border-line">
-                {filteredRepos.map((repo) => (
-                  <button
-                    key={repo.full_name}
-                    type="button"
-                    onClick={() => selectRepo(repo)}
-                    className={`flex w-full items-center justify-between rounded-none border-b border-line bg-white px-3 py-2 text-left text-ink hover:bg-panel ${form.repo_full_name === repo.full_name ? "bg-emerald-50" : ""}`}
-                  >
-                    <span>
-                      <span className="block text-sm font-medium">{repo.full_name}</span>
-                      <span className="text-xs text-neutral-600">{repo.private ? "Private" : "Public"} · {repo.default_branch}</span>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
+
+            <aside className="space-y-6 xl:sticky xl:top-7 xl:self-start">
+              <section className="panel p-4">
+                <h2 className="font-semibold">Create summary</h2>
+                <div className="mt-4 grid gap-2">
+                  <Summary label="Repo" value={form.repo_full_name || "Choose a repo"} />
+                  <Summary label="Machine" value={selectedServer ? `${selectedServer.name} · ${selectedServer.status}` : "Choose a target"} />
+                  <Summary label="Route" value={form.domain || "Hostlet will generate one"} />
+                  <Summary label="Runtime" value={`:${form.container_port}${form.health_path}`} />
+                  <Summary label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
+                </div>
+                <button className="mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
+                  <Plus size={16} />
+                  {creating ? "Creating..." : "Create app"}
+                </button>
+                {message && <p className="mt-3 rounded-md border border-line bg-panel p-3 text-sm text-neutral-700">{message}</p>}
+              </section>
+              <section className="panel-muted p-4">
+                <div className="flex items-center gap-2 font-medium">
+                  <HardDrive size={17} />
+                  Target status
+                </div>
+                <p className="muted mt-2">Hostlet will build from GitHub, start a Docker container, health check it, then publish the route after success.</p>
+              </section>
+            </aside>
           </div>
-          <label className="text-sm font-medium">GitHub repo link
-            <input
-              value={repoLink}
-              onChange={(e) => updateRepoLink(e.target.value)}
-              placeholder="https://github.com/owner/repo"
-            />
-          </label>
-          {form.repo_full_name && <p className="muted">Repo: {form.repo_full_name}</p>}
-          {repoLink && !form.repo_full_name && <p className="text-sm text-red-700">Paste a GitHub URL, SSH URL, or owner/repo.</p>}
-          <label className="text-sm font-medium">app name
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="my-app" />
-          </label>
-          <label className="text-sm font-medium">branch
-            <input value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} placeholder="main" />
-          </label>
-          <label className="text-sm font-medium">deploy target
-            <select value={form.server_id} onChange={(e) => setForm({ ...form, server_id: e.target.value })}>
-              {servers.map((server) => <option key={server.id} value={server.id}>{server.name}{server.kind === "local" ? " (default)" : ""}</option>)}
-              {servers.length === 0 && <option value="">This machine</option>}
-            </select>
-          </label>
-          <div className="grid gap-4 rounded-lg border border-line bg-white p-4">
-            <h2 className="text-sm font-medium">Runtime</h2>
-            <label className="text-sm font-medium">root directory
-              <input value={form.root_directory} onChange={(e) => setForm({ ...form, root_directory: e.target.value })} placeholder="." />
-            </label>
-            <label className="text-sm font-medium">install command
-              <input value={form.install_command} onChange={(e) => setForm({ ...form, install_command: e.target.value })} placeholder="auto, npm install, pnpm install" />
-            </label>
-            <label className="text-sm font-medium">build command
-              <input value={form.build_command} onChange={(e) => setForm({ ...form, build_command: e.target.value })} placeholder="optional, npm run build" />
-            </label>
-            <label className="text-sm font-medium">start command
-              <input value={form.start_command} onChange={(e) => setForm({ ...form, start_command: e.target.value })} placeholder="npm start, vite preview --host 0.0.0.0 --port $PORT" />
-            </label>
-            <label className="text-sm font-medium">container port
-              <input value={form.container_port} type="number" onChange={(e) => setForm({ ...form, container_port: Number(e.target.value) })} />
-            </label>
-            <label className="text-sm font-medium">health path
-              <input value={form.health_path} onChange={(e) => setForm({ ...form, health_path: e.target.value })} />
-            </label>
-            <label className="text-sm font-medium">domain
-              <input value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} placeholder="optional for local deploys" />
-            </label>
-            <label className="flex items-center gap-3 text-sm font-medium">
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={form.public_exposure}
-                onChange={(e) => setForm({ ...form, public_exposure: e.target.checked })}
-              />
-              Expose through tunnel
-            </label>
-            <label className="flex items-center gap-3 text-sm font-medium">
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={form.auto_deploy}
-                onChange={(e) => setForm({ ...form, auto_deploy: e.target.checked })}
-              />
-              Auto redeploy on branch push
-            </label>
-          </div>
-          <div className="grid gap-4 rounded-lg border border-line bg-white p-4">
-            <div>
-              <h2 className="text-sm font-medium">Resource limits</h2>
-              <p className="muted mt-1">These limits apply to each running app container.</p>
-            </div>
-            <label className="text-sm font-medium">memory limit
-              <select value={form.memory_limit_mb} onChange={(e) => setForm({ ...form, memory_limit_mb: Number(e.target.value) })}>
-                <option value={256}>256 MB</option>
-                <option value={512}>512 MB</option>
-                <option value={1024}>1 GB</option>
-                <option value={2048}>2 GB</option>
-                <option value={4096}>4 GB</option>
-              </select>
-            </label>
-            <label className="text-sm font-medium">CPU limit
-              <select value={form.cpu_limit} onChange={(e) => setForm({ ...form, cpu_limit: Number(e.target.value) })}>
-                <option value={0.25}>0.25 CPU</option>
-                <option value={0.5}>0.5 CPU</option>
-                <option value={1}>1 CPU</option>
-                <option value={2}>2 CPUs</option>
-                <option value={4}>4 CPUs</option>
-              </select>
-            </label>
-          </div>
-          <button disabled={creating || !form.repo_full_name || !form.name || !form.branch} onClick={submit}>
-            {creating ? "Creating..." : "Create app"}
-          </button>
-          {message && (
-            <div className="rounded-md border border-line bg-panel p-3 text-sm">
-              <p>{message}</p>
-              {createdAppId && <Link className="button mt-3" href={`/apps/${createdAppId}`}>Open app</Link>}
-            </div>
-          )}
         </div>
       </section>
     </main>
+  );
+}
+
+function Toggle({ checked, onChange, icon: Icon, label }: { checked: boolean; onChange: (value: boolean) => void; icon: LucideIcon; label: string }) {
+  return (
+    <label className={`flex items-center gap-3 rounded-lg border p-3 ${checked ? "border-emerald-200 bg-emerald-50" : "border-line bg-white"}`}>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <Icon size={17} className={checked ? "text-action" : "text-neutral-500"} />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+function Summary({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-panel px-3 py-2 text-sm">
+      <div className="eyebrow">{label}</div>
+      <div className="mt-1 break-words font-medium">{value}</div>
+    </div>
   );
 }
 

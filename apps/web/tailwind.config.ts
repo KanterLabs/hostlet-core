@@ -5,10 +5,10 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#17201b",
-        line: "#d9ded8",
-        panel: "#f7f8f5",
-        action: "#1f7a5a"
+        ink: "#151a18",
+        line: "#dce2dd",
+        panel: "#f6f8f6",
+        action: "#176f53"
       }
     }
   },

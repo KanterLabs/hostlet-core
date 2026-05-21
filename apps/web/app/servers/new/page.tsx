@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { CheckCircle2, Clipboard, HardDrive, Plus, Server } from "lucide-react";
 import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
+import { Field, PageHeader } from "@/components/ui";
 
 export default function AddServer() {
   const [name, setName] = useState("Production VPS");
@@ -11,38 +13,80 @@ export default function AddServer() {
   const [token, setToken] = useState("");
   const [installCommand, setInstallCommand] = useState("");
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
   const [creating, setCreating] = useState(false);
+
   async function submit() {
     if (creating) return;
     setError("");
     setCreating(true);
     try {
-      const res = await api<{ id: string; installToken: string; installCommand: string }>("/api/servers", { method: "POST", body: JSON.stringify({ name, public_ip: publicIp || null }) });
+      const res = await api<{ id: string; installToken: string; installCommand: string }>("/api/servers", {
+        method: "POST",
+        body: JSON.stringify({ name, public_ip: publicIp || null }),
+      });
       setToken(res.installToken);
       setInstallCommand(res.installCommand);
-    } catch (e) {
-      setError(`Could not create server. ${e instanceof Error ? e.message : "Try signing in again."}`);
+    } catch (error) {
+      setError(`Could not create server. ${error instanceof Error ? error.message : "Try signing in again."}`);
     } finally {
       setCreating(false);
     }
   }
+
+  async function copyCommand() {
+    await navigator.clipboard.writeText(installCommand);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  }
+
   return (
-    <main className="grid min-h-screen grid-cols-[220px_1fr]">
+    <main className="app-shell">
       <Nav />
-      <section className="max-w-2xl p-8">
-        <h1 className="text-2xl font-semibold">Add VPS</h1>
-        <p className="muted mt-2">This machine is already available. Add a VPS when you want to deploy somewhere else.</p>
-        <div className="mt-6 space-y-4">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Server name" />
-          <input value={publicIp} onChange={(e) => setPublicIp(e.target.value)} placeholder="Public IP" />
-          <button disabled={creating || !name.trim()} onClick={submit}>{creating ? "Creating..." : "Create install token"}</button>
-          {error && <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
+      <section className="page">
+        <div className="page-inner max-w-5xl">
+          <PageHeader
+            eyebrow="Remote agent"
+            title="Add VPS"
+            description="Create a one-time install token, then run the generated command on the server that should run app containers."
+            actions={<Link className="button-secondary" href="/servers"><HardDrive size={16} />Back to servers</Link>}
+          />
+
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <section className="panel p-4">
+              <div className="mb-4 flex items-center gap-2">
+                <Server size={18} />
+                <h2 className="font-semibold">Server details</h2>
+              </div>
+              <div className="grid gap-4">
+                <Field label="Server name" value={name} onChange={setName} placeholder="Production VPS" />
+                <Field label="Public IP" value={publicIp} onChange={setPublicIp} placeholder="optional" />
+              </div>
+              <button className="mt-4" disabled={creating || !name.trim()} onClick={submit}>
+                <Plus size={16} />
+                {creating ? "Creating..." : "Create install token"}
+              </button>
+              {error && <p className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
+            </section>
+
+            <aside className="panel-muted p-4">
+              <div className="font-semibold">What the command does</div>
+              <p className="muted mt-2">It installs Docker and Caddy if missing, builds the Hostlet agent, registers it, and enables a systemd service.</p>
+            </aside>
+          </div>
+
           {token && (
-            <div className="rounded-lg border border-line bg-white p-4">
-              <p className="text-sm font-medium">Run this on the VPS</p>
-              <pre className="mt-3 overflow-x-auto rounded-md border border-line bg-panel p-4 text-sm">{installCommand}</pre>
+            <section className="panel mt-6 p-4">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 size={18} className="text-action" />
+                  <h2 className="font-semibold">Install command ready</h2>
+                </div>
+                <button className="button-secondary" onClick={copyCommand}><Clipboard size={16} />{copied ? "Copied" : "Copy"}</button>
+              </div>
+              <pre className="code-box">{installCommand}</pre>
               <Link className="button mt-4" href="/servers">Back to machines</Link>
-            </div>
+            </section>
           )}
         </div>
       </section>

@@ -386,8 +386,8 @@ Acceptance: old failed deploys do not accumulate forever without visibility.
 
 Improve UI errors for:
 
-- GitHub OAuth callback mismatch
-- missing OAuth env vars
+- GitHub Device Flow disabled on the OAuth App
+- missing `GITHUB_CLIENT_ID`
 - GitHub token expired
 - agent offline
 - Docker build failure

@@ -1,17 +1,24 @@
 "use client";
 
-import { apiUrl } from "@/lib/api";
 import { GitHubStatus } from "@/components/GitHubStatus";
-import { GitBranch } from "lucide-react";
+import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
+import { TerminalSquare } from "lucide-react";
 
 export default function Login() {
   return (
-    <main className="flex min-h-screen items-center justify-center p-6">
-      <section className="w-full max-w-sm rounded-lg border border-line bg-white p-6">
-        <h1 className="text-2xl font-semibold">Hostlet</h1>
-        <p className="muted mt-2">Sign in to deploy a GitHub repo on this machine or a VPS.</p>
-        <div className="mt-5"><GitHubStatus /></div>
-        <a className="button mt-6 w-full" href={`${apiUrl()}/auth/github/start`}><GitBranch size={16}/>Continue with GitHub</a>
+    <main className="flex min-h-screen items-center justify-center bg-panel p-6">
+      <section className="panel w-full max-w-md p-6">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-ink text-white">
+            <TerminalSquare size={22} />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold">Hostlet</h1>
+            <p className="muted mt-1">Sign in to manage your self-hosted deployments.</p>
+          </div>
+        </div>
+        <div className="mt-5"><GitHubStatus showConnect={false} /></div>
+        <GitHubDeviceFlow className="mt-6" buttonLabel="Continue with GitHub" fullWidth />
       </section>
     </main>
   );

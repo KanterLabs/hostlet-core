@@ -6,7 +6,7 @@ Hostlet controls Docker deployments and should be treated as infrastructure soft
 
 - First-run control-plane password with Argon2 hashing.
 - Unlock cookie separate from GitHub login.
-- GitHub OAuth with signed state cookie and stored state.
+- GitHub OAuth Device Flow for browser login and repository access.
 - GitHub access tokens encrypted at rest with AES-256-GCM.
 - App environment variables encrypted at rest.
 - HMAC-signed browser sessions.
@@ -60,9 +60,9 @@ Recommended exposure:
 
 Do not expose the Docker socket, Postgres, or Caddy admin endpoint publicly.
 
-## GitHub OAuth
+## GitHub Device Flow
 
-The GitHub OAuth callback must exactly match `PUBLIC_API_URL/auth/github/callback`.
+Hostlet uses GitHub OAuth Device Flow, so self-hosted installs do not need a redirect URI, callback URL, or OAuth client secret. Configure a GitHub OAuth App with Device Flow enabled and set `GITHUB_CLIENT_ID`.
 
 When `HOSTLET_ALLOWED_GITHUB_LOGINS` is set, only those GitHub logins can create or use Hostlet sessions. Existing accounts not in the allowlist are rejected on login.
 

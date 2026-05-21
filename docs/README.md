@@ -35,7 +35,7 @@ The wizard asks for:
 
 - Hostlet UI/API access mode: LAN only or Cloudflare Tunnel
 - LAN host/IP or Cloudflare domain settings
-- GitHub OAuth Client ID and secret
+- GitHub OAuth App Client ID with Device Flow enabled
 - allowed GitHub username
 - Hostlet repository URL for remote agent installs
 
@@ -74,10 +74,10 @@ Developers can run the CLI from source with `cargo run -p hostlet -- <command>`,
 
 Hostlet has two control-plane access modes:
 
-- **LAN only**: the Hostlet UI is opened on the local network, usually `http://HOST_IP:3000`, and the API is on `http://HOST_IP:8080`.
-- **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, OAuth callback, and webhooks share one HTTPS hostname such as `https://hostlet.example.com`.
+- **LAN only**: the Hostlet UI is opened on the local network, usually `http://HOST_IP:3000`, and the API is on `http://HOST_IP:8080`. Manual deploys work, but GitHub cannot send webhooks to a private LAN URL.
+- **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, and webhooks share one HTTPS hostname such as `https://hostlet.example.com`.
 
-These modes describe access to Hostlet itself. Deployed apps are private by default in both modes. Public app URLs are controlled per app with **Open tunnel** / **Close tunnel**.
+These modes describe access to Hostlet itself. Deployed apps are private by default in both modes. Public app URLs are controlled per app with **Publish URL** / **Make private**.
 
 ## Manual Local/LAN Setup
 
@@ -102,14 +102,22 @@ HOSTLET_ALLOWED_WEB_ORIGINS=http://10.0.0.194:3000,http://localhost:3000,http://
 
 ```text
 Homepage URL: http://10.0.0.194:3000
-Authorization callback URL: http://10.0.0.194:8080/auth/github/callback
 ```
 
-5. Add the OAuth values:
+Enable **Device Flow** in the OAuth App settings. Hostlet only needs the Client ID.
+
+LAN mode deploy flow:
+
+1. Push app changes to GitHub.
+2. Open the app in Hostlet.
+3. Click **Deploy latest**.
+
+Hostlet pulls the configured repo/branch and deploys the newest commit. Auto-redeploy requires Cloudflare Tunnel UI/API mode, another public HTTPS control-plane URL, or a separate `PUBLIC_WEBHOOK_URL`.
+
+5. Add the GitHub Device Flow value:
 
 ```bash
 GITHUB_CLIENT_ID=...
-GITHUB_CLIENT_SECRET=...
 ```
 
 6. Generate secrets:
@@ -138,27 +146,21 @@ http://10.0.0.194:3000
 
 On first run, Hostlet asks you to set a control-plane password. If `HOSTLET_SETUP_TOKEN` is set, paste it into the setup-token field. After setup, unlock the panel and continue with GitHub.
 
-## GitHub OAuth
+## GitHub Device Flow
 
-Hostlet uses GitHub OAuth for dashboard login and repository listing. The callback URL must match `PUBLIC_API_URL` exactly:
+Hostlet uses GitHub OAuth Device Flow for dashboard login and repository listing. This avoids redirect URI setup for self-hosted LAN installs.
 
-```text
-PUBLIC_API_URL/auth/github/callback
+Create a GitHub OAuth App, enable **Device Flow**, and set:
+
+```bash
+GITHUB_CLIENT_ID=...
 ```
 
-Common examples:
-
-```text
-http://localhost:8080/auth/github/callback
-http://10.0.0.194:8080/auth/github/callback
-https://api.hostlet.example.com/auth/github/callback
-```
-
-If GitHub shows `redirect_uri is not associated with this application`, update the OAuth App callback URL to the exact URL Hostlet is using.
+No `GITHUB_CLIENT_SECRET` or callback URL is required. In the UI, click **Connect GitHub**, open the GitHub verification page, and enter the displayed code.
 
 ## First-Run Password
 
-The control-plane password is separate from GitHub. It protects the panel before OAuth and is required on every browser session before using the UI.
+The control-plane password is separate from GitHub. It protects the panel before GitHub login and is required on every browser session before using the UI.
 
 In secure mode, set `HOSTLET_SETUP_TOKEN`. First setup requests must include that token in the setup-token field. After the password is set, the setup token is no longer used for normal unlocks.
 
@@ -226,8 +228,8 @@ CLOUDFLARE_TUNNEL_TOKEN=...
 Behavior:
 
 - New apps default to private.
-- **Open tunnel** creates or updates a proxied Cloudflare CNAME/Tunnel record for the app hostname.
-- **Close tunnel** deletes the app hostname record.
+- **Publish URL** creates or updates a proxied Cloudflare CNAME/Tunnel record for the app hostname.
+- **Make private** deletes the app hostname record.
 - Hostlet only manages single-label hostnames that start with `HOSTLET_DOMAIN_PREFIX` under `HOSTLET_BASE_DOMAIN`.
 - Existing unrelated records, including the apex portfolio site, are not managed by Hostlet.
 
@@ -245,11 +247,36 @@ Caddy routes the Hostlet control-plane hostname to the web/API services and rout
 Hostlet accepts GitHub push webhooks at:
 
 ```text
-PUBLIC_API_URL/webhooks/github
+PUBLIC_WEBHOOK_URL/webhooks/github
 ```
 
-Configure the repository webhook manually:
+If `PUBLIC_WEBHOOK_URL` is empty, Hostlet falls back to `PUBLIC_API_URL` for the webhook setup UI. GitHub webhooks require the payload URL to be public HTTPS. These do not work for real GitHub webhook delivery:
 
+```text
+http://localhost:8080
+http://10.0.0.194:8080
+http://192.168.1.20:8080
+```
+
+Those URLs are fine for Device Flow sign-in and LAN/manual deploys.
+
+If you keep `PUBLIC_API_URL` in LAN mode but expose webhooks through a tunnel, set:
+
+```text
+PUBLIC_WEBHOOK_URL=https://hostlet.example.com
+```
+
+In LAN mode, push to GitHub and click **Deploy latest** in Hostlet.
+
+For auto-redeploy, run tunnel mode or another public HTTPS reverse proxy:
+
+```bash
+hostlet up --tunnel
+```
+
+Then configure the repository webhook manually:
+
+- Payload URL: `PUBLIC_WEBHOOK_URL/webhooks/github`, or `PUBLIC_API_URL/webhooks/github` when `PUBLIC_API_URL` is public HTTPS
 - Content type: `application/json`
 - Secret: `GITHUB_WEBHOOK_SECRET`
 - Events: push

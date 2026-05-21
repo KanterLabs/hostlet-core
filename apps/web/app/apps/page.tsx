@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Box, ExternalLink, ListFilter, Plus, ScrollText } from "lucide-react";
 import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
+import { EmptyState, PageHeader, StatusPill } from "@/components/ui";
 
 type Deployment = {
   id: string;
@@ -43,71 +45,95 @@ type App = {
 export default function Apps() {
   const [apps, setApps] = useState<App[]>([]);
   const [message, setMessage] = useState("Loading apps...");
+  const [filter, setFilter] = useState<"all" | "active" | "failed" | "public">("all");
 
   useEffect(() => {
     api<App[]>("/api/apps")
       .then((rows) => {
         setApps(rows);
-        setMessage(rows.length ? "" : "Create an app to deploy your first repo.");
+        setMessage(rows.length ? "" : "No apps yet.");
       })
       .catch((e) => setMessage(`Could not load apps. ${e instanceof Error ? e.message : "Sign in again."}`));
   }, []);
 
+  const filtered = useMemo(() => {
+    return apps.filter((app) => {
+      if (filter === "active") return isActiveDeploy(app.latestDeployment?.status);
+      if (filter === "failed") return app.latestDeployment?.status === "failed";
+      if (filter === "public") return !!app.publicExposure;
+      return true;
+    });
+  }, [apps, filter]);
+
   return (
-    <main className="grid min-h-screen grid-cols-[220px_1fr]">
+    <main className="app-shell">
       <Nav />
-      <section className="p-8">
-        <div className="mb-6 flex items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold">Apps</h1>
-            <p className="muted mt-1">Deployable projects and their latest state.</p>
+      <section className="page">
+        <div className="page-inner">
+          <PageHeader
+            eyebrow="Applications"
+            title="Apps"
+            description="Deployable projects, routes, latest health, automation, and public exposure."
+            actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
+          />
+
+          <div className="mb-5 flex flex-wrap items-center gap-2">
+            <span className="button-secondary min-h-9 cursor-default"><ListFilter size={16} />Filter</span>
+            {(["all", "active", "failed", "public"] as const).map((item) => (
+              <button key={item} className={filter === item ? "" : "button-secondary"} onClick={() => setFilter(item)}>
+                {item}
+              </button>
+            ))}
           </div>
-          <Link className="button shrink-0" href="/apps/new">Create app</Link>
-        </div>
 
-        <div className="grid gap-3">
-          {apps.map((app) => (
-            <article key={app.id} className="rounded-lg border border-line bg-white p-4">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Link href={`/apps/${app.id}`} className="text-lg font-semibold hover:text-action">{app.name}</Link>
-                    <StatusBadge status={app.latestDeployment?.status || app.currentDeployment?.status || "not deployed"} />
-                    <ServerBadge status={app.server?.status || "offline"} />
+          {filtered.length > 0 ? (
+            <div className="grid gap-4">
+              {filtered.map((app) => (
+                <article key={app.id} className="panel overflow-hidden">
+                  <div className="flex flex-wrap items-start justify-between gap-4 p-4">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Link href={`/apps/${app.id}`} className="truncate text-xl font-semibold hover:text-action">{app.name}</Link>
+                        <StatusPill status={app.latestDeployment?.status || app.currentDeployment?.status || "not deployed"} />
+                        <StatusPill status={app.server?.status || "offline"} label={`machine ${app.server?.status || "offline"}`} />
+                      </div>
+                      <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Link className="button-secondary" href={`/apps/${app.id}`}><Box size={16} />Open</Link>
+                      {app.latestDeployment?.id && (
+                        <Link className="button-secondary" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />Logs</Link>
+                      )}
+                    </div>
                   </div>
-                  <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
-                </div>
-                <div className="flex gap-2">
-                  <Link className="button bg-neutral-800 hover:bg-neutral-900" href={`/apps/${app.id}`}>Open</Link>
-                  {app.latestDeployment?.id && (
-                    <Link className="button bg-white text-neutral-900 ring-1 ring-line hover:bg-panel" href={`/deployments/${app.latestDeployment.id}`}>Logs</Link>
+
+                  <div className="grid border-t border-line md:grid-cols-4">
+                    <Info label="Domain" value={displayDomain(app.domain)} href={domainHref(app)} />
+                    <Info label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
+                    <Info label="Runtime" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
+                    <Info label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
+                    <Info label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
+                    <Info label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
+                    <Info label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />
+                    <Info label="Webhook" value={webhookSummary(app.latestWebhook)} />
+                  </div>
+
+                  {app.latestDeployment?.failure && (
+                    <div className="border-t border-red-100 bg-red-50 px-4 py-3 text-sm text-red-900">
+                      {app.latestDeployment.failure}
+                    </div>
                   )}
-                </div>
-              </div>
-
-              <div className="mt-4 grid gap-3 md:grid-cols-3">
-                <Info label="Domain" value={displayDomain(app.domain)} href={domainHref(app)} />
-                <Info label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
-                <Info label="Container" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
-                <Info label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
-                <Info label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
-                <Info label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
-                <Info label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />
-                <Info label="Webhook" value={webhookSummary(app.latestWebhook)} />
-              </div>
-
-              {app.latestDeployment?.failure && (
-                <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
-                  {app.latestDeployment.failure}
-                </div>
-              )}
-            </article>
-          ))}
-          {message && (
-            <div className="rounded-lg border border-line bg-white p-6">
-              <p className="text-sm text-neutral-700">{message}</p>
-              <Link className="button mt-4" href="/apps/new">Create app</Link>
+                </article>
+              ))}
             </div>
+          ) : (
+            <EmptyState
+              icon={Box}
+              title={message || "No apps match this filter"}
+              description="Create an app from a GitHub repository, then deploy it to this machine or a connected VPS."
+              actionHref="/apps/new"
+              actionLabel="Create app"
+            />
           )}
         </div>
       </section>
@@ -117,28 +143,18 @@ export default function Apps() {
 
 function Info({ label, value, href }: { label: string; value?: string | null; href?: string | null }) {
   return (
-    <div className="min-w-0 rounded-md border border-line bg-panel px-3 py-2">
-      <div className="text-xs font-medium uppercase tracking-wide text-neutral-500">{label}</div>
+    <div className="min-w-0 border-t border-line px-4 py-3 first:border-t-0 md:border-l md:border-t-0 md:first:border-l-0">
+      <div className="eyebrow">{label}</div>
       {href ? (
-        <a className="mt-1 block truncate text-sm font-medium hover:text-action" href={href} target="_blank" rel="noreferrer">{value || "Not set"}</a>
+        <a className="mt-1 flex items-center gap-1 truncate text-sm font-medium hover:text-action" href={href} target="_blank" rel="noreferrer">
+          <span className="truncate">{value || "Not set"}</span>
+          <ExternalLink size={13} />
+        </a>
       ) : (
         <div className="mt-1 truncate text-sm font-medium">{value || "Not set"}</div>
       )}
     </div>
   );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const tone = status === "success" ? "bg-emerald-50 text-emerald-800 ring-emerald-200"
-    : status === "failed" ? "bg-red-50 text-red-800 ring-red-200"
-    : ["running", "building", "starting", "health_checking", "routing", "queued"].includes(status) ? "bg-amber-50 text-amber-800 ring-amber-200"
-    : "bg-neutral-100 text-neutral-700 ring-neutral-200";
-  return <span className={`rounded-full px-2 py-1 text-xs font-medium ring-1 ${tone}`}>{status.replaceAll("_", " ")}</span>;
-}
-
-function ServerBadge({ status }: { status: string }) {
-  const online = status === "online";
-  return <span className={`rounded-full px-2 py-1 text-xs font-medium ring-1 ${online ? "bg-emerald-50 text-emerald-800 ring-emerald-200" : "bg-neutral-100 text-neutral-700 ring-neutral-200"}`}>machine {status}</span>;
 }
 
 function shortSha(sha?: string | null) {
@@ -154,8 +170,8 @@ function deploymentSummary(deployment?: Deployment | null) {
 
 function webhookSummary(webhook?: App["latestWebhook"]) {
   if (!webhook) return "No branch push seen";
-  const when = webhook.createdAt ? ` · ${new Date(webhook.createdAt).toLocaleString()}` : "";
-  return webhook.ignoredReason ? `${webhook.status}: ${webhook.ignoredReason}` : `${webhook.status}${when}`;
+  const sha = webhook.commitSha ? ` ${webhook.commitSha.slice(0, 7)}` : "";
+  return webhook.ignoredReason ? `${webhook.status}${sha}: ${webhook.ignoredReason}` : `${webhook.status}${sha}`;
 }
 
 function domainHref(app: App) {
@@ -188,4 +204,8 @@ function displayDomain(domain: string) {
     return domain;
   }
   return domain;
+}
+
+function isActiveDeploy(status?: string | null) {
+  return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
 }

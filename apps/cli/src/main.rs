@@ -90,13 +90,9 @@ async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
         .with_prompt("Allowed GitHub username")
         .interact_text()?;
     let github_client_id: String = Input::with_theme(&theme)
-        .with_prompt("GitHub OAuth Client ID")
+        .with_prompt("GitHub OAuth App Client ID (Device Flow enabled)")
         .allow_empty(false)
         .interact_text()?;
-    let github_client_secret = Password::with_theme(&theme)
-        .with_prompt("GitHub OAuth Client Secret")
-        .allow_empty_password(false)
-        .interact()?;
 
     let repo_url_default = git_remote_url(root).unwrap_or_default();
     let hostlet_repo_url: String = Input::with_theme(&theme)
@@ -107,7 +103,6 @@ async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     let mut env = default_env();
     env.insert("HOSTLET_ALLOWED_GITHUB_LOGINS".into(), allowed_login);
     env.insert("GITHUB_CLIENT_ID".into(), github_client_id);
-    env.insert("GITHUB_CLIENT_SECRET".into(), github_client_secret);
     env.insert("HOSTLET_REPO_URL".into(), hostlet_repo_url);
 
     if access_mode == 0 {
@@ -197,6 +192,10 @@ async fn configure_cloudflare(
 
     env.insert("PUBLIC_WEB_URL".into(), format!("https://{hostlet_host}"));
     env.insert("PUBLIC_API_URL".into(), format!("https://{hostlet_host}"));
+    env.insert(
+        "PUBLIC_WEBHOOK_URL".into(),
+        format!("https://{hostlet_host}"),
+    );
     env.insert("HOSTLET_CONTROL_PLANE_HOST".into(), hostlet_host.clone());
     env.insert(
         "HOSTLET_ALLOWED_WEB_ORIGINS".into(),
@@ -447,6 +446,7 @@ async fn doctor(root: &Path) -> anyhow::Result<()> {
         "LOCAL_AGENT_TOKEN",
         "HOSTLET_SETUP_TOKEN",
         "HOSTLET_ALLOWED_GITHUB_LOGINS",
+        "GITHUB_CLIENT_ID",
     ] {
         check(
             &format!("{key} set"),

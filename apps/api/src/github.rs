@@ -14,8 +14,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let oauth_configured =
-        !state.github_client_id.trim().is_empty() && !state.github_client_secret.trim().is_empty();
+    let oauth_configured = !state.github_client_id.trim().is_empty();
     let webhook_configured = !state.github_webhook_secret.trim().is_empty()
         && state.github_webhook_secret != "dev-webhook-secret";
 
@@ -26,7 +25,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
             "authenticated": false,
             "tokenValid": null,
             "login": null,
-            "message": if oauth_configured { "GitHub OAuth is configured. Sign in to verify your account token." } else { "GitHub OAuth is missing GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET." }
+            "message": if oauth_configured { "GitHub Device Flow is configured. Connect GitHub to verify your account token." } else { "GitHub Device Flow is missing GITHUB_CLIENT_ID." }
         })).into_response();
     };
 
@@ -41,7 +40,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
             "authenticated": true,
             "tokenValid": false,
             "login": null,
-            "message": "No GitHub token is stored for this session. Sign in with GitHub again."
+            "message": "No GitHub token is stored for this session. Connect GitHub again."
         }))
         .into_response();
     };
@@ -86,7 +85,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
             "authenticated": true,
             "tokenValid": false,
             "login": null,
-            "message": format!("GitHub token check failed with status {}. Sign in again.", resp.status())
+            "message": format!("GitHub token check failed with status {}. Connect GitHub again.", resp.status())
         })).into_response(),
         Err(_) => Json(serde_json::json!({
             "oauthConfigured": oauth_configured,

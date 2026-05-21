@@ -7,32 +7,28 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::Row;
-use url::Url;
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "hostlet_session";
-const OAUTH_STATE_COOKIE: &str = "hostlet_oauth_state";
-const OAUTH_WEB_ORIGIN_COOKIE: &str = "hostlet_oauth_web_origin";
 const UNLOCK_COOKIE: &str = "hostlet_unlock";
 const SESSION_TTL_DAYS: i64 = 14;
-const OAUTH_STATE_TTL_MINUTES: i64 = 10;
 const UNLOCK_TTL_HOURS: i64 = 12;
 const CONTROL_PLANE_PASSWORD_KEY: &str = "control_plane_password_hash";
-const OAUTH_STATE_KEY_PREFIX: &str = "oauth_state:";
+const DEVICE_FLOW_KEY_PREFIX: &str = "github_device_flow:";
 
 #[derive(Deserialize)]
-pub struct CallbackQuery {
-    code: String,
-    state: String,
+pub struct DevicePollBody {
+    flow_id: String,
 }
 
 #[derive(Deserialize)]
@@ -55,16 +51,26 @@ struct GitHubUser {
 }
 
 #[derive(Serialize, Deserialize)]
-struct StoredOAuthState {
+struct StoredDeviceFlow {
+    device_code: String,
     web_origin: String,
     expires_at: i64,
+    interval: i64,
 }
 
-pub async fn github_start(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if state.github_client_id.trim().is_empty() || state.github_client_secret.trim().is_empty() {
+struct AuthorizedGitHubUser {
+    id: Uuid,
+    login: String,
+}
+
+pub async fn github_device_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if state.github_client_id.trim().is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub OAuth is not configured",
+            "GitHub device flow is not configured. Set GITHUB_CLIENT_ID and enable Device Flow on the GitHub OAuth App.",
         )
             .into_response();
     }
@@ -81,120 +87,257 @@ pub async fn github_start(State(state): State<AppState>, headers: HeaderMap) -> 
     {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let csrf_state = random_token(48);
-    let callback_base = state.public_api_url.clone();
-    let callback_url = format!(
-        "{}/auth/github/callback",
-        callback_base.trim_end_matches('/')
-    );
-    let url = Url::parse_with_params(
-        "https://github.com/login/oauth/authorize",
-        &[
-            ("client_id", state.github_client_id.as_str()),
-            ("scope", "repo read:user"),
-            ("redirect_uri", callback_url.as_str()),
-            ("state", csrf_state.as_str()),
-        ],
-    )
-    .expect("static GitHub OAuth URL is valid");
-    let secure = cookie_secure(&callback_base);
     let web_origin = request_web_origin(&headers)
         .filter(|origin| state.web_origin_allowed(origin))
         .unwrap_or_else(|| state.public_web_url.clone());
-    if let Err(err) = store_oauth_state(&state, &csrf_state, &web_origin).await {
-        tracing::error!(error = %err, "failed to store OAuth state");
+
+    let client = reqwest::Client::new();
+    let response = match client
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", state.github_client_id.as_str()),
+            ("scope", "repo read:user"),
+        ])
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::warn!(error = %err, "GitHub device code request failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "Could not reach GitHub device authorization endpoint",
+            )
+                .into_response();
+        }
+    };
+    let payload = match response.json::<Value>().await {
+        Ok(payload) => payload,
+        Err(err) => {
+            tracing::warn!(error = %err, "GitHub device code response was not JSON");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "GitHub returned an unexpected device flow response",
+            )
+                .into_response();
+        }
+    };
+    if let Some(error) = payload.get("error").and_then(|value| value.as_str()) {
+        let description = payload
+            .get("error_description")
+            .and_then(|value| value.as_str())
+            .unwrap_or(error);
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("GitHub device flow failed: {description}"),
+        )
+            .into_response();
+    }
+
+    let Some(device_code) = payload.get("device_code").and_then(|value| value.as_str()) else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "GitHub did not return a device code",
+        )
+            .into_response();
+    };
+    let Some(user_code) = payload.get("user_code").and_then(|value| value.as_str()) else {
+        return (StatusCode::BAD_GATEWAY, "GitHub did not return a user code").into_response();
+    };
+    let Some(verification_uri) = payload
+        .get("verification_uri")
+        .and_then(|value| value.as_str())
+    else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "GitHub did not return a verification URL",
+        )
+            .into_response();
+    };
+    let expires_in = payload
+        .get("expires_in")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(900)
+        .max(60);
+    let interval = payload
+        .get("interval")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(5)
+        .max(5);
+    let flow_id = random_token(32);
+    let stored = StoredDeviceFlow {
+        device_code: device_code.to_string(),
+        web_origin,
+        expires_at: (Utc::now() + Duration::seconds(expires_in)).timestamp(),
+        interval,
+    };
+    if let Err(err) = store_device_flow(&state, &flow_id, &stored).await {
+        tracing::error!(error = %err, "failed to store GitHub device flow");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    let state_cookie = build_cookie(
-        OAUTH_STATE_COOKIE,
-        &signed_value(
-            &state.session_secret,
-            &csrf_state,
-            Duration::minutes(OAUTH_STATE_TTL_MINUTES),
-        ),
-        Some(Duration::minutes(OAUTH_STATE_TTL_MINUTES)),
-        secure,
-        "/auth/github/callback",
-    );
-    let web_origin_cookie = build_cookie(
-        OAUTH_WEB_ORIGIN_COOKIE,
-        &signed_value(
-            &state.session_secret,
-            &web_origin,
-            Duration::minutes(OAUTH_STATE_TTL_MINUTES),
-        ),
-        Some(Duration::minutes(OAUTH_STATE_TTL_MINUTES)),
-        secure,
-        "/auth/github/callback",
-    );
-    with_cookies(
-        Redirect::temporary(url.as_str()).into_response(),
-        [state_cookie, web_origin_cookie],
-    )
+
+    Json(serde_json::json!({
+        "flowId": flow_id,
+        "userCode": user_code,
+        "verificationUri": verification_uri,
+        "verificationUriComplete": payload.get("verification_uri_complete").and_then(|value| value.as_str()),
+        "expiresIn": expires_in,
+        "interval": interval,
+    }))
+    .into_response()
 }
 
-pub async fn github_callback(
+pub async fn github_device_poll(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<CallbackQuery>,
+    Json(body): Json<DevicePollBody>,
 ) -> impl IntoResponse {
-    let Some(cookie_state) = cookie_value(&headers, OAUTH_STATE_COOKIE)
-        .and_then(|value| verify_signed_value(&state.session_secret, value))
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    if !constant_time_eq(cookie_state.as_bytes(), q.state.as_bytes()) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let flow_id = body.flow_id.trim();
+    if flow_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "flow_id is required").into_response();
     }
-    let Some(stored_web_origin) = consume_oauth_state(&state, &q.state).await.ok().flatten() else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let Some(mut flow) = load_device_flow(&state, flow_id).await.ok().flatten() else {
+        return Json(serde_json::json!({
+            "status": "expired",
+            "message": "This GitHub device login expired. Start a new login.",
+        }))
+        .into_response();
     };
-    if !state.web_origin_allowed(&stored_web_origin) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if Utc::now().timestamp() > flow.expires_at {
+        let _ = delete_device_flow(&state, flow_id).await;
+        return Json(serde_json::json!({
+            "status": "expired",
+            "message": "This GitHub device login expired. Start a new login.",
+        }))
+        .into_response();
     }
 
-    let callback_base = state.public_api_url.clone();
-    let callback_url = format!(
-        "{}/auth/github/callback",
-        callback_base.trim_end_matches('/')
-    );
-    match exchange_and_store(&state, q.code, &callback_url).await {
-        Ok(user_id) => {
-            let secure = cookie_secure(&state.public_api_url);
-            let session = build_cookie(
-                SESSION_COOKIE,
-                &signed_value(
-                    &state.session_secret,
-                    &user_id.to_string(),
-                    Duration::days(SESSION_TTL_DAYS),
-                ),
-                Some(Duration::days(SESSION_TTL_DAYS)),
-                secure,
-                "/",
-            );
-            let clear_oauth = expire_cookie(OAUTH_STATE_COOKIE, secure, "/auth/github/callback");
-            let web_origin = stored_web_origin;
-            let clear_web_origin =
-                expire_cookie(OAUTH_WEB_ORIGIN_COOKIE, secure, "/auth/github/callback");
-            with_cookies(
-                Redirect::temporary(&web_origin).into_response(),
-                [session, clear_oauth, clear_web_origin],
-            )
-        }
+    let client = reqwest::Client::new();
+    let response = match client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", state.github_client_id.as_str()),
+            ("device_code", flow.device_code.as_str()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ])
+        .send()
+        .await
+    {
+        Ok(response) => response,
         Err(err) => {
-            let clear_oauth = expire_cookie(
-                OAUTH_STATE_COOKIE,
-                cookie_secure(&state.public_api_url),
-                "/auth/github/callback",
-            );
-            with_cookies(
-                (
+            tracing::warn!(error = %err, "GitHub device token poll failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "Could not reach GitHub device authorization endpoint",
+            )
+                .into_response();
+        }
+    };
+    let payload = match response.json::<Value>().await {
+        Ok(payload) => payload,
+        Err(err) => {
+            tracing::warn!(error = %err, "GitHub device token response was not JSON");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "GitHub returned an unexpected device authorization response",
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(access_token) = payload.get("access_token").and_then(|value| value.as_str()) {
+        let token = GitHubToken {
+            access_token: access_token.to_string(),
+            scope: payload
+                .get("scope")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        };
+        match store_github_access_token(&state, token).await {
+            Ok(user) => {
+                let _ = delete_device_flow(&state, flow_id).await;
+                let session = build_cookie(
+                    SESSION_COOKIE,
+                    &signed_value(
+                        &state.session_secret,
+                        &user.id.to_string(),
+                        Duration::days(SESSION_TTL_DAYS),
+                    ),
+                    Some(Duration::days(SESSION_TTL_DAYS)),
+                    cookie_secure(&state.public_api_url),
+                    "/",
+                );
+                return with_cookies(
+                    Json(serde_json::json!({
+                        "status": "authorized",
+                        "message": "GitHub connected.",
+                        "login": user.login,
+                        "redirectTo": flow.web_origin,
+                    }))
+                    .into_response(),
+                    [session],
+                );
+            }
+            Err(err) => {
+                let _ = delete_device_flow(&state, flow_id).await;
+                return (
                     StatusCode::BAD_REQUEST,
                     format!("GitHub login failed: {err}"),
                 )
-                    .into_response(),
-                [clear_oauth],
+                    .into_response();
+            }
+        }
+    }
+
+    let error = payload
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("authorization_pending");
+    match error {
+        "authorization_pending" => Json(serde_json::json!({
+            "status": "pending",
+            "message": "Waiting for GitHub authorization.",
+            "interval": flow.interval,
+        }))
+        .into_response(),
+        "slow_down" => {
+            flow.interval += 5;
+            let _ = store_device_flow(&state, flow_id, &flow).await;
+            Json(serde_json::json!({
+                "status": "pending",
+                "message": "GitHub asked Hostlet to slow down polling.",
+                "interval": flow.interval,
+            }))
+            .into_response()
+        }
+        "expired_token" => {
+            let _ = delete_device_flow(&state, flow_id).await;
+            Json(serde_json::json!({
+                "status": "expired",
+                "message": "This GitHub device login expired. Start a new login.",
+            }))
+            .into_response()
+        }
+        "access_denied" => {
+            let _ = delete_device_flow(&state, flow_id).await;
+            Json(serde_json::json!({
+                "status": "denied",
+                "message": "GitHub authorization was cancelled.",
+            }))
+            .into_response()
+        }
+        _ => {
+            let description = payload
+                .get("error_description")
+                .and_then(|value| value.as_str())
+                .unwrap_or("GitHub device authorization failed.");
+            let _ = delete_device_flow(&state, flow_id).await;
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("GitHub device authorization failed: {description}"),
             )
+                .into_response()
         }
     }
 }
@@ -220,8 +363,6 @@ pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
         [
             expire_cookie(SESSION_COOKIE, secure, "/"),
             expire_cookie(UNLOCK_COOKIE, secure, "/"),
-            expire_cookie(OAUTH_STATE_COOKIE, secure, "/auth/github/callback"),
-            expire_cookie(OAUTH_WEB_ORIGIN_COOKIE, secure, "/auth/github/callback"),
         ],
     )
 }
@@ -315,16 +456,11 @@ fn control_plane_unlocked(headers: &HeaderMap, session_secret: &str) -> bool {
         .is_some_and(|value| value == "unlocked")
 }
 
-async fn exchange_and_store(
+async fn store_github_access_token(
     state: &AppState,
-    code: String,
-    redirect_uri: &str,
-) -> anyhow::Result<Uuid> {
+    token: GitHubToken,
+) -> anyhow::Result<AuthorizedGitHubUser> {
     let client = reqwest::Client::new();
-    let token: GitHubToken = client.post("https://github.com/login/oauth/access_token")
-        .header("Accept", "application/json")
-        .json(&serde_json::json!({"client_id": state.github_client_id, "client_secret": state.github_client_secret, "code": code, "redirect_uri": redirect_uri}))
-        .send().await?.error_for_status()?.json().await?;
     let gh_user: GitHubUser = client
         .get("https://api.github.com/user")
         .bearer_auth(&token.access_token)
@@ -362,7 +498,10 @@ async fn exchange_and_store(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(user_id)
+    Ok(AuthorizedGitHubUser {
+        id: user_id,
+        login: gh_user.login,
+    })
 }
 
 fn signed_value(secret: &str, value: &str, ttl: Duration) -> String {
@@ -531,39 +670,44 @@ async fn store_control_plane_password_hash(state: &AppState, hash: &str) -> anyh
     Ok(done.rows_affected() == 1)
 }
 
-async fn store_oauth_state(
+async fn store_device_flow(
     state: &AppState,
-    csrf_state: &str,
-    web_origin: &str,
+    flow_id: &str,
+    flow: &StoredDeviceFlow,
 ) -> anyhow::Result<()> {
-    let stored = StoredOAuthState {
-        web_origin: web_origin.to_string(),
-        expires_at: (Utc::now() + Duration::minutes(OAUTH_STATE_TTL_MINUTES)).timestamp(),
-    };
     sqlx::query(
         "INSERT INTO settings (key,value) VALUES ($1,$2)
          ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
     )
-    .bind(format!("{OAUTH_STATE_KEY_PREFIX}{csrf_state}"))
-    .bind(serde_json::to_string(&stored)?)
+    .bind(format!("{DEVICE_FLOW_KEY_PREFIX}{flow_id}"))
+    .bind(serde_json::to_string(flow)?)
     .execute(&state.db)
     .await?;
     Ok(())
 }
 
-async fn consume_oauth_state(state: &AppState, csrf_state: &str) -> anyhow::Result<Option<String>> {
-    let row = sqlx::query("DELETE FROM settings WHERE key=$1 RETURNING value")
-        .bind(format!("{OAUTH_STATE_KEY_PREFIX}{csrf_state}"))
+async fn load_device_flow(
+    state: &AppState,
+    flow_id: &str,
+) -> anyhow::Result<Option<StoredDeviceFlow>> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key=$1")
+        .bind(format!("{DEVICE_FLOW_KEY_PREFIX}{flow_id}"))
         .fetch_optional(&state.db)
         .await?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let stored: StoredOAuthState = serde_json::from_str(row.get("value"))?;
-    if Utc::now().timestamp() > stored.expires_at {
-        return Ok(None);
-    }
-    Ok(Some(stored.web_origin))
+    Ok(Some(serde_json::from_str(
+        row.get::<String, _>("value").as_str(),
+    )?))
+}
+
+async fn delete_device_flow(state: &AppState, flow_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM settings WHERE key=$1")
+        .bind(format!("{DEVICE_FLOW_KEY_PREFIX}{flow_id}"))
+        .execute(&state.db)
+        .await?;
+    Ok(())
 }
 
 async fn single_existing_user_id(state: &AppState) -> Option<Uuid> {

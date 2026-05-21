@@ -19,7 +19,6 @@ pub struct AppState {
     pub db: PgPool,
     pub crypto: Crypto,
     pub github_client_id: String,
-    pub github_client_secret: String,
     pub github_webhook_secret: String,
     pub public_api_url: String,
     pub public_web_url: String,
@@ -89,7 +88,6 @@ impl AppState {
             db,
             crypto,
             github_client_id: std::env::var("GITHUB_CLIENT_ID").unwrap_or_default(),
-            github_client_secret: std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default(),
             github_webhook_secret: secret_from_env(
                 "GITHUB_WEBHOOK_SECRET",
                 DEV_GITHUB_WEBHOOK_SECRET,

@@ -2,23 +2,113 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: light;
+  --ink: #151a18;
+  --muted: #68736d;
+  --line: #dce2dd;
+  --panel: #f6f8f6;
+  --surface: #ffffff;
+  --action: #176f53;
+  --action-strong: #11563f;
+}
+
+html {
+  background: var(--panel);
+}
+
 body {
-  background: #fbfcfa;
-  color: #17201b;
+  background: #f6f8f6;
+  color: var(--ink);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
 * {
   min-width: 0;
 }
 
+::selection {
+  background: #d4f2e4;
+}
+
+a {
+  text-decoration: none;
+}
+
 input, select, textarea {
-  @apply w-full rounded-md border border-line bg-white px-3 py-2 text-sm outline-none focus:border-action;
+  @apply w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-action focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-500;
+}
+
+input[type="checkbox"] {
+  @apply h-4 w-4 rounded border-line accent-action;
+}
+
+label {
+  @apply text-sm font-medium text-ink;
 }
 
 button, .button {
-  @apply inline-flex items-center justify-center gap-2 rounded-md bg-action px-3 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:opacity-50;
+  @apply inline-flex min-h-9 items-center justify-center gap-2 rounded-md bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.button-secondary {
+  @apply bg-white text-ink ring-1 ring-line shadow-none hover:bg-panel;
+}
+
+.button-danger {
+  @apply bg-red-700 text-white hover:bg-red-800 focus:ring-red-200;
+}
+
+.app-shell {
+  @apply grid min-h-screen grid-cols-1 lg:grid-cols-[244px_minmax(0,1fr)];
+}
+
+.page {
+  @apply min-w-0 px-4 py-5 sm:px-6 lg:px-8 lg:py-7;
+}
+
+.page-inner {
+  @apply mx-auto w-full max-w-7xl;
+}
+
+.panel {
+  @apply rounded-lg border border-line bg-white shadow-sm shadow-neutral-950/5;
+}
+
+.panel-muted {
+  @apply rounded-lg border border-line bg-panel;
+}
+
+.metric {
+  @apply rounded-lg border border-line bg-white p-4 shadow-sm shadow-neutral-950/5;
+}
+
+.pill {
+  @apply inline-flex min-h-7 items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ring-1;
 }
 
 .muted {
   @apply text-sm text-neutral-600;
+}
+
+.eyebrow {
+  @apply text-xs font-medium text-neutral-500;
+}
+
+.code-box {
+  @apply overflow-x-auto rounded-md border border-line bg-neutral-950 p-4 font-mono text-sm text-green-100;
+}
+
+.table-row {
+  @apply grid gap-3 border-t border-line px-4 py-3 first:border-t-0;
+}
+
+.skeleton {
+  @apply animate-pulse rounded-md bg-neutral-200;
+}
+
+@media (max-width: 1023px) {
+  .app-shell {
+    padding-bottom: 72px;
+  }
 }

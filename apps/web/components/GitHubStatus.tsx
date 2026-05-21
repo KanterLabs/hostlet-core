@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, CircleAlert, CircleDashed } from "lucide-react";
-import { api, apiUrl } from "@/lib/api";
+import { CheckCircle2, CircleAlert, CircleDashed, GitBranch } from "lucide-react";
+import { api } from "@/lib/api";
+import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
 
 type Status = {
   oauthConfigured: boolean;
@@ -13,7 +14,7 @@ type Status = {
   message: string;
 };
 
-export function GitHubStatus({ compact = false }: { compact?: boolean }) {
+export function GitHubStatus({ compact = false, showConnect = true }: { compact?: boolean; showConnect?: boolean }) {
   const [status, setStatus] = useState<Status | null>(null);
 
   useEffect(() => {
@@ -37,23 +38,20 @@ export function GitHubStatus({ compact = false }: { compact?: boolean }) {
     : "border-red-200 bg-red-50 text-red-900";
 
   return (
-    <div className={`rounded-md border p-3 text-sm ${tone}`}>
+    <div className={`rounded-lg border p-3 text-sm shadow-sm shadow-neutral-950/5 ${tone}`}>
       <div className="flex items-center gap-2 font-medium">
-        {icon}
-        <span>{status?.tokenValid ? `GitHub connected as ${status.login}` : status?.oauthConfigured ? "GitHub OAuth configured" : "GitHub setup needed"}</span>
+        <GitBranch size={16} />
+        <span className="min-w-0 truncate">{status?.tokenValid ? `GitHub connected as ${status.login}` : status?.oauthConfigured ? "GitHub Device Flow ready" : "GitHub setup needed"}</span>
+        <span className="ml-auto shrink-0">{icon}</span>
       </div>
       {!compact && <p className="mt-2">{status?.message || "Checking GitHub connection..."}</p>}
       {!compact && status && (
         <>
-          <div className="mt-2 flex gap-2 text-xs">
-            <span>OAuth: {status.oauthConfigured ? "ready" : "missing"}</span>
-            <span>Webhook secret: {status.webhookConfigured ? "custom" : "dev/default"}</span>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <div className="rounded-md bg-white/70 px-3 py-2 text-xs">Device Flow: {status.oauthConfigured ? "ready" : "missing"}</div>
+            <div className="rounded-md bg-white/70 px-3 py-2 text-xs">Webhook secret: {status.webhookConfigured ? "custom" : "dev/default"}</div>
           </div>
-          {status.oauthConfigured && status.tokenValid !== true && (
-            <a className="button mt-3 bg-ink hover:bg-neutral-800" href={`${apiUrl()}/auth/github/start`}>
-              Connect GitHub
-            </a>
-          )}
+          {showConnect && status.oauthConfigured && status.tokenValid !== true && <GitHubDeviceFlow className="mt-3" />}
         </>
       )}
     </div>

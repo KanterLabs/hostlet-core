@@ -8,7 +8,7 @@ Requirements:
 
 - Docker and Docker Compose
 - Git and curl
-- A GitHub OAuth App
+- A GitHub OAuth App with Device Flow enabled
 - Optional: a Cloudflare zone and tunnel token for public `*.your-domain.com` app URLs
 
 1. Clone Hostlet and install the compiled CLI:
@@ -27,29 +27,29 @@ sudo mv hostlet /usr/local/bin/hostlet
 hostlet init
 ```
 
-The wizard generates `.env`, asks for GitHub OAuth values, optionally configures Cloudflare Tunnel values, and prints the first setup token.
+The wizard generates `.env`, asks for the GitHub OAuth Client ID, optionally configures Cloudflare Tunnel values, and prints the first setup token.
 
 Access modes are:
 
-- **LAN only**: the Hostlet UI runs at `http://YOUR_HOST_IP:3000` and the API at `http://YOUR_HOST_IP:8080`.
-- **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, OAuth callback, and webhooks share one HTTPS hostname through Cloudflare Tunnel.
+- **LAN only**: the Hostlet UI runs at `http://YOUR_HOST_IP:3000` and the API at `http://YOUR_HOST_IP:8080`. Manual deploys work, but GitHub cannot send webhooks to a private LAN URL.
+- **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, and webhooks share one HTTPS hostname through Cloudflare Tunnel.
 
 Deployed apps are still private by default in both modes. Making an app public is a separate per-app action.
 
 3. Create a GitHub OAuth App when prompted.
 
+Enable **Device Flow** on the OAuth App and copy the Client ID into Hostlet. Hostlet does not use an OAuth callback URL or client secret.
+
 For local/LAN testing, set:
 
 ```text
 Homepage URL: http://YOUR_HOST_IP:3000
-Authorization callback URL: http://YOUR_HOST_IP:8080/auth/github/callback
 ```
 
 For Cloudflare Tunnel UI/API mode, use the HTTPS Hostlet hostname that `hostlet init` asks for:
 
 ```text
 Homepage URL: https://hostlet.example.com
-Authorization callback URL: https://hostlet.example.com/auth/github/callback
 ```
 
 4. Start Hostlet:
@@ -78,6 +78,14 @@ Set the first-run password, unlock the panel, sign in with GitHub, create an app
 
 If `HOSTLET_SETUP_TOKEN` is set, paste it into the first-run setup form.
 
+In LAN mode, deploy changes manually:
+
+1. Push your app changes to GitHub.
+2. Open the app in Hostlet.
+3. Click **Deploy latest**.
+
+Hostlet will pull the configured repo/branch and deploy the newest commit. Use Cloudflare Tunnel UI/API mode, or set a separate `PUBLIC_WEBHOOK_URL`, if you want GitHub pushes to deploy automatically.
+
 ## Optional Public App URLs
 
 Hostlet can publish individual apps through Cloudflare Tunnel. Configure these in `.env`:
@@ -91,14 +99,40 @@ CLOUDFLARE_TUNNEL_TARGET=<tunnel-id>.cfargotunnel.com
 CLOUDFLARE_TUNNEL_TOKEN=...
 ```
 
-Apps are private by default. Use **Open tunnel** or **Close tunnel** on the app detail page to add or remove the app DNS record.
+Apps are private by default. Use **Publish URL** or **Make private** on the app detail page to add or remove the app DNS record.
 
 ## Auto-Redeploy
 
-Auto-redeploy is off by default. Enable **Auto redeploy on branch push** for an app, then add a GitHub repository webhook:
+Auto-redeploy is off by default and only works when GitHub can reach Hostlet from the internet.
+
+In full tunnel mode, `PUBLIC_API_URL` is the public HTTPS control-plane URL:
 
 ```text
-Payload URL: PUBLIC_API_URL/webhooks/github
+PUBLIC_API_URL=https://hostlet.example.com
+```
+
+If you keep the UI/API in LAN mode but still expose only the webhook endpoint through a tunnel, leave `PUBLIC_API_URL` on the LAN URL and set:
+
+```text
+PUBLIC_WEBHOOK_URL=https://hostlet.example.com
+```
+
+These LAN/local values are valid for Device Flow sign-in and manual deploys, but not for GitHub webhook delivery unless `PUBLIC_WEBHOOK_URL` points at a public HTTPS tunnel:
+
+```text
+PUBLIC_API_URL=http://localhost:8080
+PUBLIC_API_URL=http://10.0.0.194:8080
+PUBLIC_API_URL=http://192.168.1.20:8080
+```
+
+To enable auto-redeploy:
+
+1. Run Hostlet with a public control-plane URL, usually `hostlet up --tunnel`, or set `PUBLIC_WEBHOOK_URL` to a public HTTPS tunnel hostname.
+2. Enable **Auto redeploy on branch push** for the app.
+3. Add a GitHub repository webhook:
+
+```text
+Payload URL: PUBLIC_WEBHOOK_URL/webhooks/github
 Content type: application/json
 Secret: GITHUB_WEBHOOK_SECRET
 Events: push

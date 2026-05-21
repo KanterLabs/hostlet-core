@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { LockKeyhole } from "lucide-react";
+import { LockKeyhole, ShieldCheck, TerminalSquare } from "lucide-react";
 import { apiUrl } from "@/lib/api";
 
 type SetupStatus = {
@@ -66,18 +66,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (!status) {
     return (
-      <main className="flex min-h-screen items-center justify-center p-6">
-        <section className="w-full max-w-sm rounded-lg border border-line bg-white p-6">
-          <div className="mb-5 flex items-center gap-3">
-            <div className="rounded-md border border-line bg-panel p-2 text-ink">
-              <LockKeyhole size={18} />
-            </div>
-            <div>
-              <h1 className="text-lg font-semibold">Checking Hostlet</h1>
-              <p className="muted mt-1">Loading control-plane security status.</p>
-            </div>
+      <main className="flex min-h-screen items-center justify-center bg-panel p-6">
+        <section className="panel w-full max-w-md p-6">
+          <AuthBrand />
+          <div className="mt-5 rounded-md border border-line bg-panel p-3 text-sm text-neutral-700">
+            Checking control-plane security status...
           </div>
-          {error && <p className="text-sm text-red-700">{error}</p>}
+          {error && <p className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
         </section>
       </main>
     );
@@ -85,20 +80,23 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   const setup = status.setupRequired;
   return (
-    <main className="flex min-h-screen items-center justify-center p-6">
-      <section className="w-full max-w-sm rounded-lg border border-line bg-white p-6">
-        <div className="mb-5 flex items-center gap-3">
-          <div className="rounded-md border border-line bg-panel p-2 text-ink">
-            <LockKeyhole size={18} />
-          </div>
-          <div>
-            <h1 className="text-lg font-semibold">{setup ? "Secure Hostlet" : "Unlock Hostlet"}</h1>
-            <p className="muted mt-1">
-              {setup ? "Set the control-plane password for this machine." : "Enter the control-plane password."}
-            </p>
+    <main className="flex min-h-screen items-center justify-center bg-panel p-6">
+      <section className="panel w-full max-w-md p-6">
+        <AuthBrand />
+        <div className="mt-5 rounded-lg border border-line bg-panel p-4">
+          <div className="flex items-center gap-3">
+            <div className="rounded-md border border-line bg-white p-2 text-ink">
+              {setup ? <ShieldCheck size={18} /> : <LockKeyhole size={18} />}
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold">{setup ? "Secure Hostlet" : "Unlock Hostlet"}</h1>
+              <p className="muted mt-1">
+                {setup ? "Set the control-plane password for this machine." : "Enter the control-plane password."}
+              </p>
+            </div>
           </div>
         </div>
-        <form onSubmit={submit} className="space-y-3">
+        <form onSubmit={submit} className="mt-5 space-y-3">
           <label className="block text-sm font-medium">
             Password
             <input
@@ -138,12 +136,26 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               />
             </label>
           )}
-          {error && <p className="text-sm text-red-700">{error}</p>}
+          {error && <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
           <button className="w-full" disabled={saving || !status}>
             {saving ? "Saving..." : setup ? "Set password" : "Unlock"}
           </button>
         </form>
       </section>
     </main>
+  );
+}
+
+function AuthBrand() {
+  return (
+    <div className="flex items-center gap-3">
+      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-ink text-white">
+        <TerminalSquare size={22} />
+      </div>
+      <div>
+        <div className="text-xl font-semibold">Hostlet</div>
+        <p className="muted mt-0.5">Self-hosted deployments</p>
+      </div>
+    </div>
   );
 }

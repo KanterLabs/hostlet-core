@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { Plus, ScrollText } from "lucide-react";
 import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
+import { EmptyState, PageHeader, StatusPill } from "@/components/ui";
 
 type App = {
   id: string;
@@ -21,42 +23,59 @@ export default function Logs() {
       .then((rows) => {
         const withDeploys = rows.filter((app) => app.latestDeployment?.id);
         setApps(withDeploys);
-        setMessage(withDeploys.length ? "" : "No deployment logs yet. Deploy an app to see logs here.");
+        setMessage(withDeploys.length ? "" : "No deployment logs yet.");
       })
-      .catch((e) => setMessage(`Could not load logs. ${e instanceof Error ? e.message : "Sign in again."}`));
+      .catch((error) => setMessage(`Could not load logs. ${error instanceof Error ? error.message : "Sign in again."}`));
   }, []);
 
   return (
-    <main className="grid min-h-screen grid-cols-[220px_1fr]">
+    <main className="app-shell">
       <Nav />
-      <section className="p-8">
-        <div className="mb-6 flex items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold">Logs</h1>
-            <p className="muted mt-1">Open the latest deployment logs for each app.</p>
-          </div>
-          <Link className="button" href="/apps/new">Create app</Link>
-        </div>
-        <div className="grid gap-3">
-          {apps.map((app) => (
-            <Link key={app.id} href={`/deployments/${app.latestDeployment?.id}`} className="rounded-lg border border-line bg-white p-4 hover:border-action">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="font-medium">{app.name}</div>
-                  <p className="muted">{app.repoFullName}</p>
-                </div>
-                <span className="rounded-full bg-neutral-100 px-2 py-1 text-xs text-neutral-700">{app.latestDeployment?.status || "unknown"}</span>
-              </div>
-            </Link>
-          ))}
-          {message && (
-            <div className="rounded-lg border border-line bg-white p-6">
-              <p className="text-sm text-neutral-700">{message}</p>
-              <Link className="button mt-4" href="/apps">View apps</Link>
+      <section className="page">
+        <div className="page-inner">
+          <PageHeader
+            eyebrow="Deployments"
+            title="Logs"
+            description="Jump into the latest deployment output for each app."
+            actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
+          />
+
+          {apps.length > 0 ? (
+            <div className="grid gap-4">
+              {apps.map((app) => (
+                <Link key={app.id} href={`/deployments/${app.latestDeployment?.id}`} className="panel block p-4 transition hover:border-action">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <ScrollText size={18} />
+                        <div className="truncate text-lg font-semibold">{app.name}</div>
+                      </div>
+                      <p className="muted mt-1 truncate">{app.repoFullName}</p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <StatusPill status={app.latestDeployment?.status || "unknown"} />
+                      <span className="text-sm text-neutral-500">{formatTime(app.latestDeployment?.finishedAt || app.latestDeployment?.startedAt)}</span>
+                    </div>
+                  </div>
+                </Link>
+              ))}
             </div>
+          ) : (
+            <EmptyState
+              icon={ScrollText}
+              title={message}
+              description="Deploy an app to generate build, health check, routing, and runtime logs."
+              actionHref="/apps"
+              actionLabel="View apps"
+            />
           )}
         </div>
       </section>
     </main>
   );
+}
+
+function formatTime(value?: string | null) {
+  if (!value) return "No timestamp";
+  return new Date(value).toLocaleString();
 }

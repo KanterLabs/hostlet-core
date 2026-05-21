@@ -35,18 +35,18 @@ What to provide:
 
 - The final repo URL, or confirmation to keep `HOSTLET_REPO_URL` required.
 
-### 2. GitHub OAuth App Confirmation
+### 2. GitHub OAuth Device Flow Confirmation
 
 Needed for:
 
 - final login smoke test
 - README accuracy
-- OAuth callback validation
+- Device Flow validation
 
 Recommended:
 
-- Keep using the current Hostlet OAuth app for testing.
-- For release, create/update one OAuth app with the exact production web/API URLs.
+- Keep using the current Hostlet OAuth app for testing, with Device Flow enabled.
+- For release, create/update one OAuth app and copy its Client ID into Hostlet.
 
 What to provide:
 
@@ -151,7 +151,7 @@ What to provide:
 Needed for:
 
 - final production docs
-- OAuth callback values
+- GitHub Device Flow setup
 - allowed origins
 - Cloudflare tunnel domain setup
 

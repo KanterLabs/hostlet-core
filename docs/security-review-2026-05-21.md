@@ -10,9 +10,8 @@ Reviewed the control-plane API, GitHub OAuth/webhooks, frontend auth gate, deplo
 - Added server-side Origin plus `X-Hostlet-CSRF` checks for mutating browser API routes.
 - Added frame-ancestor, frame-options, content-type, referrer, and permissions headers on API and web responses.
 - Removed the frontend `localStorage` unlock bypass. Unlock state now comes from signed server cookies.
-- Required the control-plane unlock cookie before starting GitHub OAuth.
-- Tightened OAuth callback validation so both the browser-bound signed state cookie and server-stored state must match.
-- Stopped deriving OAuth callback URLs and cookie security from untrusted request headers.
+- Required the control-plane unlock cookie before the first GitHub connection.
+- Replaced callback-based OAuth with GitHub Device Flow so self-hosted installs do not depend on redirect URI matching.
 - Made first-run password setup atomic instead of check-then-upsert.
 - Added optional `HOSTLET_SETUP_TOKEN` support for secure-mode first-run setup.
 - Added a uniqueness migration and upsert for stored GitHub account tokens to prevent duplicate stale token rows.

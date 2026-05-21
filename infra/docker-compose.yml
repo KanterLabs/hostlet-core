@@ -37,7 +37,6 @@ services:
       LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:-dev-local-agent-token-change-me}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-dev-webhook-secret}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
-      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
     ports:
       - "8080:8080"
     volumes:
@@ -98,6 +97,7 @@ services:
       CI: "true"
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
+      NEXT_PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
       NEXT_ALLOWED_DEV_ORIGINS: ${NEXT_ALLOWED_DEV_ORIGINS:-10.0.0.194}
     ports:
       - "3000:3000"
