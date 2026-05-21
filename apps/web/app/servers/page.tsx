@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
-import { HardDrive, Plus, Server, Timer } from "lucide-react";
+import { HardDrive, Server } from "lucide-react";
 import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
 import { EmptyState, Metric, PageHeader, StatusPill } from "@/components/ui";
@@ -23,7 +22,7 @@ export default function Servers() {
   }, []);
 
   const online = servers.filter((server) => server.status === "online").length;
-  const remote = servers.filter((server) => server.kind !== "local").length;
+  const local = servers.filter((server) => server.kind === "local").length;
 
   return (
     <main className="app-shell">
@@ -32,15 +31,14 @@ export default function Servers() {
         <div className="page-inner">
           <PageHeader
             eyebrow="Machines"
-            title="Servers"
-            description="Local and remote agents that can build, run, route, and clean up app containers."
-            actions={<Link className="button" href="/servers/new"><Plus size={16} />Add VPS</Link>}
+            title="This machine"
+            description="Hostlet 0.1.0 deploys apps onto the same machine that runs this control plane."
           />
 
           <div className="mb-6 grid gap-4 md:grid-cols-3">
-            <Metric label="Total machines" value={String(servers.length)} detail="local plus VPS targets" icon={Server} />
+            <Metric label="Local machines" value={String(local)} detail="current deploy target" icon={Server} />
             <Metric label="Online agents" value={`${online}/${servers.length || 1}`} detail="websocket heartbeat" icon={HardDrive} />
-            <Metric label="Remote VPS" value={String(remote)} detail="connected by install token" icon={Timer} />
+            <Metric label="Deployment mode" value="local" detail="remote VPS deferred" icon={HardDrive} />
           </div>
 
           {servers.length > 0 ? (
@@ -68,9 +66,7 @@ export default function Servers() {
             <EmptyState
               icon={Server}
               title={message}
-              description="This machine is available by default. Add a VPS when you want deployments to run somewhere else."
-              actionHref="/servers/new"
-              actionLabel="Add VPS"
+              description="The local agent should appear here when Hostlet is running."
             />
           )}
         </div>

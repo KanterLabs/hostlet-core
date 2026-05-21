@@ -1,6 +1,6 @@
 # Hostlet Documentation
 
-This guide documents the current Hostlet implementation: local setup, Cloudflare tunnel setup, app deployment, webhooks, remote agents, operations, and known limits.
+This guide documents the current Hostlet implementation: local setup, Cloudflare tunnel setup, app deployment, webhooks, operations, and known limits.
 
 ## Components
 
@@ -37,7 +37,6 @@ The wizard asks for:
 - LAN host/IP or Cloudflare domain settings
 - GitHub OAuth App Client ID with Device Flow enabled
 - allowed GitHub username
-- Hostlet repository URL for remote agent installs
 
 It generates all required secrets, writes `.env`, and prints the first setup token. In Cloudflare Tunnel UI/API mode it also validates the zone token and can create/update the Hostlet UI/API CNAME record pointing at the configured tunnel target.
 
@@ -283,18 +282,11 @@ Then configure the repository webhook manually:
 
 When a push event matches an app repository and branch, Hostlet creates a deployment for that exact commit SHA only if **Auto redeploy on branch push** is enabled for that app. Webhook deliveries are deduplicated by GitHub delivery ID and the app detail page shows the latest webhook result.
 
-## Remote VPS Agents
+## Deployment Target
 
-The UI can create a remote server install token:
+Hostlet 0.1.0 is intentionally local-machine-only. The UI, API, database, Caddy, and local agent run on the same host, and apps deploy as Docker containers on that host.
 
-1. Open **Machines**.
-2. Click **Add VPS**.
-3. Enter a name and optional public IP.
-4. Run the generated install command on the VPS.
-
-The install script installs Docker, Caddy, Rust tooling, builds `hostlet-agent`, registers it with the API, and installs a systemd service.
-
-The generated install command includes `HOSTLET_REPO_URL` when `HOSTLET_REPO_URL` is configured for the API. If the command contains `REPLACE_WITH_HOSTLET_REPO_URL`, replace it with the Git URL for this Hostlet repository before running it.
+Remote VPS agent registration and install commands are disabled for this release while the local deploy path is hardened.
 
 ## Runtime and Resource Limits
 
@@ -357,6 +349,12 @@ docker compose -f infra/docker-compose.prod.yml --profile tunnel up -d --build
 
 Production Compose uses release Dockerfiles for the API, web UI, and local agent. It does not bind-mount the source tree.
 The API and web services bind to loopback by default; Caddy/cloudflared are the public ingress when tunnel mode is enabled.
+
+`hostlet init` writes `DOCKER_GID` from `/var/run/docker.sock` so the non-root local agent can talk to Docker. If Docker socket permissions change, regenerate `.env` or set:
+
+```bash
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+```
 
 ## Useful Commands
 

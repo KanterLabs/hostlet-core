@@ -56,10 +56,7 @@ export default function Dashboard() {
             title="Overview"
             description="Deploy GitHub projects onto your own machines with Docker, Caddy, live logs, rollbacks, and optional Cloudflare exposure."
             actions={
-              <>
-                <Link className="button-secondary" href="/servers/new"><HardDrive size={16} />Add machine</Link>
-                <Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>
-              </>
+              <Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>
             }
           />
 

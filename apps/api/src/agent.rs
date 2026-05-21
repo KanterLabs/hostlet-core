@@ -1,5 +1,5 @@
 use crate::{
-    crypto::{hash_token, random_token, verify_token},
+    crypto::verify_token,
     state::{AgentConnection, AppState},
 };
 use axum::{
@@ -12,7 +12,6 @@ use axum::{
     Json,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use sqlx::Row;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -20,36 +19,12 @@ use uuid::Uuid;
 const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
 const MAX_LOG_LINES_PER_DEPLOYMENT: i64 = 20_000;
 
-#[derive(Deserialize)]
-pub struct RegisterBody {
-    server_id: Uuid,
-    install_token: String,
-}
-
-pub async fn register(
-    State(state): State<AppState>,
-    Json(body): Json<RegisterBody>,
-) -> impl IntoResponse {
-    let agent_token = random_token(64);
-    let res = sqlx::query(
-        "UPDATE servers
-         SET agent_token_hash=$1, install_token_hash=NULL, status='online', last_seen_at=now()
-         WHERE id=$2 AND install_token_hash=$3",
+pub async fn register() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        "remote agent registration is deferred in this release; use the local Hostlet agent",
     )
-    .bind(hash_token(&agent_token))
-    .bind(body.server_id)
-    .bind(hash_token(&body.install_token))
-    .execute(&state.db)
-    .await;
-    match res {
-        Ok(done) if done.rows_affected() == 1 => Json(serde_json::json!({
-            "agentToken": agent_token,
-            "jobSigningSecret": state.job_signing_secret
-        }))
-        .into_response(),
-        Ok(_) => StatusCode::UNAUTHORIZED.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
+        .into_response()
 }
 
 pub async fn ws(
@@ -121,13 +96,29 @@ async fn handle_socket(state: AppState, server_id: Uuid, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<serde_json::Value>(32);
     let connection_id = Uuid::new_v4();
-    state.agents.write().await.insert(
-        server_id,
-        AgentConnection {
-            connection_id,
-            sender: tx,
-        },
-    );
+    let already_connected = {
+        let mut agents = state.agents.write().await;
+        if agents
+            .get(&server_id)
+            .is_some_and(|connection| !connection.sender.is_closed())
+        {
+            true
+        } else {
+            agents.insert(
+                server_id,
+                AgentConnection {
+                    connection_id,
+                    sender: tx,
+                },
+            );
+            false
+        }
+    };
+    if already_connected {
+        tracing::warn!(%server_id, "rejected duplicate agent websocket connection");
+        let _ = sender.send(Message::Close(None)).await;
+        return;
+    }
     let _ = sqlx::query("UPDATE servers SET status='online', last_seen_at=now() WHERE id=$1")
         .bind(server_id)
         .execute(&state.db)

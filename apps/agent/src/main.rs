@@ -6,7 +6,7 @@ use sha2::Sha256;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Output, Stdio},
     time::Duration,
 };
 use tokio::{
@@ -24,6 +24,7 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone)]
 struct Config {
     api_url: String,
+    http: reqwest::Client,
     server_id: Uuid,
     agent_token: String,
     job_signing_secret: String,
@@ -44,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
     let cfg = Config {
         api_url: env("HOSTLET_API_URL")?,
+        http: http_client()?,
         server_id: env("HOSTLET_SERVER_ID")?.parse()?,
         agent_token: env("HOSTLET_AGENT_TOKEN")?,
         job_signing_secret: env("HOSTLET_JOB_SIGNING_SECRET")?,
@@ -84,36 +86,72 @@ async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
             _ = heartbeat.tick() => ws.send(Message::Text(json!({"type":"heartbeat"}).to_string())).await?,
             _ = resource_stats.tick() => publish_resource_stats(&cfg).await,
             msg = ws.next() => {
-                let Some(Ok(Message::Text(text))) = msg else { bail!("websocket closed"); };
-                let value: Value = serde_json::from_str(&text)?;
-                if value.get("type").and_then(|v| v.as_str()) == Some("job") {
-                    let payload = value.get("payload").context("missing payload")?.clone();
-                    let signature = value.get("signature").and_then(|v| v.as_str()).context("missing signature")?;
-                    let raw = serde_json::to_vec(&payload)?;
-                    if !verify_signature(&cfg.job_signing_secret, &raw, signature) {
-                        bail!("job signature verification failed");
-                    }
-                    let job_id = payload.get("job_id").and_then(|v| v.as_str()).and_then(|v| Uuid::parse_str(v).ok());
-                    match handle_job(cfg.clone(), payload.clone()).await {
-                        Ok(()) => {
-                            if let Some(job_id) = job_id {
-                                job_status(&cfg, job_id, "success", None).await;
-                            }
-                        }
-                        Err(err) => {
-                            let message = format!("{err}");
-                            if let Some(deployment_id) = payload.get("deployment_id").and_then(|v| v.as_str()).and_then(|v| Uuid::parse_str(v).ok()) {
-                                log(&cfg, deployment_id, "stderr", &message).await;
-                                status(&cfg, deployment_id, "failed", Some(&format!("{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run."))).await;
-                            }
-                            if let Some(job_id) = job_id {
-                                job_status(&cfg, job_id, "failed", Some(&message)).await;
-                            }
-                            tracing::warn!("job failed: {message}");
-                        }
-                    }
+                match msg {
+                    Some(Ok(Message::Text(text))) => handle_ws_text(&cfg, &text).await,
+                    Some(Ok(Message::Ping(payload))) => ws.send(Message::Pong(payload)).await?,
+                    Some(Ok(Message::Close(_))) | None => bail!("websocket closed"),
+                    Some(Ok(_)) => continue,
+                    Some(Err(err)) => bail!("websocket error: {err}"),
                 }
             }
+        }
+    }
+}
+
+async fn handle_ws_text(cfg: &Config, text: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        tracing::warn!("ignored invalid websocket JSON from API");
+        return;
+    };
+    if value.get("type").and_then(|v| v.as_str()) != Some("job") {
+        return;
+    }
+    let Some(payload) = value.get("payload").cloned() else {
+        tracing::warn!("ignored job without payload");
+        return;
+    };
+    let Some(signature) = value.get("signature").and_then(|v| v.as_str()) else {
+        tracing::warn!("ignored job without signature");
+        return;
+    };
+    let Ok(raw) = serde_json::to_vec(&payload) else {
+        tracing::warn!("ignored job with unserializable payload");
+        return;
+    };
+    if !verify_signature(&cfg.job_signing_secret, &raw, signature) {
+        tracing::warn!("ignored job with invalid signature");
+        return;
+    }
+    let job_id = payload
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok());
+    match handle_job(cfg.clone(), payload.clone()).await {
+        Ok(()) => {
+            if let Some(job_id) = job_id {
+                job_status(cfg, job_id, "success", None).await;
+            }
+        }
+        Err(err) => {
+            let message = format!("{err}");
+            if let Some(deployment_id) = payload
+                .get("deployment_id")
+                .and_then(|v| v.as_str())
+                .and_then(|v| Uuid::parse_str(v).ok())
+            {
+                log(cfg, deployment_id, "stderr", &message).await;
+                status(
+                    cfg,
+                    deployment_id,
+                    "failed",
+                    Some(&format!("{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run.")),
+                )
+                .await;
+            }
+            if let Some(job_id) = job_id {
+                job_status(cfg, job_id, "failed", Some(&message)).await;
+            }
+            tracing::warn!("job failed: {message}");
         }
     }
 }
@@ -571,11 +609,7 @@ async fn run_log(
 }
 
 async fn run_quiet(bin: &str, args: &[&str]) -> anyhow::Result<()> {
-    let output = Command::new(bin)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to start {bin}"))?;
+    let output = command_output(bin, args, Duration::from_secs(120)).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("{bin} exited with {}: {}", output.status, stderr.trim());
@@ -588,11 +622,7 @@ async fn run_quiet_absent_ok(
     args: &[&str],
     absent_needles: &[&str],
 ) -> anyhow::Result<()> {
-    let output = Command::new(bin)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to start {bin}"))?;
+    let output = command_output(bin, args, Duration::from_secs(120)).await?;
     if output.status.success() {
         return Ok(());
     }
@@ -621,11 +651,7 @@ async fn run_capture_trim(
         &format!("$ {} {}", bin, command_args_for_log(args).join(" ")),
     )
     .await;
-    let output = Command::new(bin)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to start {bin}"))?;
+    let output = command_output(bin, args, Duration::from_secs(120)).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
@@ -1221,7 +1247,8 @@ async fn job_status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>)
 }
 
 async fn post(cfg: &Config, msg: Value) {
-    let _ = reqwest::Client::new()
+    let _ = cfg
+        .http
         .post(format!("{}/api/agent/events", cfg.api_url))
         .header("x-hostlet-server-id", cfg.server_id.to_string())
         .header("x-hostlet-agent-token", &cfg.agent_token)
@@ -1239,7 +1266,7 @@ async fn publish_resource_stats(cfg: &Config) {
     }
     let mut args = vec!["stats", "--no-stream", "--format", "json"];
     args.extend(containers.iter().map(String::as_str));
-    let Ok(output) = Command::new("docker").args(&args).output().await else {
+    let Ok(output) = command_output("docker", &args, Duration::from_secs(15)).await else {
         return;
     };
     if !output.status.success() {
@@ -1278,16 +1305,18 @@ async fn publish_resource_stats(cfg: &Config) {
 }
 
 async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
-    let output = Command::new("docker")
-        .args([
+    let output = command_output(
+        "docker",
+        &[
             "ps",
             "--filter",
             "name=^/hostlet-",
             "--format",
             "{{.Names}}",
-        ])
-        .output()
-        .await?;
+        ],
+        Duration::from_secs(15),
+    )
+    .await?;
     if !output.status.success() {
         return Ok(Vec::new());
     }
@@ -1298,6 +1327,24 @@ async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
         .filter(|name| valid_container_name(name))
         .map(str::to_string)
         .collect())
+}
+
+async fn command_output(bin: &str, args: &[&str], timeout: Duration) -> anyhow::Result<Output> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args).kill_on_drop(true);
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(output) => output.with_context(|| format!("failed to start {bin}")),
+        Err(_) => bail!("{bin} timed out after {} seconds", timeout.as_secs()),
+    }
+}
+
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .user_agent("Hostlet-Agent")
+        .build()
+        .context("failed to build HTTP client")
 }
 
 fn valid_container_name(value: &str) -> bool {
@@ -1371,11 +1418,13 @@ fn safe_name(s: &str) -> String {
 }
 async fn docker_published_port(container: &str, container_port: u16) -> anyhow::Result<u16> {
     let target = format!("{container_port}/tcp");
-    let output = Command::new("docker")
-        .args(["port", container, &target])
-        .output()
-        .await
-        .context("failed to inspect Docker published port")?;
+    let output = command_output(
+        "docker",
+        &["port", container, &target],
+        Duration::from_secs(15),
+    )
+    .await
+    .context("failed to inspect Docker published port")?;
     if !output.status.success() {
         bail!("could not inspect Docker published port");
     }

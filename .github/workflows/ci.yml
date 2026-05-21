@@ -45,22 +45,23 @@ jobs:
 
   compose:
     runs-on: [self-hosted, Linux, X64]
+    env:
+      POSTGRES_PASSWORD: ci-postgres-password
+      PUBLIC_API_URL: http://localhost:8080
+      PUBLIC_WEB_URL: http://localhost:3000
+      HOSTLET_SETUP_TOKEN: ci-setup-token-ci-setup-token-ci-setup
+      HOSTLET_ALLOWED_GITHUB_LOGINS: ci-user
+      ENCRYPTION_KEY: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
+      JOB_SIGNING_SECRET: ci-job-signing-secret-ci-job-signing-secret
+      SESSION_SECRET: ci-session-secret-ci-session-secret-ci
+      LOCAL_AGENT_TOKEN: ci-local-agent-token-ci-local-agent-token
+      GITHUB_WEBHOOK_SECRET: ci-webhook-secret-ci-webhook-secret
+      CLOUDFLARE_TUNNEL_TOKEN: ci-tunnel-token
+      DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@v4
       - run: docker compose -f infra/docker-compose.yml config >/dev/null
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
-        env:
-          POSTGRES_PASSWORD: ci-postgres-password
-          PUBLIC_API_URL: http://localhost:8080
-          PUBLIC_WEB_URL: http://localhost:3000
-          HOSTLET_SETUP_TOKEN: ci-setup-token
-          HOSTLET_ALLOWED_GITHUB_LOGINS: ci-user
-          ENCRYPTION_KEY: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
-          JOB_SIGNING_SECRET: ci-job-signing-secret-ci-job-signing-secret
-          SESSION_SECRET: ci-session-secret-ci-session-secret-ci
-          LOCAL_AGENT_TOKEN: ci-local-agent-token-ci-local-agent-token
-          GITHUB_WEBHOOK_SECRET: ci-webhook-secret-ci-webhook-secret
-          CLOUDFLARE_TUNNEL_TOKEN: ci-tunnel-token
 
   docker:
     runs-on: [self-hosted, Linux, X64]

@@ -91,8 +91,8 @@ pub async fn github_device_start(
         .filter(|origin| state.web_origin_allowed(origin))
         .unwrap_or_else(|| state.public_web_url.clone());
 
-    let client = reqwest::Client::new();
-    let response = match client
+    let response = match state
+        .http
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
         .form(&[
@@ -212,8 +212,8 @@ pub async fn github_device_poll(
         .into_response();
     }
 
-    let client = reqwest::Client::new();
-    let response = match client
+    let response = match state
+        .http
         .post("https://github.com/login/oauth/access_token")
         .header("Accept", "application/json")
         .form(&[
@@ -460,8 +460,8 @@ async fn store_github_access_token(
     state: &AppState,
     token: GitHubToken,
 ) -> anyhow::Result<AuthorizedGitHubUser> {
-    let client = reqwest::Client::new();
-    let gh_user: GitHubUser = client
+    let gh_user: GitHubUser = state
+        .http
         .get("https://api.github.com/user")
         .bearer_auth(&token.access_token)
         .header("User-Agent", "Hostlet")

@@ -5,7 +5,7 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use rand::RngCore;
 use serde_json::Value;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
@@ -94,16 +94,9 @@ async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
         .allow_empty(false)
         .interact_text()?;
 
-    let repo_url_default = git_remote_url(root).unwrap_or_default();
-    let hostlet_repo_url: String = Input::with_theme(&theme)
-        .with_prompt("Hostlet repository URL for remote agent installs")
-        .default(repo_url_default)
-        .interact_text()?;
-
     let mut env = default_env();
     env.insert("HOSTLET_ALLOWED_GITHUB_LOGINS".into(), allowed_login);
     env.insert("GITHUB_CLIENT_ID".into(), github_client_id);
-    env.insert("HOSTLET_REPO_URL".into(), hostlet_repo_url);
 
     if access_mode == 0 {
         let host: String = Input::with_theme(&theme)
@@ -583,12 +576,17 @@ fn compose_args(dev: bool) -> Vec<String> {
 }
 
 fn run_passthrough(root: &Path, bin: &str, args: &[String]) -> anyhow::Result<()> {
-    let status = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .current_dir(root)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if std::env::var_os("DOCKER_GID").is_none() {
+        command.env("DOCKER_GID", docker_gid());
+    }
+    let status = command
         .status()
         .with_context(|| format!("failed to run {bin}"))?;
     if !status.success() {
@@ -621,6 +619,7 @@ fn default_env() -> BTreeMap<String, String> {
     env.insert("POSTGRES_USER".into(), "hostlet".into());
     env.insert("POSTGRES_PASSWORD".into(), postgres_password.clone());
     env.insert("POSTGRES_DB".into(), "hostlet".into());
+    env.insert("DOCKER_GID".into(), docker_gid());
     env.insert(
         "DATABASE_URL".into(),
         format!("postgres://hostlet:{postgres_password}@localhost:5432/hostlet"),
@@ -728,6 +727,19 @@ fn hex_secret(bytes: usize) -> String {
     buf.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn docker_gid() -> String {
+    #[cfg(unix)]
+    {
+        fs::metadata("/var/run/docker.sock")
+            .map(|metadata| metadata.gid().to_string())
+            .unwrap_or_else(|_| "998".into())
+    }
+    #[cfg(not(unix))]
+    {
+        "998".into()
+    }
+}
+
 fn timestamp_suffix() -> String {
     chrono_like_timestamp()
 }
@@ -742,18 +754,6 @@ fn chrono_like_timestamp() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "backup".into())
-}
-
-fn git_remote_url(root: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .current_dir(root)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 fn ensure_repo_root(root: &Path) -> anyhow::Result<()> {

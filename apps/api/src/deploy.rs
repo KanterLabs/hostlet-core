@@ -247,14 +247,35 @@ pub async fn send_agent_job(
     server_id: Uuid,
     payload: serde_json::Value,
 ) -> anyhow::Result<()> {
+    let sender = {
+        let agents = state.agents.read().await;
+        agents
+            .get(&server_id)
+            .map(|connection| connection.sender.clone())
+    }
+    .ok_or_else(|| anyhow::anyhow!("server agent is offline"))?;
+    let job_signing_secret = job_signing_secret_for_server(state, server_id).await?;
     let body = serde_json::to_vec(&payload)?;
-    let signed = json!({"type":"job","payload": payload, "signature": sign(&state.job_signing_secret, &body)});
-    let agents = state.agents.read().await;
-    let Some(tx) = agents.get(&server_id) else {
-        anyhow::bail!("server agent is offline");
-    };
-    tx.sender.send(signed).await?;
+    let signed =
+        json!({"type":"job","payload": payload, "signature": sign(&job_signing_secret, &body)});
+    sender.send(signed).await?;
     Ok(())
+}
+
+async fn job_signing_secret_for_server(
+    state: &AppState,
+    server_id: Uuid,
+) -> anyhow::Result<String> {
+    let encrypted: Option<String> =
+        sqlx::query_scalar("SELECT job_signing_secret_ciphertext FROM servers WHERE id=$1")
+            .bind(server_id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
+    match encrypted {
+        Some(value) => state.crypto.decrypt(&value),
+        None => Ok(state.job_signing_secret.clone()),
+    }
 }
 
 pub async fn recover_stale_deployments(state: &AppState) -> anyhow::Result<u64> {

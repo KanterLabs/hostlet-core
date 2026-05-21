@@ -135,7 +135,7 @@ export default function Apps() {
             <EmptyState
               icon={Box}
               title={message || "No apps match this filter"}
-              description="Create an app from a GitHub repository, then deploy it to this machine or a connected VPS."
+              description="Create an app from a GitHub repository, then deploy it to this Hostlet machine."
               actionHref="/apps/new"
               actionLabel="Create app"
             />

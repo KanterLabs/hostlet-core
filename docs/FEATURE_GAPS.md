@@ -142,7 +142,7 @@ Missing:
 - remote firewall/domain readiness checks
 - server labels/regions
 
-Current state: remote server creation and install command exist, but operational controls are minimal. The install script requires a real `HOSTLET_REPO_URL` override.
+Current state: remote server creation, install commands, and agent registration are disabled for 0.1.0. Hostlet deploys to the same machine that runs the control plane.
 
 Recommended work:
 

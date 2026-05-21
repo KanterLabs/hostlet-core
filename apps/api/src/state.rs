@@ -1,28 +1,25 @@
 use crate::crypto::{hash_token, Crypto};
+use crate::rate_limit::RateLimiter;
 use anyhow::{bail, Context};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::Arc,
+    time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
-
-const DEV_JOB_SIGNING_SECRET: &str = "dev-job-signing-secret-change-me";
-const DEV_LOCAL_AGENT_TOKEN: &str = "dev-local-agent-token-change-me";
-const DEV_GITHUB_WEBHOOK_SECRET: &str = "dev-webhook-secret";
-const DEV_SESSION_SECRET: &str = "dev-session-secret-change-me-use-random-in-production";
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub crypto: Crypto,
+    pub http: reqwest::Client,
     pub github_client_id: String,
     pub github_webhook_secret: String,
     pub public_api_url: String,
     pub public_web_url: String,
-    pub hostlet_repo_url: Option<String>,
     pub allowed_web_origins: Vec<String>,
     pub base_domain: Option<String>,
     pub domain_prefix: String,
@@ -34,6 +31,7 @@ pub struct AppState {
     pub setup_token: Option<String>,
     pub allowed_github_logins: Option<HashSet<String>>,
     pub agents: Arc<RwLock<HashMap<Uuid, AgentConnection>>>,
+    pub rate_limiter: Arc<RateLimiter>,
     pub logs: broadcast::Sender<LogEvent>,
 }
 
@@ -63,11 +61,10 @@ impl AppState {
             .run(&db)
             .await?;
         let crypto = Crypto::from_env(allow_insecure_dev_defaults)?;
-        let local_agent_token = secret_from_env(
-            "LOCAL_AGENT_TOKEN",
-            DEV_LOCAL_AGENT_TOKEN,
-            allow_insecure_dev_defaults,
-        )?;
+        let http = http_client()?;
+        let local_agent_token = secret_from_env("LOCAL_AGENT_TOKEN", allow_insecure_dev_defaults)?;
+        let job_signing_secret =
+            secret_from_env("JOB_SIGNING_SECRET", allow_insecure_dev_defaults)?;
         let allowed_github_logins = allowed_github_logins();
         if !allow_insecure_dev_defaults && allowed_github_logins.is_none() {
             bail!("HOSTLET_ALLOWED_GITHUB_LOGINS is required in secure mode");
@@ -82,20 +79,19 @@ impl AppState {
         if !allow_insecure_dev_defaults && setup_token.is_none() {
             bail!("HOSTLET_SETUP_TOKEN is required in secure mode for first-run setup");
         }
-        seed_local_server(&db, &local_agent_token).await?;
+        seed_local_server(&db, &crypto, &local_agent_token, &job_signing_secret).await?;
         let (logs, _) = broadcast::channel(1024);
         Ok(Self {
             db,
             crypto,
+            http,
             github_client_id: std::env::var("GITHUB_CLIENT_ID").unwrap_or_default(),
             github_webhook_secret: secret_from_env(
                 "GITHUB_WEBHOOK_SECRET",
-                DEV_GITHUB_WEBHOOK_SECRET,
                 allow_insecure_dev_defaults,
             )?,
             public_api_url,
             public_web_url,
-            hostlet_repo_url: nonempty_env("HOSTLET_REPO_URL"),
             allowed_web_origins,
             base_domain: nonempty_env("HOSTLET_BASE_DOMAIN"),
             domain_prefix: std::env::var("HOSTLET_DOMAIN_PREFIX")
@@ -103,19 +99,12 @@ impl AppState {
             cloudflare_api_token: nonempty_env("CLOUDFLARE_API_TOKEN"),
             cloudflare_zone_id: nonempty_env("CLOUDFLARE_ZONE_ID"),
             cloudflare_tunnel_target: nonempty_env("CLOUDFLARE_TUNNEL_TARGET"),
-            job_signing_secret: secret_from_env(
-                "JOB_SIGNING_SECRET",
-                DEV_JOB_SIGNING_SECRET,
-                allow_insecure_dev_defaults,
-            )?,
-            session_secret: secret_from_env(
-                "SESSION_SECRET",
-                DEV_SESSION_SECRET,
-                allow_insecure_dev_defaults,
-            )?,
+            job_signing_secret,
+            session_secret: secret_from_env("SESSION_SECRET", allow_insecure_dev_defaults)?,
             setup_token,
             allowed_github_logins,
             agents: Arc::new(RwLock::new(HashMap::new())),
+            rate_limiter: Arc::new(RateLimiter::default()),
             logs,
         })
     }
@@ -131,36 +120,48 @@ impl AppState {
     }
 }
 
-async fn seed_local_server(db: &PgPool, local_agent_token: &str) -> anyhow::Result<()> {
+async fn seed_local_server(
+    db: &PgPool,
+    crypto: &Crypto,
+    local_agent_token: &str,
+    job_signing_secret: &str,
+) -> anyhow::Result<()> {
     let local_server_id = std::env::var("LOCAL_SERVER_ID")
         .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000001".into());
     sqlx::query(
-        "INSERT INTO servers (id,user_id,name,public_ip,kind,agent_token_hash,status)
-         VALUES ($1,NULL,'This machine','127.0.0.1','local',$2,'offline')
-         ON CONFLICT (id) DO UPDATE SET agent_token_hash=EXCLUDED.agent_token_hash, kind='local', name='This machine'",
+        "INSERT INTO servers (id,user_id,name,public_ip,kind,agent_token_hash,job_signing_secret_ciphertext,status)
+         VALUES ($1,NULL,'This machine','127.0.0.1','local',$2,$3,'offline')
+         ON CONFLICT (id) DO UPDATE SET
+           agent_token_hash=EXCLUDED.agent_token_hash,
+           job_signing_secret_ciphertext=EXCLUDED.job_signing_secret_ciphertext,
+           kind='local',
+           name='This machine'",
     )
     .bind(uuid::Uuid::parse_str(&local_server_id)?)
     .bind(hash_token(local_agent_token))
+    .bind(crypto.encrypt(job_signing_secret)?)
     .execute(db)
     .await?;
     Ok(())
 }
 
-fn secret_from_env(
-    key: &str,
-    dev_default: &str,
-    allow_insecure_dev_defaults: bool,
-) -> anyhow::Result<String> {
+fn secret_from_env(key: &str, allow_insecure_dev_defaults: bool) -> anyhow::Result<String> {
     let Some(value) = nonempty_env(key) else {
-        if allow_insecure_dev_defaults {
-            return Ok(dev_default.to_string());
-        }
-        bail!("{key} is required in secure mode");
+        bail!("{key} is required");
     };
-    if !allow_insecure_dev_defaults && (value == dev_default || value.len() < 32) {
-        bail!("{key} must be a non-default value with at least 32 characters");
+    if !allow_insecure_dev_defaults && value.len() < 32 {
+        bail!("{key} must be at least 32 characters");
     }
     Ok(value)
+}
+
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .user_agent("Hostlet")
+        .build()
+        .context("failed to build HTTP client")
 }
 
 fn nonempty_env(key: &str) -> Option<String> {

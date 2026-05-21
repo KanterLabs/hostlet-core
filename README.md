@@ -46,6 +46,8 @@
 | 🛡️ Caddy Reverse Proxy | ✅ Ready |
 | 💾 Backup & Restore Scripts | ✅ Ready |
 
+> Hostlet 0.1.0 is local-machine-only: the UI/API and deployed app containers run on the same host. Remote VPS agents are deferred.
+
 ## 🚀 Quick Start
 
 ### Prerequisites

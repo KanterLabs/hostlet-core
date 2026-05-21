@@ -15,8 +15,7 @@ use uuid::Uuid;
 
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let oauth_configured = !state.github_client_id.trim().is_empty();
-    let webhook_configured = !state.github_webhook_secret.trim().is_empty()
-        && state.github_webhook_secret != "dev-webhook-secret";
+    let webhook_configured = !state.github_webhook_secret.trim().is_empty();
 
     let Some(user_id) = current_user_id(&headers, &state) else {
         return Json(serde_json::json!({
@@ -60,7 +59,8 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
         .into_response();
     };
 
-    let res = reqwest::Client::new()
+    let res = state
+        .http
         .get("https://api.github.com/user")
         .bearer_auth(token)
         .header("User-Agent", "Hostlet")
@@ -112,7 +112,8 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
     else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let res = reqwest::Client::new()
+    let res = state
+        .http
         .get("https://api.github.com/user/repos?per_page=100&sort=updated")
         .bearer_auth(token)
         .header("User-Agent", "Hostlet")

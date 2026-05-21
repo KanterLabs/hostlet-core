@@ -3,6 +3,7 @@ mod auth;
 mod crypto;
 mod deploy;
 mod github;
+mod rate_limit;
 mod state;
 mod web;
 
@@ -124,6 +125,10 @@ async fn main() -> anyhow::Result<()> {
             guard_state,
             browser_origin_guard,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit,
+        ))
         .layer(middleware::from_fn(security_headers))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
@@ -133,7 +138,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:8080".into())
         .parse()?;
     tracing::info!("api listening on {addr}");
-    axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+    axum::serve(
+        tokio::net::TcpListener::bind(addr).await?,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

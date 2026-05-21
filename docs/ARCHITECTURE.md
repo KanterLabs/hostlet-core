@@ -25,7 +25,7 @@ Rust API <---- authenticated WebSocket/events ----> Hostlet agent
                                                      v
                                                 App containers
 
-Cloudflare edge -> cloudflared -> 127.0.0.1:18080 -> Caddy -> app container port
+Cloudflare edge -> cloudflared -> 127.0.0.1:18080 -> Caddy -> local app container port
 ```
 
 ## Services
@@ -36,7 +36,7 @@ Cloudflare edge -> cloudflared -> 127.0.0.1:18080 -> Caddy -> app container port
 
 - first-run password and unlock flow
 - GitHub connection status
-- machine list and VPS registration screen
+- local machine status
 - app list and app creation
 - app detail page with deploy, rollback, public tunnel toggle, delete, and resource usage
 - deployment detail page with status and live logs
@@ -77,7 +77,7 @@ The API does not require Docker access. Docker operations are delegated to agent
 - reports status and logs to the API
 - publishes Docker resource snapshots for local apps
 
-The local Compose agent runs with host networking and Docker socket access. Remote agents are installed by `scripts/install-agent.sh`.
+Hostlet 0.1.0 runs one local agent on the same machine as the UI/API. The local agent uses host networking and Docker socket access so it can build images, start app containers, and reload the local Caddy router. Remote VPS agents and install commands are deferred for this release.
 
 ### Caddy and Cloudflare Tunnel
 
@@ -98,7 +98,7 @@ Main tables:
 
 - `users`: GitHub-backed users
 - `github_accounts`: encrypted GitHub access tokens
-- `servers`: local and remote deploy targets
+- `servers`: deploy targets; 0.1.0 seeds and uses only the local machine
 - `apps`: deployable app configuration
 - `app_env_vars`: encrypted app environment variables
 - `deployments`: deployment records and route metadata

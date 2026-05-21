@@ -147,21 +147,17 @@ Strong fix:
 - Fail CI on high/critical findings unless an expiry-dated exception is checked in.
 - Revisit `sqlx` feature selection or lockfile contents to remove unused MySQL/RSA packages if possible.
 
-### Medium: Remote Agent Install Is Too Platform-Specific
+### Medium: Remote Agent Install Is Deferred
 
-The remote agent install script assumes a Debian/Ubuntu-style system with `apt-get`, systemd, Caddy, Docker, and Rustup. It builds the agent from source on the target server even though release packaging now exists for the CLI.
+Remote VPS support is intentionally out of scope for 0.1.0. The UI/API, Caddy, local agent, and deployed app containers run on the same host. Remote server creation, generated install commands, and remote agent registration now return a deferred/unavailable response.
 
-Evidence:
-
-- `scripts/install-agent.sh` installs apt packages, Docker, Caddy, Rustup, clones the repo, builds `hostlet-agent`, and writes a systemd unit.
-
-Strong fix:
+Follow-up before re-enabling remote agents:
 
 - Publish prebuilt `hostlet-agent` release binaries alongside the CLI.
-- Make the install script detect distro, architecture, systemd availability, Docker availability, and Caddy state before mutating the host.
-- Add uninstall, reinstall, and token rotation commands.
-- Pin or verify third-party install sources.
-- Add an agent `--version` and API-side agent version/status display.
+- Issue per-server signing secrets and scoped tokens, with rotation and revoke paths.
+- Make the install flow detect distro, architecture, systemd availability, Docker availability, and Caddy state before mutating the host.
+- Add uninstall, reinstall, recovery, and API-side agent version/status display.
+- Validate the full path against disposable VPS fixtures before marking it supported.
 
 ### Medium: Generated Static Node Deploys Are Fragile
 

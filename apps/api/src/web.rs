@@ -1,9 +1,4 @@
-use crate::{
-    auth::current_user_id,
-    crypto::{hash_token, random_token},
-    deploy,
-    state::AppState,
-};
+use crate::{auth::current_user_id, deploy, state::AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -17,12 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
-
-#[derive(Deserialize)]
-pub struct CreateServer {
-    name: String,
-    public_ip: Option<String>,
-}
 
 #[derive(Deserialize)]
 pub struct CreateApp {
@@ -72,11 +61,11 @@ pub struct EnvValue {
 }
 
 pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
+    let Some(_user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match sqlx::query("SELECT id,name,public_ip,kind,status,last_seen_at,created_at FROM servers WHERE user_id=$1 OR kind='local' ORDER BY kind ASC, created_at DESC")
-        .bind(user_id).fetch_all(&state.db).await {
+    match sqlx::query("SELECT id,name,public_ip,kind,status,last_seen_at,created_at FROM servers WHERE kind='local' ORDER BY created_at ASC")
+        .fetch_all(&state.db).await {
         Ok(rows) => Json(rows.into_iter().map(|r| serde_json::json!({
             "id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("name"), "publicIp": r.get::<Option<String>,_>("public_ip"),
             "kind": r.get::<String,_>("kind"), "status": r.get::<String,_>("status"), "lastSeenAt": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("last_seen_at")
@@ -85,76 +74,20 @@ pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 }
 
-pub async fn create_server(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<CreateServer>,
-) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    if body.name.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "server name is required").into_response();
-    }
-    let token = random_token(64);
-    let row = sqlx::query("INSERT INTO servers (user_id,name,public_ip,kind,install_token_hash) VALUES ($1,$2,$3,'remote',$4) RETURNING id")
-        .bind(user_id).bind(body.name.trim()).bind(body.public_ip).bind(hash_token(&token))
-        .fetch_one(&state.db).await;
-    match row {
-        Ok(r) => {
-            let id = r.get::<Uuid, _>("id");
-            Json(serde_json::json!({
-                "id": id,
-                "installToken": token,
-                "installCommand": remote_agent_install_command(&state, id, Some(&token))
-            }))
-            .into_response()
-        }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-pub async fn server_install_command(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let token = random_token(64);
-    let row = sqlx::query("UPDATE servers SET install_token_hash=$3, updated_at=now() WHERE id=$1 AND user_id=$2 RETURNING id")
-        .bind(id)
-        .bind(user_id)
-        .bind(hash_token(&token))
-        .fetch_optional(&state.db)
-        .await;
-    match row {
-        Ok(Some(_)) => Json(serde_json::json!({"installToken": token, "command": remote_agent_install_command(&state, id, Some(&token))})).into_response(),
-        _ => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-fn remote_agent_install_command(state: &AppState, server_id: Uuid, token: Option<&str>) -> String {
-    let repo_url = state
-        .hostlet_repo_url
-        .as_deref()
-        .unwrap_or("REPLACE_WITH_HOSTLET_REPO_URL");
-    let token_arg = token
-        .map(|token| format!(" HOSTLET_INSTALL_TOKEN={}", shell_quote(token)))
-        .unwrap_or_default();
-    format!(
-        "curl -fsSL {}/install-agent.sh | sudo HOSTLET_API_URL={} HOSTLET_SERVER_ID={} HOSTLET_REPO_URL={}{} bash",
-        shell_quote(&state.public_api_url),
-        shell_quote(&state.public_api_url),
-        shell_quote(&server_id.to_string()),
-        shell_quote(repo_url),
-        token_arg
+pub async fn create_server() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        "remote VPS agents are deferred in this release; deploy to this Hostlet machine",
     )
+        .into_response()
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+pub async fn server_install_command() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        "remote VPS agents are deferred in this release; deploy to this Hostlet machine",
+    )
+        .into_response()
 }
 
 pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -443,9 +376,8 @@ pub async fn create_app(
         )
         .unwrap(),
     };
-    let server = sqlx::query("SELECT id FROM servers WHERE id=$1 AND (user_id=$2 OR kind='local')")
+    let server = sqlx::query("SELECT id FROM servers WHERE id=$1 AND kind='local'")
         .bind(server_id)
-        .bind(user_id)
         .fetch_optional(&state.db)
         .await;
     let Ok(Some(_)) = server else {
@@ -1481,7 +1413,8 @@ pub async fn cloudflare_status(
         }))
         .into_response();
     };
-    let resp = reqwest::Client::new()
+    let resp = state
+        .http
         .get(format!(
             "https://api.cloudflare.com/client/v4/zones/{zone_id}"
         ))
@@ -1531,7 +1464,7 @@ async fn ensure_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Re
         anyhow::bail!("Cloudflare DNS is not configured");
     };
 
-    let client = reqwest::Client::new();
+    let client = &state.http;
     let base = format!("https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records");
     let existing = client
         .get(&base)
@@ -1578,7 +1511,7 @@ async fn delete_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Re
         anyhow::bail!("Cloudflare DNS is not configured");
     };
 
-    let client = reqwest::Client::new();
+    let client = &state.http;
     let base = format!("https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records");
     let existing = client
         .get(&base)

@@ -9,8 +9,6 @@ use rand::{distributions::Alphanumeric, Rng, RngCore};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
-const DEV_ENCRYPTION_KEY_BYTES: [u8; 32] = [7u8; 32];
-
 #[derive(Clone)]
 pub struct Crypto {
     cipher: Aes256Gcm,
@@ -20,15 +18,15 @@ impl Crypto {
     pub fn from_env(allow_insecure_dev_defaults: bool) -> anyhow::Result<Self> {
         let key = match nonempty_env("ENCRYPTION_KEY") {
             Some(key) => key,
-            None if allow_insecure_dev_defaults => STANDARD.encode(DEV_ENCRYPTION_KEY_BYTES),
             None => {
                 bail!("ENCRYPTION_KEY is required; generate one with `openssl rand -base64 32`")
             }
         };
-        if !allow_insecure_dev_defaults && key == STANDARD.encode(DEV_ENCRYPTION_KEY_BYTES) {
-            bail!("ENCRYPTION_KEY is using the insecure development default");
+        let crypto = Self::new(&key)?;
+        if !allow_insecure_dev_defaults && key.len() < 32 {
+            bail!("ENCRYPTION_KEY must not be a short development value");
         }
-        Self::new(&key)
+        Ok(crypto)
     }
 
     pub fn new(base64_key: &str) -> anyhow::Result<Self> {

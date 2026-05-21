@@ -114,7 +114,7 @@ export default function CreateApp() {
           <PageHeader
             eyebrow="New application"
             title="Create app"
-            description="Choose a GitHub repo, target machine, runtime settings, and optional automation."
+            description="Choose a GitHub repo, local runtime settings, and optional automation."
             actions={<Link className="button-secondary" href="/apps"><Box size={16} />Back to apps</Link>}
           />
 
@@ -164,7 +164,7 @@ export default function CreateApp() {
               <section className="panel p-4">
                 <div className="mb-4 flex items-center gap-2">
                   <Server size={18} />
-                  <h2 className="font-semibold">Target and route</h2>
+                  <h2 className="font-semibold">Local target and route</h2>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="App name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} placeholder="my-app" />
@@ -172,7 +172,7 @@ export default function CreateApp() {
                   <label className="block">
                     <span>Deploy target</span>
                     <select className="mt-1" value={form.server_id} onChange={(event) => setForm({ ...form, server_id: event.target.value })}>
-                      {servers.map((server) => <option key={server.id} value={server.id}>{server.name}{server.kind === "local" ? " (default)" : ""}</option>)}
+                      {servers.map((server) => <option key={server.id} value={server.id}>{server.name} (local)</option>)}
                       {servers.length === 0 && <option value="">This machine</option>}
                     </select>
                   </label>
@@ -227,7 +227,7 @@ export default function CreateApp() {
                 <h2 className="font-semibold">Create summary</h2>
                 <div className="mt-4 grid gap-2">
                   <Summary label="Repo" value={form.repo_full_name || "Choose a repo"} />
-                  <Summary label="Machine" value={selectedServer ? `${selectedServer.name} · ${selectedServer.status}` : "Choose a target"} />
+                  <Summary label="Machine" value={selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
                   <Summary label="Route" value={form.domain || "Hostlet will generate one"} />
                   <Summary label="Runtime" value={`:${form.container_port}${form.health_path}`} />
                   <Summary label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
@@ -243,7 +243,7 @@ export default function CreateApp() {
                   <HardDrive size={17} />
                   Target status
                 </div>
-                <p className="muted mt-2">Hostlet will build from GitHub, start a Docker container, health check it, then publish the route after success.</p>
+                <p className="muted mt-2">Hostlet will build from GitHub, start a Docker container on this machine, health check it, then publish the route after success.</p>
               </section>
             </aside>
           </div>

@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hostlet}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hostlet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run hostlet init first}
       POSTGRES_DB: ${POSTGRES_DB:-hostlet}
     ports:
       - "127.0.0.1:5432:5432"
@@ -15,11 +15,10 @@ services:
     working_dir: /repo
     command: bash -lc "/usr/local/cargo/bin/cargo run --manifest-path apps/api/Cargo.toml"
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:-hostlet}@postgres:5432/${POSTGRES_DB:-hostlet}
+      DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
       BIND_ADDR: 0.0.0.0:8080
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
       PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-http://localhost:3000}
-      HOSTLET_REPO_URL: ${HOSTLET_REPO_URL:-}
       HOSTLET_CONTROL_PLANE_HOST: ${HOSTLET_CONTROL_PLANE_HOST:-localhost}
       HOSTLET_ALLOWED_WEB_ORIGINS: ${HOSTLET_ALLOWED_WEB_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       HOSTLET_BASE_DOMAIN: ${HOSTLET_BASE_DOMAIN:-}
@@ -27,15 +26,15 @@ services:
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
       CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID:-}
       CLOUDFLARE_TUNNEL_TARGET: ${CLOUDFLARE_TUNNEL_TARGET:-}
-      HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS: ${HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS:-true}
-      HOSTLET_SETUP_TOKEN: ${HOSTLET_SETUP_TOKEN:-}
-      HOSTLET_ALLOWED_GITHUB_LOGINS: ${HOSTLET_ALLOWED_GITHUB_LOGINS:-}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=}
-      JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET:-dev-job-signing-secret-change-me}
-      SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-change-me-use-random-in-production}
+      HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS: ${HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS:-false}
+      HOSTLET_SETUP_TOKEN: ${HOSTLET_SETUP_TOKEN:?Run hostlet init first}
+      HOSTLET_ALLOWED_GITHUB_LOGINS: ${HOSTLET_ALLOWED_GITHUB_LOGINS:?Run hostlet init first}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run hostlet init first}
+      JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET:?Run hostlet init first}
+      SESSION_SECRET: ${SESSION_SECRET:?Run hostlet init first}
       LOCAL_SERVER_ID: 00000000-0000-0000-0000-000000000001
-      LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:-dev-local-agent-token-change-me}
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-dev-webhook-secret}
+      LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:?Run hostlet init first}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?Run hostlet init first}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
     ports:
       - "8080:8080"
@@ -52,8 +51,8 @@ services:
     environment:
       HOSTLET_API_URL: http://127.0.0.1:8080
       HOSTLET_SERVER_ID: 00000000-0000-0000-0000-000000000001
-      HOSTLET_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:-dev-local-agent-token-change-me}
-      HOSTLET_JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET:-dev-job-signing-secret-change-me}
+      HOSTLET_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:?Run hostlet init first}
+      HOSTLET_JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET:?Run hostlet init first}
       HOSTLET_WORKDIR: /var/lib/hostlet
       HOSTLET_LOCAL_MODE: "true"
       HOSTLET_HEALTH_HOST: 127.0.0.1

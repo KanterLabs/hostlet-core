@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hostlet}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run hostlet init first}
       POSTGRES_DB: ${POSTGRES_DB:-hostlet}
     volumes:
       - hostlet-postgres:/var/lib/postgresql/data
@@ -15,11 +15,10 @@ services:
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hostlet}
+      DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
       BIND_ADDR: 0.0.0.0:8080
-      PUBLIC_API_URL: ${PUBLIC_API_URL}
-      PUBLIC_WEB_URL: ${PUBLIC_WEB_URL}
-      HOSTLET_REPO_URL: ${HOSTLET_REPO_URL:-}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:?Run hostlet init first}
+      PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:?Run hostlet init first}
       HOSTLET_ALLOWED_WEB_ORIGINS: ${HOSTLET_ALLOWED_WEB_ORIGINS:-}
       HOSTLET_BASE_DOMAIN: ${HOSTLET_BASE_DOMAIN:-}
       HOSTLET_DOMAIN_PREFIX: ${HOSTLET_DOMAIN_PREFIX:-hostlet-}
@@ -27,14 +26,14 @@ services:
       CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID:-}
       CLOUDFLARE_TUNNEL_TARGET: ${CLOUDFLARE_TUNNEL_TARGET:-}
       HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS: "false"
-      HOSTLET_SETUP_TOKEN: ${HOSTLET_SETUP_TOKEN}
-      HOSTLET_ALLOWED_GITHUB_LOGINS: ${HOSTLET_ALLOWED_GITHUB_LOGINS}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET}
-      SESSION_SECRET: ${SESSION_SECRET}
+      HOSTLET_SETUP_TOKEN: ${HOSTLET_SETUP_TOKEN:?Run hostlet init first}
+      HOSTLET_ALLOWED_GITHUB_LOGINS: ${HOSTLET_ALLOWED_GITHUB_LOGINS:?Run hostlet init first}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run hostlet init first}
+      JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET:?Run hostlet init first}
+      SESSION_SECRET: ${SESSION_SECRET:?Run hostlet init first}
       LOCAL_SERVER_ID: 00000000-0000-0000-0000-000000000001
-      LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN}
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:?Run hostlet init first}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?Run hostlet init first}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
     ports:
       - "127.0.0.1:8080:8080"
@@ -47,11 +46,15 @@ services:
       dockerfile: apps/agent/Dockerfile
     restart: unless-stopped
     network_mode: host
+    group_add:
+      - ${DOCKER_GID:?Run hostlet init first}
+    security_opt:
+      - no-new-privileges:true
     environment:
       HOSTLET_API_URL: http://127.0.0.1:8080
       HOSTLET_SERVER_ID: 00000000-0000-0000-0000-000000000001
-      HOSTLET_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN}
-      HOSTLET_JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET}
+      HOSTLET_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:?Run hostlet init first}
+      HOSTLET_JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET:?Run hostlet init first}
       HOSTLET_WORKDIR: /var/lib/hostlet
       HOSTLET_LOCAL_MODE: "true"
       HOSTLET_HEALTH_HOST: 127.0.0.1
@@ -84,7 +87,7 @@ services:
     network_mode: host
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     depends_on:
       - caddy
 
@@ -94,7 +97,7 @@ services:
       dockerfile: apps/web/Dockerfile
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL}
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:?Run hostlet init first}
       NEXT_PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
     ports:
       - "127.0.0.1:3000:3000"
