@@ -1,0 +1,12 @@
+{
+  "name": "hostlet",
+  "private": true,
+  "scripts": {
+    "dev": "docker compose -f infra/docker-compose.yml up --build",
+    "web:dev": "pnpm --dir apps/web dev",
+    "web:build": "pnpm --dir apps/web build",
+    "web:lint": "pnpm --dir apps/web lint",
+    "api:test": "cargo test --manifest-path apps/api/Cargo.toml",
+    "agent:test": "cargo test --manifest-path apps/agent/Cargo.toml"
+  }
+}

@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hostlet
+      POSTGRES_PASSWORD: hostlet
+      POSTGRES_DB: hostlet
+    ports:
+      - "5432:5432"
+    volumes:
+      - hostlet-postgres:/var/lib/postgresql/data
+
+  api:
+    image: rust:latest
+    working_dir: /repo
+    command: bash -lc "apt-get update && apt-get install -y docker.io && /usr/local/cargo/bin/cargo run --manifest-path apps/api/Cargo.toml"
+    environment:
+      DATABASE_URL: postgres://hostlet:hostlet@postgres:5432/hostlet
+      BIND_ADDR: 0.0.0.0:8080
+      PUBLIC_API_URL: http://localhost:8080
+      PUBLIC_WEB_URL: http://localhost:3000
+      HOSTLET_BASE_DOMAIN: ${HOSTLET_BASE_DOMAIN:-}
+      HOSTLET_DOMAIN_PREFIX: ${HOSTLET_DOMAIN_PREFIX:-hostlet-}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID:-}
+      CLOUDFLARE_TUNNEL_TARGET: ${CLOUDFLARE_TUNNEL_TARGET:-}
+      HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS: "true"
+      ENCRYPTION_KEY: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
+      JOB_SIGNING_SECRET: dev-job-signing-secret-change-me
+      SESSION_SECRET: dev-session-secret-change-me-use-random-in-production
+      LOCAL_SERVER_ID: 00000000-0000-0000-0000-000000000001
+      LOCAL_AGENT_TOKEN: dev-local-agent-token-change-me
+      GITHUB_WEBHOOK_SECRET: dev-webhook-secret
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ..:/repo
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - postgres
+
+  local-agent:
+    image: rust:latest
+    working_dir: /repo
+    network_mode: host
+    command: bash -lc "apt-get update && apt-get install -y docker.io git && /usr/local/cargo/bin/cargo run --manifest-path apps/agent/Cargo.toml"
+    environment:
+      HOSTLET_API_URL: http://127.0.0.1:8080
+      HOSTLET_SERVER_ID: 00000000-0000-0000-0000-000000000001
+      HOSTLET_AGENT_TOKEN: dev-local-agent-token-change-me
+      HOSTLET_JOB_SIGNING_SECRET: dev-job-signing-secret-change-me
+      HOSTLET_WORKDIR: /var/lib/hostlet
+      HOSTLET_LOCAL_MODE: "true"
+      HOSTLET_HEALTH_HOST: 127.0.0.1
+      HOSTLET_LOCAL_ROUTER: caddy
+      HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR: /var/lib/hostlet/caddy
+      HOSTLET_LOCAL_ROUTER_RELOAD: docker exec hostlet-caddy caddy reload --config /etc/caddy/Caddyfile
+    volumes:
+      - ..:/repo
+      - /var/run/docker.sock:/var/run/docker.sock
+      - hostlet-agent:/var/lib/hostlet
+    depends_on:
+      - api
+      - caddy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: hostlet-caddy
+    network_mode: host
+    command: caddy run --config /etc/caddy/Caddyfile
+    volumes:
+      - ./Caddyfile.tunnel:/etc/caddy/Caddyfile:ro
+      - hostlet-agent:/var/lib/hostlet
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    network_mode: host
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    restart: unless-stopped
+    depends_on:
+      - caddy
+
+  web:
+    image: node:22-alpine
+    working_dir: /repo/apps/web
+    command: sh -lc "corepack enable && pnpm install --no-frozen-lockfile --config.confirm-modules-purge=false --config.minimum-release-age=0 --config.dangerously-allow-all-builds=true && pnpm --config.minimum-release-age=0 dev --hostname 0.0.0.0"
+    environment:
+      CI: "true"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NEXT_ALLOWED_DEV_ORIGINS: ${NEXT_ALLOWED_DEV_ORIGINS:-10.0.0.194}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ..:/repo
+    depends_on:
+      - api
+
+volumes:
+  hostlet-postgres:
+  hostlet-agent:

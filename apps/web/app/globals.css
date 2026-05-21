@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background: #fbfcfa;
+  color: #17201b;
+}
+
+* {
+  min-width: 0;
+}
+
+input, select, textarea {
+  @apply w-full rounded-md border border-line bg-white px-3 py-2 text-sm outline-none focus:border-action;
+}
+
+button, .button {
+  @apply inline-flex items-center justify-center gap-2 rounded-md bg-action px-3 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:opacity-50;
+}
+
+.muted {
+  @apply text-sm text-neutral-600;
+}

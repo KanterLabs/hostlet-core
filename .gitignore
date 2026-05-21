@@ -1,0 +1,9 @@
+target/
+node_modules/
+.pnpm-store/
+.next/
+.env
+.env.local
+*.db
+hostlet-agent
+data/

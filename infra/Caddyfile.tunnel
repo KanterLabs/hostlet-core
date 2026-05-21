@@ -1,0 +1,11 @@
+{
+	auto_https off
+}
+
+http://:18080 {
+	bind 127.0.0.1
+	route {
+		import /var/lib/hostlet/caddy/*.caddy
+		respond "not found" 404
+	}
+}
