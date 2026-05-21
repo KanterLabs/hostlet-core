@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/api", "apps/agent"]
+members = ["apps/api", "apps/agent", "apps/cli"]
 resolver = "2"
 
 [workspace.package]
@@ -31,3 +31,5 @@ uuid = { version = "1", features = ["serde", "v4"] }
 aes-gcm = "0.10"
 rand = "0.8"
 url = "2"
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"

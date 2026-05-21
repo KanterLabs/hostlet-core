@@ -9,12 +9,11 @@ type SetupStatus = {
   unlocked: boolean;
 };
 
-const UNLOCK_STORAGE_KEY = "hostlet:control-plane-unlocked";
-
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [setupToken, setSetupToken] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [locallyUnlocked, setLocallyUnlocked] = useState(false);
@@ -29,9 +28,6 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   useEffect(() => {
-    if (window.localStorage.getItem(UNLOCK_STORAGE_KEY) === "true") {
-      setLocallyUnlocked(true);
-    }
     refresh().catch((err) => setError(err.message || "Could not reach Hostlet API."));
   }, []);
 
@@ -44,10 +40,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
     setSaving(true);
     const path = status?.setupRequired ? "/api/setup" : "/api/unlock";
+    const headers: Record<string, string> = { "Content-Type": "application/json", "X-Hostlet-CSRF": "1" };
+    if (status?.setupRequired && setupToken.trim()) {
+      headers["X-Hostlet-Setup-Token"] = setupToken.trim();
+    }
     const res = await fetch(`${apiUrl()}${path}`, {
       method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ password }),
     });
     setSaving(false);
@@ -57,8 +57,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
     setPassword("");
     setConfirm("");
-    window.localStorage.setItem(UNLOCK_STORAGE_KEY, "true");
+    setSetupToken("");
     setLocallyUnlocked(true);
+    await refresh().catch(() => undefined);
   }
 
   if (status?.unlocked || locallyUnlocked) return <>{children}</>;
@@ -121,6 +122,19 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
                 value={confirm}
                 onChange={(event) => setConfirm(event.target.value)}
                 required
+              />
+            </label>
+          )}
+          {setup && (
+            <label className="block text-sm font-medium">
+              Setup token
+              <input
+                className="mt-1"
+                type="password"
+                autoComplete="one-time-code"
+                value={setupToken}
+                onChange={(event) => setSetupToken(event.target.value)}
+                placeholder="Required if configured"
               />
             </label>
           )}

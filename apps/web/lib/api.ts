@@ -15,11 +15,17 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
+  const method = (init.method || "GET").toUpperCase();
+  const headers = {
+    ...(init.body ? { "Content-Type": "application/json" } : {}),
+    ...(!["GET", "HEAD"].includes(method) ? { "X-Hostlet-CSRF": "1" } : {}),
+    ...(init.headers || {}),
+  };
   const res = await fetch(`${apiUrl()}${path}`, {
     ...init,
     credentials: "include",
     signal: controller.signal,
-    headers: { "Content-Type": "application/json", ...(init.headers || {}) },
+    headers,
     cache: "no-store",
   }).finally(() => clearTimeout(timeout));
   if (res.status === 401 && typeof window !== "undefined" && window.location.pathname !== "/login") {

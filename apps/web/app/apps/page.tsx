@@ -29,6 +29,15 @@ type App = {
   server?: { id: string; name: string; kind: string; status: string; lastSeenAt?: string | null } | null;
   latestDeployment?: Deployment | null;
   currentDeployment?: { status: string; finishedAt?: string | null } | null;
+  publicExposure?: boolean | null;
+  autoDeploy?: boolean | null;
+  latestWebhook?: {
+    status: string;
+    ignoredReason?: string | null;
+    commitSha?: string | null;
+    branch?: string | null;
+    createdAt?: string | null;
+  } | null;
 };
 
 export default function Apps() {
@@ -77,12 +86,14 @@ export default function Apps() {
               </div>
 
               <div className="mt-4 grid gap-3 md:grid-cols-3">
-                <Info label="Domain" value={displayDomain(app.domain)} href={domainHref(app.domain)} />
+                <Info label="Domain" value={displayDomain(app.domain)} href={domainHref(app)} />
                 <Info label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
                 <Info label="Container" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
                 <Info label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
                 <Info label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
                 <Info label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
+                <Info label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />
+                <Info label="Webhook" value={webhookSummary(app.latestWebhook)} />
               </div>
 
               {app.latestDeployment?.failure && (
@@ -141,10 +152,26 @@ function deploymentSummary(deployment?: Deployment | null) {
   return when ? `${deployment.status || "unknown"} · ${new Date(when).toLocaleString()}` : deployment.status || "unknown";
 }
 
-function domainHref(domain: string) {
-  const display = displayDomain(domain);
+function webhookSummary(webhook?: App["latestWebhook"]) {
+  if (!webhook) return "No branch push seen";
+  const when = webhook.createdAt ? ` · ${new Date(webhook.createdAt).toLocaleString()}` : "";
+  return webhook.ignoredReason ? `${webhook.status}: ${webhook.ignoredReason}` : `${webhook.status}${when}`;
+}
+
+function domainHref(app: App) {
+  if (!app.publicExposure) return null;
+  const display = displayDomain(app.domain);
   if (!display) return null;
-  return display.startsWith("http://") || display.startsWith("https://") ? display : `http://${display}`;
+  if (display.startsWith("http://") || display.startsWith("https://")) return display;
+  try {
+    const url = new URL(`http://${display}`);
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || /^[\d.]+$/.test(url.hostname)) {
+      return `http://${display}`;
+    }
+  } catch {
+    return null;
+  }
+  return `https://${display}`;
 }
 
 function displayDomain(domain: string) {

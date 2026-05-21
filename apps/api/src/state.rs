@@ -23,6 +23,8 @@ pub struct AppState {
     pub github_webhook_secret: String,
     pub public_api_url: String,
     pub public_web_url: String,
+    pub hostlet_repo_url: Option<String>,
+    pub allowed_web_origins: Vec<String>,
     pub base_domain: Option<String>,
     pub domain_prefix: String,
     pub cloudflare_api_token: Option<String>,
@@ -30,9 +32,16 @@ pub struct AppState {
     pub cloudflare_tunnel_target: Option<String>,
     pub job_signing_secret: String,
     pub session_secret: String,
+    pub setup_token: Option<String>,
     pub allowed_github_logins: Option<HashSet<String>>,
-    pub agents: Arc<RwLock<HashMap<Uuid, mpsc::Sender<serde_json::Value>>>>,
+    pub agents: Arc<RwLock<HashMap<Uuid, AgentConnection>>>,
     pub logs: broadcast::Sender<LogEvent>,
+}
+
+#[derive(Clone)]
+pub struct AgentConnection {
+    pub connection_id: Uuid,
+    pub sender: mpsc::Sender<serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +73,16 @@ impl AppState {
         if !allow_insecure_dev_defaults && allowed_github_logins.is_none() {
             bail!("HOSTLET_ALLOWED_GITHUB_LOGINS is required in secure mode");
         }
+        let public_api_url =
+            std::env::var("PUBLIC_API_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+        let public_web_url =
+            std::env::var("PUBLIC_WEB_URL").unwrap_or_else(|_| "http://localhost:3000".into());
+        let allowed_web_origins =
+            allowed_web_origins(&public_web_url, allow_insecure_dev_defaults)?;
+        let setup_token = nonempty_env("HOSTLET_SETUP_TOKEN");
+        if !allow_insecure_dev_defaults && setup_token.is_none() {
+            bail!("HOSTLET_SETUP_TOKEN is required in secure mode for first-run setup");
+        }
         seed_local_server(&db, &local_agent_token).await?;
         let (logs, _) = broadcast::channel(1024);
         Ok(Self {
@@ -76,10 +95,10 @@ impl AppState {
                 DEV_GITHUB_WEBHOOK_SECRET,
                 allow_insecure_dev_defaults,
             )?,
-            public_api_url: std::env::var("PUBLIC_API_URL")
-                .unwrap_or_else(|_| "http://localhost:8080".into()),
-            public_web_url: std::env::var("PUBLIC_WEB_URL")
-                .unwrap_or_else(|_| "http://localhost:3000".into()),
+            public_api_url,
+            public_web_url,
+            hostlet_repo_url: nonempty_env("HOSTLET_REPO_URL"),
+            allowed_web_origins,
             base_domain: nonempty_env("HOSTLET_BASE_DOMAIN"),
             domain_prefix: std::env::var("HOSTLET_DOMAIN_PREFIX")
                 .unwrap_or_else(|_| "hostlet-".into()),
@@ -96,9 +115,20 @@ impl AppState {
                 DEV_SESSION_SECRET,
                 allow_insecure_dev_defaults,
             )?,
+            setup_token,
             allowed_github_logins,
             agents: Arc::new(RwLock::new(HashMap::new())),
             logs,
+        })
+    }
+}
+
+impl AppState {
+    pub fn web_origin_allowed(&self, value: &str) -> bool {
+        normalize_origin(value).as_deref().is_some_and(|origin| {
+            self.allowed_web_origins
+                .iter()
+                .any(|allowed| allowed == origin)
         })
     }
 }
@@ -156,4 +186,66 @@ fn allowed_github_logins() -> Option<HashSet<String>> {
         .filter(|login| !login.is_empty())
         .collect::<HashSet<_>>();
     (!logins.is_empty()).then_some(logins)
+}
+
+fn allowed_web_origins(
+    public_web_url: &str,
+    allow_insecure_dev_defaults: bool,
+) -> anyhow::Result<Vec<String>> {
+    let mut origins = Vec::new();
+    push_origin(&mut origins, public_web_url)?;
+    if allow_insecure_dev_defaults {
+        push_origin(&mut origins, "http://localhost:3000")?;
+        push_origin(&mut origins, "http://127.0.0.1:3000")?;
+    }
+    if let Some(extra) = nonempty_env("HOSTLET_ALLOWED_WEB_ORIGINS") {
+        for origin in extra
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+        {
+            push_origin(&mut origins, origin)?;
+        }
+    }
+    Ok(origins)
+}
+
+fn push_origin(origins: &mut Vec<String>, value: &str) -> anyhow::Result<()> {
+    let origin = normalize_origin(value)
+        .ok_or_else(|| anyhow::anyhow!("{value} is not a valid http(s) origin"))?;
+    if !origins.iter().any(|existing| existing == &origin) {
+        origins.push(origin);
+    }
+    Ok(())
+}
+
+pub fn normalize_origin(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    let mut origin = format!("{}://{}", url.scheme(), host);
+    if let Some(port) = url.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    Some(origin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_origin_without_path() {
+        assert_eq!(
+            normalize_origin("http://10.0.0.194:3000/settings").as_deref(),
+            Some("http://10.0.0.194:3000")
+        );
+    }
+
+    #[test]
+    fn rejects_non_http_origins() {
+        assert!(normalize_origin("file:///tmp/index.html").is_none());
+    }
 }

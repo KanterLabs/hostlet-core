@@ -78,9 +78,11 @@ async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
         .insert("x-hostlet-agent-token", cfg.agent_token.parse()?);
     let (mut ws, _) = connect_async(req).await?;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    let mut resource_stats = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
             _ = heartbeat.tick() => ws.send(Message::Text(json!({"type":"heartbeat"}).to_string())).await?,
+            _ = resource_stats.tick() => publish_resource_stats(&cfg).await,
             msg = ws.next() => {
                 let Some(Ok(Message::Text(text))) = msg else { bail!("websocket closed"); };
                 let value: Value = serde_json::from_str(&text)?;
@@ -91,13 +93,24 @@ async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
                     if !verify_signature(&cfg.job_signing_secret, &raw, signature) {
                         bail!("job signature verification failed");
                     }
-                    if let Err(err) = handle_job(cfg.clone(), payload.clone()).await {
-                        let message = format!("{err}");
-                        if let Some(deployment_id) = payload.get("deployment_id").and_then(|v| v.as_str()).and_then(|v| Uuid::parse_str(v).ok()) {
-                            log(&cfg, deployment_id, "stderr", &message).await;
-                            status(&cfg, deployment_id, "failed", Some(&format!("{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run."))).await;
+                    let job_id = payload.get("job_id").and_then(|v| v.as_str()).and_then(|v| Uuid::parse_str(v).ok());
+                    match handle_job(cfg.clone(), payload.clone()).await {
+                        Ok(()) => {
+                            if let Some(job_id) = job_id {
+                                job_status(&cfg, job_id, "success", None).await;
+                            }
                         }
-                        tracing::warn!("job failed: {message}");
+                        Err(err) => {
+                            let message = format!("{err}");
+                            if let Some(deployment_id) = payload.get("deployment_id").and_then(|v| v.as_str()).and_then(|v| Uuid::parse_str(v).ok()) {
+                                log(&cfg, deployment_id, "stderr", &message).await;
+                                status(&cfg, deployment_id, "failed", Some(&format!("{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run."))).await;
+                            }
+                            if let Some(job_id) = job_id {
+                                job_status(&cfg, job_id, "failed", Some(&message)).await;
+                            }
+                            tracing::warn!("job failed: {message}");
+                        }
                     }
                 }
             }
@@ -109,15 +122,26 @@ async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
     match payload.get("type").and_then(|v| v.as_str()) {
         Some("deploy") => deploy(cfg, payload).await,
         Some("rollback") => rollback(cfg, payload).await,
+        Some("delete_app") => delete_app(cfg, payload).await,
         _ => Ok(()),
     }
 }
 
 async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
-    let app_name = safe_name(p["app_name"].as_str().context("app_name")?);
+    let app_id = Uuid::parse_str(p["app_id"].as_str().context("app_id")?)?;
+    let app_name = safe_name(&format!("app-{app_id}"));
+    let route_key = p
+        .get("route_key")
+        .and_then(|v| v.as_str())
+        .map(safe_name)
+        .unwrap_or_else(|| app_name.clone());
     let repo = p["repo"].as_str().context("repo")?;
     let branch = p["branch"].as_str().context("branch")?;
+    let commit_sha = p
+        .get("commit_sha")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HEAD");
     let port = p["container_port"].as_i64().context("container_port")?;
     let domain = p["domain"].as_str().context("domain")?;
     let health_path = p["health_path"].as_str().unwrap_or("/");
@@ -125,26 +149,69 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         .get("root_directory")
         .and_then(|v| v.as_str())
         .unwrap_or(".");
+    let github_token = p.get("github_token").and_then(|v| v.as_str());
     validate_repo(repo)?;
     validate_branch(branch)?;
+    validate_commit_sha(commit_sha)?;
     validate_port(port)?;
     validate_domain(domain)?;
     validate_health_path(health_path)?;
     status(&cfg, deployment_id, "building", None).await;
     let checkout = cfg.workdir.join("repos").join(&app_name);
+    let expected_remote = format!("https://github.com/{repo}.git");
+    let fetch_remote = git_fetch_remote(repo, github_token);
     if checkout.exists() {
+        ensure_checkout_remote(&cfg, deployment_id, &checkout, &expected_remote).await?;
         run_log(
             &cfg,
             deployment_id,
             "git",
-            &["-C", checkout.to_str().unwrap(), "fetch", "origin", branch],
+            &[
+                "-C",
+                checkout.to_str().unwrap(),
+                "fetch",
+                &fetch_remote,
+                branch,
+            ],
         )
         .await?;
+        if commit_sha == "HEAD" {
+            run_log(
+                &cfg,
+                deployment_id,
+                "git",
+                &[
+                    "-C",
+                    checkout.to_str().unwrap(),
+                    "checkout",
+                    "-B",
+                    branch,
+                    "FETCH_HEAD",
+                ],
+            )
+            .await?;
+        } else {
+            run_log(
+                &cfg,
+                deployment_id,
+                "git",
+                &[
+                    "-C",
+                    checkout.to_str().unwrap(),
+                    "checkout",
+                    "--detach",
+                    commit_sha,
+                ],
+            )
+            .await?;
+        }
+    } else {
+        tokio::fs::create_dir_all(&checkout).await?;
         run_log(
             &cfg,
             deployment_id,
             "git",
-            &["-C", checkout.to_str().unwrap(), "checkout", branch],
+            &["-C", checkout.to_str().unwrap(), "init"],
         )
         .await?;
         run_log(
@@ -154,31 +221,62 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
             &[
                 "-C",
                 checkout.to_str().unwrap(),
-                "pull",
-                "--ff-only",
+                "remote",
+                "add",
                 "origin",
-                branch,
+                &expected_remote,
             ],
         )
         .await?;
-    } else {
-        tokio::fs::create_dir_all(checkout.parent().unwrap()).await?;
         run_log(
             &cfg,
             deployment_id,
             "git",
             &[
-                "clone",
-                "--branch",
-                branch,
-                &format!("https://github.com/{repo}.git"),
+                "-C",
                 checkout.to_str().unwrap(),
+                "fetch",
+                &fetch_remote,
+                branch,
             ],
         )
         .await?;
+        if commit_sha != "HEAD" {
+            run_log(
+                &cfg,
+                deployment_id,
+                "git",
+                &[
+                    "-C",
+                    checkout.to_str().unwrap(),
+                    "checkout",
+                    "--detach",
+                    commit_sha,
+                ],
+            )
+            .await?;
+        } else {
+            run_log(
+                &cfg,
+                deployment_id,
+                "git",
+                &[
+                    "-C",
+                    checkout.to_str().unwrap(),
+                    "checkout",
+                    "-B",
+                    branch,
+                    "FETCH_HEAD",
+                ],
+            )
+            .await?;
+        }
+    }
+    if commit_sha != "HEAD" {
+        verify_git_head(&cfg, deployment_id, &checkout, commit_sha).await?;
     }
     let image = format!("hostlet/{app_name}:{deployment_id}");
-    let project_dir = safe_project_dir(&checkout, root_directory)?;
+    let project_dir = safe_project_dir(&checkout, root_directory).await?;
     let build = prepare_build(&cfg, deployment_id, &project_dir, port, &p).await?;
     run_log(
         &cfg,
@@ -276,7 +374,7 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let mut local_url = None;
     if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            write_local_caddy_route(router, &app_name, domain, internal_port).await?;
+            write_local_caddy_route(router, &route_key, domain, internal_port).await?;
             run_router_reload(&cfg, deployment_id, router).await?;
         }
         let url = if cfg.local_router.is_some() {
@@ -293,7 +391,7 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         .await;
         local_url = Some(url);
     } else {
-        write_caddy_route(&app_name, domain, internal_port).await?;
+        write_caddy_route(&route_key, domain, internal_port).await?;
         run_log(
             &cfg,
             deployment_id,
@@ -306,10 +404,13 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         &cfg,
         deployment_id,
         "success",
-        None,
-        Some(&image),
-        Some(&container),
-        local_url.as_deref(),
+        StatusDetails {
+            image: Some(&image),
+            container: Some(&container),
+            local_url: local_url.as_deref(),
+            published_port: Some(internal_port),
+            ..StatusDetails::default()
+        },
     )
     .await;
     Ok(())
@@ -319,26 +420,39 @@ async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
     let container = p["target_container"].as_str().context("target_container")?;
     let domain = p["domain"].as_str().context("domain")?;
-    let app_name = safe_name(p["app_id"].as_str().unwrap_or("app"));
-    let port_value = p["container_port"].as_i64().unwrap_or(3000);
+    let route_key = p
+        .get("route_key")
+        .and_then(|v| v.as_str())
+        .map(safe_name)
+        .unwrap_or_else(|| safe_name(p["app_id"].as_str().unwrap_or("app")));
+    let port_value = p["published_port"]
+        .as_i64()
+        .context("target deployment is missing a published port; redeploy before rolling back")?;
     validate_port(port_value)?;
     let port = port_value as u16;
     validate_domain(domain)?;
     status(&cfg, deployment_id, "routing", None).await;
     if cfg.local_mode {
+        if let Some(router) = &cfg.local_router {
+            write_local_caddy_route(router, &route_key, domain, port).await?;
+            run_router_reload(&cfg, deployment_id, router).await?;
+        }
+        let local_url = cfg.local_router.as_ref().map(|_| domain);
         status_extra(
             &cfg,
             deployment_id,
             "rolled_back",
-            None,
-            None,
-            Some(container),
-            None,
+            StatusDetails {
+                container: Some(container),
+                local_url,
+                published_port: Some(port),
+                ..StatusDetails::default()
+            },
         )
         .await;
         return Ok(());
     }
-    write_caddy_route(&app_name, domain, port).await?;
+    write_caddy_route(&route_key, domain, port).await?;
     let reload = run_log(
         &cfg,
         deployment_id,
@@ -352,10 +466,11 @@ async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
                 &cfg,
                 deployment_id,
                 "rolled_back",
-                None,
-                None,
-                Some(container),
-                None,
+                StatusDetails {
+                    container: Some(container),
+                    published_port: Some(port),
+                    ..StatusDetails::default()
+                },
             )
             .await
         }
@@ -374,6 +489,46 @@ async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
+    let route_key = p
+        .get("route_key")
+        .and_then(|v| v.as_str())
+        .map(safe_name)
+        .unwrap_or_else(|| safe_name(p["app_id"].as_str().unwrap_or("app")));
+    let containers = p
+        .get("containers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for container in containers.iter().filter_map(|v| v.as_str()) {
+        if !valid_container_name(container) {
+            bail!("refusing to remove invalid managed container name during teardown");
+        }
+        run_quiet_absent_ok("docker", &["rm", "-f", container], &["No such container"]).await?;
+    }
+    let images = p
+        .get("images")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for image in images.iter().filter_map(|v| v.as_str()) {
+        if !valid_hostlet_image(image) {
+            bail!("refusing to remove invalid managed image name during teardown");
+        }
+        run_quiet_absent_ok("docker", &["image", "rm", "-f", image], &["No such image"]).await?;
+    }
+    if cfg.local_mode {
+        if let Some(router) = &cfg.local_router {
+            remove_local_caddy_route(router, &route_key).await?;
+            run_router_reload_quiet(router).await?;
+        }
+        return Ok(());
+    }
+    remove_caddy_route(&route_key).await?;
+    run_quiet("caddy", &["reload", "--config", "/etc/caddy/Caddyfile"]).await?;
+    Ok(())
+}
+
 async fn run_log(
     cfg: &Config,
     deployment_id: Uuid,
@@ -384,7 +539,7 @@ async fn run_log(
         cfg,
         deployment_id,
         "stdout",
-        &format!("$ {} {}", bin, args.join(" ")),
+        &format!("$ {} {}", bin, command_args_for_log(args).join(" ")),
     )
     .await;
     let mut cmd = Command::new(bin);
@@ -402,11 +557,146 @@ async fn run_log(
     tokio::spawn(async move {
         stream_lines(c2, deployment_id, "stderr", stderr).await;
     });
-    let status = child.wait().await?;
+    let status = match tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            bail!("{bin} timed out after 1800 seconds");
+        }
+    };
     if !status.success() {
         bail!("{bin} exited with {status}");
     }
     Ok(())
+}
+
+async fn run_quiet(bin: &str, args: &[&str]) -> anyhow::Result<()> {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to start {bin}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{bin} exited with {}: {}", output.status, stderr.trim());
+    }
+    Ok(())
+}
+
+async fn run_quiet_absent_ok(
+    bin: &str,
+    args: &[&str],
+    absent_needles: &[&str],
+) -> anyhow::Result<()> {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to start {bin}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    if absent_needles
+        .iter()
+        .any(|needle| combined.contains(needle))
+    {
+        return Ok(());
+    }
+    bail!("{bin} exited with {}: {}", output.status, combined.trim());
+}
+
+async fn run_capture_trim(
+    cfg: &Config,
+    deployment_id: Uuid,
+    bin: &str,
+    args: &[&str],
+) -> anyhow::Result<String> {
+    log(
+        cfg,
+        deployment_id,
+        "stdout",
+        &format!("$ {} {}", bin, command_args_for_log(args).join(" ")),
+    )
+    .await;
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to start {bin}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{bin} exited with {}: {}",
+            output.status,
+            redact(stderr.trim())
+        );
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .context("command output was not valid UTF-8")
+}
+
+async fn ensure_checkout_remote(
+    cfg: &Config,
+    deployment_id: Uuid,
+    checkout: &Path,
+    expected_remote: &str,
+) -> anyhow::Result<()> {
+    let remote = run_capture_trim(
+        cfg,
+        deployment_id,
+        "git",
+        &[
+            "-C",
+            checkout.to_str().unwrap(),
+            "config",
+            "--get",
+            "remote.origin.url",
+        ],
+    )
+    .await?;
+    if normalize_git_remote(&remote) != normalize_git_remote(expected_remote) {
+        bail!("existing checkout remote does not match the requested repository");
+    }
+    Ok(())
+}
+
+async fn verify_git_head(
+    cfg: &Config,
+    deployment_id: Uuid,
+    checkout: &Path,
+    expected_commit: &str,
+) -> anyhow::Result<()> {
+    let head = run_capture_trim(
+        cfg,
+        deployment_id,
+        "git",
+        &["-C", checkout.to_str().unwrap(), "rev-parse", "HEAD"],
+    )
+    .await?;
+    if !head.eq_ignore_ascii_case(expected_commit) {
+        bail!("checked-out commit did not match the signed deployment commit");
+    }
+    Ok(())
+}
+
+fn normalize_git_remote(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches(".git")
+        .trim_start_matches("https://")
+        .to_ascii_lowercase()
+}
+
+fn git_fetch_remote(repo: &str, github_token: Option<&str>) -> String {
+    let Some(token) = github_token.filter(|token| !token.trim().is_empty()) else {
+        return format!("https://github.com/{repo}.git");
+    };
+    let encoded = url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+    format!("https://x-access-token:{encoded}@github.com/{repo}.git")
 }
 
 struct BuildPlan {
@@ -506,7 +796,7 @@ async fn prepare_build(
     )
     .await;
 
-    let hostlet_dir = checkout.join(".hostlet");
+    let hostlet_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
     tokio::fs::create_dir_all(&hostlet_dir).await?;
     let dockerfile = hostlet_dir.join("Dockerfile");
     tokio::fs::write(
@@ -527,7 +817,7 @@ async fn prepare_build(
     })
 }
 
-fn safe_project_dir(checkout: &Path, root_directory: &str) -> anyhow::Result<PathBuf> {
+async fn safe_project_dir(checkout: &Path, root_directory: &str) -> anyhow::Result<PathBuf> {
     let clean = root_directory.trim().trim_start_matches('/');
     if clean.len() > 256
         || clean.starts_with('\\')
@@ -536,11 +826,21 @@ fn safe_project_dir(checkout: &Path, root_directory: &str) -> anyhow::Result<Pat
     {
         bail!("root directory cannot be absolute or contain ..");
     }
-    Ok(if clean.is_empty() || clean == "." {
+    let checkout = tokio::fs::canonicalize(checkout)
+        .await
+        .context("failed to canonicalize checkout path")?;
+    let project = if clean.is_empty() || clean == "." {
         checkout.to_path_buf()
     } else {
         checkout.join(clean)
-    })
+    };
+    let project = tokio::fs::canonicalize(project)
+        .await
+        .context("root directory does not exist or is not readable")?;
+    if !project.starts_with(&checkout) {
+        bail!("root directory cannot resolve outside the repository checkout");
+    }
+    Ok(project)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -779,9 +1079,22 @@ async fn wait_health(
 async fn write_caddy_route(app: &str, domain: &str, port: u16) -> anyhow::Result<()> {
     let dir = PathBuf::from("/etc/caddy/hostlet");
     tokio::fs::create_dir_all(&dir).await?;
-    let block = format!("{domain} {{\n  reverse_proxy 127.0.0.1:{port}\n}}\n");
-    tokio::fs::write(dir.join(format!("{app}.caddy")), block).await?;
+    let target = dir.join(format!("{app}.caddy"));
+    ensure_no_conflicting_route(&dir, &target, domain).await?;
+    let block = format!(
+        "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n{domain} {{\n  reverse_proxy 127.0.0.1:{port}\n}}\n"
+    );
+    tokio::fs::write(target, block).await?;
     Ok(())
+}
+
+async fn remove_caddy_route(app: &str) -> anyhow::Result<()> {
+    let target = PathBuf::from("/etc/caddy/hostlet").join(format!("{app}.caddy"));
+    match tokio::fs::remove_file(target).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 async fn write_local_caddy_route(
@@ -791,9 +1104,58 @@ async fn write_local_caddy_route(
     port: u16,
 ) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&router.snippets_dir).await?;
-    let block = format!("@{app} host {domain}\nreverse_proxy @{app} 127.0.0.1:{port}\n");
-    tokio::fs::write(router.snippets_dir.join(format!("{app}.caddy")), block).await?;
+    let target = router.snippets_dir.join(format!("{app}.caddy"));
+    ensure_no_conflicting_route(&router.snippets_dir, &target, domain).await?;
+    let block = format!(
+        "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n@{app} host {domain}\nreverse_proxy @{app} 127.0.0.1:{port}\n"
+    );
+    tokio::fs::write(target, block).await?;
     Ok(())
+}
+
+async fn remove_local_caddy_route(router: &LocalRouter, app: &str) -> anyhow::Result<()> {
+    let target = router.snippets_dir.join(format!("{app}.caddy"));
+    match tokio::fs::remove_file(target).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn ensure_no_conflicting_route(
+    dir: &Path,
+    target: &Path,
+    domain: &str,
+) -> anyhow::Result<()> {
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path == target || path.extension().and_then(|value| value.to_str()) != Some("caddy") {
+            continue;
+        }
+        let Ok(contents) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        if route_domain(&contents).is_some_and(|existing| existing == domain) {
+            bail!("another Hostlet route already uses domain {domain}");
+        }
+    }
+    Ok(())
+}
+
+fn route_domain(contents: &str) -> Option<&str> {
+    for line in contents.lines().map(str::trim) {
+        if let Some(domain) = line.strip_prefix("# hostlet-domain:") {
+            return Some(domain.trim());
+        }
+        if let Some((_, domain)) = line.split_once(" host ") {
+            return Some(domain.trim());
+        }
+        if let Some(domain) = line.strip_suffix(" {") {
+            return Some(domain.trim());
+        }
+    }
+    None
 }
 
 async fn run_router_reload(
@@ -808,26 +1170,52 @@ async fn run_router_reload(
     run_log(cfg, deployment_id, bin, &args).await
 }
 
-async fn status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
-    status_extra(cfg, id, status, failure, None, None, None).await;
+async fn run_router_reload_quiet(router: &LocalRouter) -> anyhow::Result<()> {
+    let Some((bin, args)) = router.reload_command.split_first() else {
+        return Ok(());
+    };
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_quiet(bin, &args).await
 }
 
-async fn status_extra(
-    cfg: &Config,
-    id: Uuid,
-    status: &str,
-    failure: Option<&str>,
-    image: Option<&str>,
-    container: Option<&str>,
-    local_url: Option<&str>,
-) {
-    post(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":failure,"image_tag":image,"container_name":container,"local_url":local_url})).await;
+async fn status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
+    status_extra(
+        cfg,
+        id,
+        status,
+        StatusDetails {
+            failure,
+            ..StatusDetails::default()
+        },
+    )
+    .await;
+}
+
+#[derive(Default)]
+struct StatusDetails<'a> {
+    failure: Option<&'a str>,
+    image: Option<&'a str>,
+    container: Option<&'a str>,
+    local_url: Option<&'a str>,
+    published_port: Option<u16>,
+}
+
+async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
+    post(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":details.failure,"image_tag":details.image,"container_name":details.container,"local_url":details.local_url,"published_port":details.published_port})).await;
 }
 
 async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
     post(
         cfg,
         json!({"type":"log","deployment_id":id,"stream":stream,"line":line}),
+    )
+    .await;
+}
+
+async fn job_status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
+    post(
+        cfg,
+        json!({"type":"job_status","job_id":id,"status":status,"failure":failure}),
     )
     .await;
 }
@@ -840,6 +1228,92 @@ async fn post(cfg: &Config, msg: Value) {
         .json(&msg)
         .send()
         .await;
+}
+
+async fn publish_resource_stats(cfg: &Config) {
+    let Ok(containers) = hostlet_containers().await else {
+        return;
+    };
+    if containers.is_empty() {
+        return;
+    }
+    let mut args = vec!["stats", "--no-stream", "--format", "json"];
+    args.extend(containers.iter().map(String::as_str));
+    let Ok(output) = Command::new("docker").args(&args).output().await else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(raw) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(container) = raw
+            .get("Container")
+            .or_else(|| raw.get("Name"))
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        if !valid_container_name(container) {
+            continue;
+        }
+        post(
+            cfg,
+            json!({
+                "type": "resource_stats",
+                "container": container,
+                "cpuPercent": raw.get("CPUPerc").and_then(|v| v.as_str()).unwrap_or("0%"),
+                "memoryUsage": raw.get("MemUsage").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
+                "memoryPercent": raw.get("MemPerc").and_then(|v| v.as_str()).unwrap_or("0%"),
+                "networkIo": raw.get("NetIO").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
+                "blockIo": raw.get("BlockIO").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
+                "pids": raw.get("PIDs").and_then(|v| v.as_str()).unwrap_or("0")
+            }),
+        )
+        .await;
+    }
+}
+
+async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            "name=^/hostlet-",
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|name| valid_container_name(name))
+        .map(str::to_string)
+        .collect())
+}
+
+fn valid_container_name(value: &str) -> bool {
+    value.starts_with("hostlet-")
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn valid_hostlet_image(value: &str) -> bool {
+    value.starts_with("hostlet/")
+        && value.len() <= 300
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '_' | '-'))
 }
 
 fn verify_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
@@ -922,6 +1396,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn redact(line: &str) -> String {
+    if let Some(redacted) = redact_url_credentials(line) {
+        return redacted;
+    }
     let lowered = line.to_lowercase();
     let sensitive = [
         "token",
@@ -942,6 +1419,49 @@ fn redact(line: &str) -> String {
         line.into()
     }
 }
+
+fn redact_url_credentials(value: &str) -> Option<String> {
+    let scheme = "https://";
+    let start = value.find(scheme)?;
+    let credentials_start = start + scheme.len();
+    let at = value[credentials_start..].find('@')? + credentials_start;
+    let mut redacted = String::with_capacity(value.len());
+    redacted.push_str(&value[..start]);
+    redacted.push_str("https://[redacted]@");
+    redacted.push_str(&value[at + 1..]);
+    Some(redacted)
+}
+
+fn command_args_for_log(args: &[&str]) -> Vec<String> {
+    let mut output = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            output.push(redact_env_arg(arg));
+            redact_next = false;
+            continue;
+        }
+        if *arg == "-e" || *arg == "--env" {
+            output.push((*arg).to_string());
+            redact_next = true;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--env=") {
+            output.push(format!("--env={}", redact_env_arg(value)));
+            continue;
+        }
+        output.push(redact(arg));
+    }
+    output
+}
+
+fn redact_env_arg(arg: &str) -> String {
+    match arg.split_once('=') {
+        Some((key, _)) if !key.is_empty() => format!("{key}=[redacted]"),
+        _ => "[redacted]".into(),
+    }
+}
+
 fn env_args(p: &Value) -> Vec<String> {
     p.get("env")
         .and_then(|v| v.as_object())
@@ -988,6 +1508,16 @@ fn validate_branch(value: &str) -> anyhow::Result<()> {
         bail!("branch name contains unsupported characters");
     }
     Ok(())
+}
+
+fn validate_commit_sha(value: &str) -> anyhow::Result<()> {
+    if value == "HEAD" {
+        return Ok(());
+    }
+    if value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    bail!("commit sha must be HEAD or a 40-character hex SHA");
 }
 
 fn validate_port(value: i64) -> anyhow::Result<()> {
@@ -1048,6 +1578,20 @@ mod tests {
         assert_eq!(redact("TOKEN=abc"), "[redacted]");
         assert_eq!(redact("build ok"), "build ok");
     }
+
+    #[test]
+    fn redacts_docker_env_values_in_logged_commands() {
+        assert_eq!(
+            command_args_for_log(&["run", "-e", "DATABASE_URL=postgres://secret", "image"]),
+            vec![
+                "run".to_string(),
+                "-e".to_string(),
+                "DATABASE_URL=[redacted]".to_string(),
+                "image".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn rejects_bad_job_signature() {
         assert!(!verify_signature("secret", b"{}", "sha256=bad"));
@@ -1074,5 +1618,26 @@ mod tests {
         assert!(dockerfile.contains("ENV PORT=3000"));
         assert!(dockerfile.contains("npm run build"));
         assert!(dockerfile.contains("npm run start"));
+    }
+
+    #[test]
+    fn route_domain_parsing_is_exact_not_substring_based() {
+        let route = "# hostlet-route-key: app-a\n# hostlet-domain: myapp.example.com\n@a host myapp.example.com\n";
+        assert_eq!(route_domain(route), Some("myapp.example.com"));
+        assert_ne!(route_domain(route), Some("app.example.com"));
+    }
+
+    #[test]
+    fn git_remote_with_token_redacts_credentials() {
+        let remote = git_fetch_remote("owner/repo", Some("secret-token"));
+        assert!(remote.contains("x-access-token"));
+        assert_eq!(
+            redact(&remote),
+            "https://[redacted]@github.com/owner/repo.git"
+        );
+        assert_eq!(
+            redact(&format!("fatal: unable to access '{remote}'")),
+            "fatal: unable to access 'https://[redacted]@github.com/owner/repo.git'"
+        );
     }
 }

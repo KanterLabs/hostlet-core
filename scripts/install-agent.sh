@@ -5,6 +5,7 @@ umask 077
 : "${HOSTLET_API_URL:?HOSTLET_API_URL is required}"
 : "${HOSTLET_SERVER_ID:?HOSTLET_SERVER_ID is required}"
 : "${HOSTLET_INSTALL_TOKEN:?HOSTLET_INSTALL_TOKEN is required}"
+: "${HOSTLET_REPO_URL:?HOSTLET_REPO_URL is required. Set this to the Git repository URL for Hostlet.}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root with sudo." >&2
@@ -29,7 +30,8 @@ fi
 id -u hostlet >/dev/null 2>&1 || useradd --system --home /var/lib/hostlet --create-home --shell /usr/sbin/nologin hostlet
 usermod -aG docker hostlet
 mkdir -p /var/lib/hostlet /etc/caddy/hostlet
-chown -R hostlet:hostlet /var/lib/hostlet
+chown -R hostlet:hostlet /var/lib/hostlet /etc/caddy/hostlet
+sudo -u hostlet bash -c 'test_file="$(mktemp /etc/caddy/hostlet/.hostlet-write-test.XXXXXX)" && rm -f "$test_file"'
 
 if ! grep -q "import /etc/caddy/hostlet/*.caddy" /etc/caddy/Caddyfile; then
   printf '\nimport /etc/caddy/hostlet/*.caddy\n' >> /etc/caddy/Caddyfile
@@ -38,7 +40,6 @@ fi
 tmp="$(mktemp -d)"
 curl -fsSL https://sh.rustup.rs -o "$tmp/rustup.sh"
 sudo -u hostlet bash "$tmp/rustup.sh" -y
-: "${HOSTLET_REPO_URL:=https://github.com/example/Hostlet.git}"
 sudo -u hostlet env HOSTLET_REPO_URL="$HOSTLET_REPO_URL" bash -lc 'cd /var/lib/hostlet && git clone "$HOSTLET_REPO_URL" src || true && cd src && git pull && ~/.cargo/bin/cargo build --release --manifest-path apps/agent/Cargo.toml'
 install -m 0755 /var/lib/hostlet/src/target/release/hostlet-agent /usr/local/bin/hostlet-agent
 

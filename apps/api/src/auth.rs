@@ -9,7 +9,7 @@ use argon2::{
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -68,9 +68,21 @@ pub async fn github_start(State(state): State<AppState>, headers: HeaderMap) -> 
         )
             .into_response();
     }
+    if control_plane_password_hash(&state)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return (StatusCode::PRECONDITION_REQUIRED, "setup is required").into_response();
+    }
+    if !control_plane_unlocked(&headers, &state.session_secret)
+        && !has_existing_users(&state).await.unwrap_or(false)
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let csrf_state = random_token(48);
-    let callback_base =
-        request_api_origin(&headers).unwrap_or_else(|| state.public_api_url.clone());
+    let callback_base = state.public_api_url.clone();
     let callback_url = format!(
         "{}/auth/github/callback",
         callback_base.trim_end_matches('/')
@@ -86,7 +98,9 @@ pub async fn github_start(State(state): State<AppState>, headers: HeaderMap) -> 
     )
     .expect("static GitHub OAuth URL is valid");
     let secure = cookie_secure(&callback_base);
-    let web_origin = request_web_origin(&headers).unwrap_or_else(|| state.public_web_url.clone());
+    let web_origin = request_web_origin(&headers)
+        .filter(|origin| state.web_origin_allowed(origin))
+        .unwrap_or_else(|| state.public_web_url.clone());
     if let Err(err) = store_oauth_state(&state, &csrf_state, &web_origin).await {
         tracing::error!(error = %err, "failed to store OAuth state");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -113,14 +127,10 @@ pub async fn github_start(State(state): State<AppState>, headers: HeaderMap) -> 
         secure,
         "/auth/github/callback",
     );
-    (
-        [
-            (header::SET_COOKIE, state_cookie),
-            (header::SET_COOKIE, web_origin_cookie),
-        ],
-        Redirect::temporary(url.as_str()),
+    with_cookies(
+        Redirect::temporary(url.as_str()).into_response(),
+        [state_cookie, web_origin_cookie],
     )
-        .into_response()
 }
 
 pub async fn github_callback(
@@ -128,25 +138,29 @@ pub async fn github_callback(
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> impl IntoResponse {
-    let cookie_state_valid = cookie_value(&headers, OAUTH_STATE_COOKIE)
+    let Some(cookie_state) = cookie_value(&headers, OAUTH_STATE_COOKIE)
         .and_then(|value| verify_signed_value(&state.session_secret, value))
-        .is_some_and(|cookie_state| constant_time_eq(cookie_state.as_bytes(), q.state.as_bytes()));
-    let stored_web_origin = consume_oauth_state(&state, &q.state).await.ok().flatten();
-    if !cookie_state_valid && stored_web_origin.is_none() {
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !constant_time_eq(cookie_state.as_bytes(), q.state.as_bytes()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(stored_web_origin) = consume_oauth_state(&state, &q.state).await.ok().flatten() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.web_origin_allowed(&stored_web_origin) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let callback_base =
-        request_api_origin(&headers).unwrap_or_else(|| state.public_api_url.clone());
+    let callback_base = state.public_api_url.clone();
     let callback_url = format!(
         "{}/auth/github/callback",
         callback_base.trim_end_matches('/')
     );
     match exchange_and_store(&state, q.code, &callback_url).await {
         Ok(user_id) => {
-            let request_api_origin =
-                request_api_origin(&headers).unwrap_or_else(|| state.public_api_url.clone());
-            let secure = cookie_secure(&request_api_origin);
+            let secure = cookie_secure(&state.public_api_url);
             let session = build_cookie(
                 SESSION_COOKIE,
                 &signed_value(
@@ -158,36 +172,14 @@ pub async fn github_callback(
                 secure,
                 "/",
             );
-            let unlock = build_cookie(
-                UNLOCK_COOKIE,
-                &signed_value(
-                    &state.session_secret,
-                    "unlocked",
-                    Duration::hours(UNLOCK_TTL_HOURS),
-                ),
-                Some(Duration::hours(UNLOCK_TTL_HOURS)),
-                secure,
-                "/",
-            );
             let clear_oauth = expire_cookie(OAUTH_STATE_COOKIE, secure, "/auth/github/callback");
-            let web_origin = stored_web_origin
-                .or_else(|| {
-                    cookie_value(&headers, OAUTH_WEB_ORIGIN_COOKIE)
-                        .and_then(|value| verify_signed_value(&state.session_secret, value))
-                })
-                .unwrap_or_else(|| state.public_web_url.clone());
+            let web_origin = stored_web_origin;
             let clear_web_origin =
                 expire_cookie(OAUTH_WEB_ORIGIN_COOKIE, secure, "/auth/github/callback");
-            (
-                [
-                    (header::SET_COOKIE, session),
-                    (header::SET_COOKIE, unlock),
-                    (header::SET_COOKIE, clear_oauth),
-                    (header::SET_COOKIE, clear_web_origin),
-                ],
-                Redirect::temporary(&web_origin),
+            with_cookies(
+                Redirect::temporary(&web_origin).into_response(),
+                [session, clear_oauth, clear_web_origin],
             )
-                .into_response()
         }
         Err(err) => {
             let clear_oauth = expire_cookie(
@@ -195,14 +187,14 @@ pub async fn github_callback(
                 cookie_secure(&state.public_api_url),
                 "/auth/github/callback",
             );
-            (
-                [(header::SET_COOKIE, clear_oauth)],
+            with_cookies(
                 (
                     StatusCode::BAD_REQUEST,
                     format!("GitHub login failed: {err}"),
-                ),
+                )
+                    .into_response(),
+                [clear_oauth],
             )
-                .into_response()
         }
     }
 }
@@ -221,6 +213,19 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
     }
 }
 
+pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
+    let secure = cookie_secure(&state.public_api_url);
+    with_cookies(
+        StatusCode::NO_CONTENT.into_response(),
+        [
+            expire_cookie(SESSION_COOKIE, secure, "/"),
+            expire_cookie(UNLOCK_COOKIE, secure, "/"),
+            expire_cookie(OAUTH_STATE_COOKIE, secure, "/auth/github/callback"),
+            expire_cookie(OAUTH_WEB_ORIGIN_COOKIE, secure, "/auth/github/callback"),
+        ],
+    )
+}
+
 pub async fn setup_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let setup_required = control_plane_password_hash(&state)
         .await
@@ -235,24 +240,22 @@ pub async fn setup_status(State(state): State<AppState>, headers: HeaderMap) -> 
 
 pub async fn setup_password(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<PasswordBody>,
 ) -> impl IntoResponse {
+    if let Some(expected) = &state.setup_token {
+        let provided = headers
+            .get("x-hostlet-setup-token")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
     if !valid_control_plane_password(&body.password) {
         return (
             StatusCode::BAD_REQUEST,
             "password must be at least 12 characters",
-        )
-            .into_response();
-    }
-    if control_plane_password_hash(&state)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return (
-            StatusCode::CONFLICT,
-            "control plane password is already set",
         )
             .into_response();
     }
@@ -264,7 +267,12 @@ pub async fn setup_password(
         }
     };
     match store_control_plane_password_hash(&state, &hash).await {
-        Ok(()) => unlock_response(&state).await,
+        Ok(true) => unlock_response(&state).await,
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            "control plane password is already set",
+        )
+            .into_response(),
         Err(err) => {
             tracing::error!(error = %err, "failed to store control plane password");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -290,7 +298,9 @@ pub async fn unlock(
 }
 
 pub fn current_user_id(headers: &HeaderMap, state: &AppState) -> Option<Uuid> {
-    current_user_id_from_headers(headers, &state.session_secret)
+    control_plane_unlocked(headers, &state.session_secret)
+        .then(|| current_user_id_from_headers(headers, &state.session_secret))
+        .flatten()
 }
 
 fn current_user_id_from_headers(headers: &HeaderMap, session_secret: &str) -> Option<Uuid> {
@@ -328,6 +338,8 @@ async fn exchange_and_store(
         if !allowed_logins.contains(&gh_user.login.to_ascii_lowercase()) {
             anyhow::bail!("GitHub account is not allowed to access this Hostlet instance");
         }
+    } else if has_existing_users(state).await? && !github_user_exists(state, gh_user.id).await? {
+        anyhow::bail!("GitHub account is not registered on this Hostlet instance");
     }
     let mut tx = state.db.begin().await?;
     let row = sqlx::query("INSERT INTO users (github_id, login, name, avatar_url) VALUES ($1,$2,$3,$4) ON CONFLICT (github_id) DO UPDATE SET login=EXCLUDED.login, name=EXCLUDED.name, avatar_url=EXCLUDED.avatar_url RETURNING id")
@@ -335,9 +347,20 @@ async fn exchange_and_store(
         .fetch_one(&mut *tx).await?;
     let user_id: Uuid = row.get("id");
     let encrypted = state.crypto.encrypt(&token.access_token)?;
-    sqlx::query("INSERT INTO github_accounts (user_id, github_id, access_token_ciphertext, scopes) VALUES ($1,$2,$3,$4)")
-        .bind(user_id).bind(gh_user.id).bind(encrypted).bind(token.scope.unwrap_or_default())
-        .execute(&mut *tx).await?;
+    sqlx::query(
+        "INSERT INTO github_accounts (user_id, github_id, access_token_ciphertext, scopes)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (user_id, github_id)
+         DO UPDATE SET access_token_ciphertext=EXCLUDED.access_token_ciphertext,
+                       scopes=EXCLUDED.scopes,
+                       updated_at=now()",
+    )
+    .bind(user_id)
+    .bind(gh_user.id)
+    .bind(encrypted)
+    .bind(token.scope.unwrap_or_default())
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(user_id)
 }
@@ -422,32 +445,16 @@ fn cookie_secure(public_api_url: &str) -> bool {
     public_api_url.trim_start().starts_with("https://")
 }
 
-fn request_api_origin(headers: &HeaderMap) -> Option<String> {
-    let host = headers.get(header::HOST)?.to_str().ok()?;
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("http");
-    Some(format!("{proto}://{host}"))
-}
-
 fn request_web_origin(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::REFERER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| Url::parse(value).ok())
-        .map(|url| {
-            let mut origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
-            if let Some(port) = url.port() {
-                origin.push_str(&format!(":{port}"));
-            }
-            origin
-        })
+        .and_then(crate::state::normalize_origin)
         .or_else(|| {
             headers
                 .get(header::ORIGIN)
                 .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
+                .and_then(crate::state::normalize_origin)
         })
 }
 
@@ -464,7 +471,7 @@ async fn unlock_response(state: &AppState) -> axum::response::Response {
         "/",
     );
     let Some(user_id) = single_existing_user_id(state).await else {
-        return ([(header::SET_COOKIE, unlock)], StatusCode::NO_CONTENT).into_response();
+        return with_cookies(StatusCode::NO_CONTENT.into_response(), [unlock]);
     };
     let session = build_cookie(
         SESSION_COOKIE,
@@ -477,11 +484,16 @@ async fn unlock_response(state: &AppState) -> axum::response::Response {
         cookie_secure(&state.public_api_url),
         "/",
     );
-    (
-        [(header::SET_COOKIE, unlock), (header::SET_COOKIE, session)],
-        StatusCode::NO_CONTENT,
-    )
-        .into_response()
+    with_cookies(StatusCode::NO_CONTENT.into_response(), [unlock, session])
+}
+
+fn with_cookies<const N: usize>(mut response: Response, cookies: [String; N]) -> Response {
+    for cookie in cookies {
+        if let Ok(value) = cookie.parse() {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 async fn control_plane_password_hash(state: &AppState) -> anyhow::Result<Option<String>> {
@@ -492,16 +504,31 @@ async fn control_plane_password_hash(state: &AppState) -> anyhow::Result<Option<
     Ok(row.map(|r| r.get("value")))
 }
 
-async fn store_control_plane_password_hash(state: &AppState, hash: &str) -> anyhow::Result<()> {
-    sqlx::query(
+async fn has_existing_users(state: &AppState) -> anyhow::Result<bool> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&state.db)
+        .await?;
+    Ok(count > 0)
+}
+
+async fn github_user_exists(state: &AppState, github_id: i64) -> anyhow::Result<bool> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE github_id=$1")
+        .bind(github_id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(count > 0)
+}
+
+async fn store_control_plane_password_hash(state: &AppState, hash: &str) -> anyhow::Result<bool> {
+    let done = sqlx::query(
         "INSERT INTO settings (key,value) VALUES ($1,$2)
-         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
+         ON CONFLICT (key) DO NOTHING",
     )
     .bind(CONTROL_PLANE_PASSWORD_KEY)
     .bind(hash)
     .execute(&state.db)
     .await?;
-    Ok(())
+    Ok(done.rows_affected() == 1)
 }
 
 async fn store_oauth_state(

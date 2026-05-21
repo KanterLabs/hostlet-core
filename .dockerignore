@@ -1,0 +1,17 @@
+.git
+target
+node_modules
+**/node_modules
+.pnpm-store
+**/.pnpm-store
+.next
+**/.next
+apps/web/.next
+apps/web/node_modules
+apps/web/tsconfig.tsbuildinfo
+*.tsbuildinfo
+**/*.tsbuildinfo
+backups
+docs/security-review-*.md
+.env
+.env.*

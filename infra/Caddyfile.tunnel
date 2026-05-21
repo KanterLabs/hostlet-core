@@ -4,6 +4,14 @@
 
 http://:18080 {
 	bind 127.0.0.1
+
+	@control host {$HOSTLET_CONTROL_PLANE_HOST:localhost}
+	handle @control {
+		@api path /api/* /auth/* /webhooks/* /install-agent.sh /ws/* /health
+		reverse_proxy @api 127.0.0.1:8080
+		reverse_proxy 127.0.0.1:3000
+	}
+
 	route {
 		import /var/lib/hostlet/caddy/*.caddy
 		respond "not found" 404

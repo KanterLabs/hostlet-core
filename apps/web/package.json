@@ -1,6 +1,7 @@
 {
   "name": "@hostlet/web",
   "private": true,
+  "packageManager": "pnpm@10.33.2",
   "scripts": {
     "dev": "next dev -H 0.0.0.0 --webpack",
     "build": "next build",
@@ -22,8 +23,8 @@
     "typescript": "^5.7.2"
   },
   "pnpm": {
-    "overrides": {
-      "postcss": "8.5.15"
-    }
+    "onlyBuiltDependencies": [
+      "sharp"
+    ]
   }
 }

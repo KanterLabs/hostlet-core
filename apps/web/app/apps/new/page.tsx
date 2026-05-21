@@ -22,6 +22,8 @@ export default function CreateApp() {
     start_command: "",
     memory_limit_mb: 512,
     cpu_limit: 1,
+    public_exposure: false,
+    auto_deploy: false,
   });
   const [repoLink, setRepoLink] = useState("");
   const [repos, setRepos] = useState<Array<{ full_name: string; private: boolean; default_branch: string; updated_at?: string }>>([]);
@@ -41,6 +43,9 @@ export default function CreateApp() {
       .catch(() => {});
     api<Array<{ full_name: string; private: boolean; default_branch: string; updated_at?: string }>>("/api/github/repos")
       .then((rows) => {
+        if (!Array.isArray(rows)) {
+          throw new Error("GitHub returned an unexpected repository payload.");
+        }
         setRepos(rows);
         setRepoMessage(rows.length ? "" : "No repositories returned from GitHub.");
       })
@@ -159,6 +164,24 @@ export default function CreateApp() {
             </label>
             <label className="text-sm font-medium">domain
               <input value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} placeholder="optional for local deploys" />
+            </label>
+            <label className="flex items-center gap-3 text-sm font-medium">
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={form.public_exposure}
+                onChange={(e) => setForm({ ...form, public_exposure: e.target.checked })}
+              />
+              Expose through tunnel
+            </label>
+            <label className="flex items-center gap-3 text-sm font-medium">
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={form.auto_deploy}
+                onChange={(e) => setForm({ ...form, auto_deploy: e.target.checked })}
+              />
+              Auto redeploy on branch push
             </label>
           </div>
           <div className="grid gap-4 rounded-lg border border-line bg-white p-4">

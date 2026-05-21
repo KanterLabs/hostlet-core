@@ -7,12 +7,18 @@ mod state;
 mod web;
 
 use axum::{
-    http::{header, request::Parts, HeaderValue, Method},
-    routing::{get, post},
+    body::Body,
+    extract::{DefaultBodyLimit, State},
+    http::{
+        header, request::Parts, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode,
+    },
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post, put},
     Router,
 };
 use state::AppState;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
@@ -28,11 +34,20 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let state = AppState::from_env().await?;
-    let public_web_origin: HeaderValue = state
-        .public_web_url
-        .trim_end_matches('/')
-        .parse()
-        .map_err(|err| anyhow::anyhow!("PUBLIC_WEB_URL is not a valid CORS origin: {err}"))?;
+    let recovered = deploy::recover_stale_deployments(&state).await?;
+    if recovered > 0 {
+        tracing::warn!(recovered, "marked stale deployments as failed");
+    }
+    let allowed_cors_origins = state
+        .allowed_web_origins
+        .iter()
+        .map(|origin| {
+            origin
+                .parse::<HeaderValue>()
+                .map_err(|err| anyhow::anyhow!("{origin} is not a valid CORS origin: {err}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let guard_state = state.clone();
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route(
@@ -49,9 +64,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", post(auth::setup_password))
         .route("/api/unlock", post(auth::unlock))
+        .route("/api/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
         .route("/api/github/status", get(github::status))
         .route("/api/github/repos", get(github::repos))
+        .route("/api/cloudflare/status", get(web::cloudflare_status))
         .route(
             "/api/servers",
             get(web::list_servers).post(web::create_server),
@@ -67,8 +84,14 @@ async fn main() -> anyhow::Result<()> {
                 .delete(web::delete_app),
         )
         .route("/api/apps/:id/resources", get(web::app_resources))
+        .route("/api/apps/:id/env", get(web::app_env_vars))
+        .route(
+            "/api/apps/:id/env/:key",
+            put(web::set_app_env_var).delete(web::delete_app_env_var),
+        )
         .route("/api/apps/:id/deploy", post(deploy::manual_deploy))
         .route("/api/apps/:id/rollback", post(deploy::rollback))
+        .route("/api/agent-jobs/:id", get(web::agent_job_status))
         .route("/api/deployments/:id", get(deploy::get_deployment))
         .route("/api/deployments/:id/logs", get(deploy::deployment_logs))
         .route("/ws/agent", get(agent::ws))
@@ -78,19 +101,31 @@ async fn main() -> anyhow::Result<()> {
             CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(
                     move |origin: &HeaderValue, _request: &Parts| {
-                        origin == public_web_origin || allowed_lan_origin(origin)
+                        allowed_cors_origins.iter().any(|allowed| allowed == origin)
                     },
                 ))
                 .allow_credentials(true)
                 .allow_methods([
                     Method::GET,
                     Method::POST,
+                    Method::PUT,
                     Method::PATCH,
                     Method::DELETE,
                     Method::OPTIONS,
                 ])
-                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::AUTHORIZATION,
+                    HeaderName::from_static("x-hostlet-csrf"),
+                    HeaderName::from_static("x-hostlet-setup-token"),
+                ]),
         )
+        .layer(middleware::from_fn_with_state(
+            guard_state,
+            browser_origin_guard,
+        ))
+        .layer(middleware::from_fn(security_headers))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -102,39 +137,72 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn allowed_lan_origin(origin: &HeaderValue) -> bool {
-    let Ok(origin) = origin.to_str() else {
-        return false;
-    };
-    let Ok(url) = url::Url::parse(origin) else {
-        return false;
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return false;
+async fn browser_origin_guard(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if !requires_browser_origin(req.method(), req.uri().path()) {
+        return next.run(req).await;
     }
-    match url.host_str() {
-        Some("localhost") => true,
-        Some(host) if host.ends_with(".ts.net") => true,
-        Some(host) => host
-            .parse::<IpAddr>()
-            .map(is_private_control_plane_ip)
-            .unwrap_or(false),
-        None => false,
+    let headers = req.headers();
+    let csrf_ok = headers
+        .get("x-hostlet-csrf")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "1");
+    let origin_ok = request_origin(headers)
+        .as_deref()
+        .is_some_and(|origin| state.web_origin_allowed(origin));
+    if !csrf_ok || !origin_ok {
+        return (StatusCode::FORBIDDEN, "invalid request origin").into_response();
     }
+    next.run(req).await
 }
 
-fn is_private_control_plane_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip == Ipv4Addr::new(100, 100, 100, 100)
-                || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
-        }
-        IpAddr::V6(ip) => ip.is_loopback() || is_unique_local_ipv6(ip),
-    }
+fn requires_browser_origin(method: &Method, path: &str) -> bool {
+    matches!(
+        method,
+        &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
+    ) && !path.starts_with("/api/agent/")
+        && path != "/api/setup"
+        && path != "/webhooks/github"
 }
 
-fn is_unique_local_ipv6(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xfe00) == 0xfc00
+fn request_origin(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .and_then(state::normalize_origin)
+        .or_else(|| {
+            headers
+                .get(header::REFERER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(state::normalize_origin)
+        })
+}
+
+async fn security_headers(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    response
 }
