@@ -14,6 +14,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 detect --source=/repo --redact --verbose
+
   rust:
     runs-on: [self-hosted, Linux, X64]
     steps:
@@ -46,17 +54,17 @@ jobs:
   compose:
     runs-on: [self-hosted, Linux, X64]
     env:
-      POSTGRES_PASSWORD: ci-postgres-password
+      POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
       PUBLIC_WEB_URL: http://localhost:3000
-      HOSTLET_SETUP_TOKEN: ci-setup-token-ci-setup-token-ci-setup
+      HOSTLET_SETUP_TOKEN: ci-only-not-a-secret-setup-token-01
       HOSTLET_ALLOWED_GITHUB_LOGINS: ci-user
-      ENCRYPTION_KEY: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
-      JOB_SIGNING_SECRET: ci-job-signing-secret-ci-job-signing-secret
-      SESSION_SECRET: ci-session-secret-ci-session-secret-ci
-      LOCAL_AGENT_TOKEN: ci-local-agent-token-ci-local-agent-token
-      GITHUB_WEBHOOK_SECRET: ci-webhook-secret-ci-webhook-secret
-      CLOUDFLARE_TUNNEL_TOKEN: ci-tunnel-token
+      ENCRYPTION_KEY: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+      JOB_SIGNING_SECRET: ci-only-not-a-secret-job-signing-01
+      SESSION_SECRET: ci-only-not-a-secret-session-secret-01
+      LOCAL_AGENT_TOKEN: ci-only-not-a-secret-agent-token-01
+      GITHUB_WEBHOOK_SECRET: ci-only-not-a-secret-webhook-secret-01
+      CLOUDFLARE_TUNNEL_TOKEN: ci-only-not-a-secret-tunnel-token-01
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@v4
