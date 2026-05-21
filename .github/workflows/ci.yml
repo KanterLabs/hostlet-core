@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, game-ci]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -25,7 +25,7 @@ jobs:
       - run: cargo test --workspace
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, game-ci]
     defaults:
       run:
         working-directory: apps/web
@@ -44,7 +44,7 @@ jobs:
       - run: pnpm build
 
   compose:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, game-ci]
     steps:
       - uses: actions/checkout@v4
       - run: docker compose -f infra/docker-compose.yml config >/dev/null
@@ -63,7 +63,7 @@ jobs:
           CLOUDFLARE_TUNNEL_TOKEN: ci-tunnel-token
 
   docker:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, game-ci]
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f apps/web/Dockerfile -t hostlet-web-ci .
