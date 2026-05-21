@@ -142,13 +142,13 @@ export default function CreateApp() {
                         key={repo.full_name}
                         type="button"
                         onClick={() => selectRepo(repo)}
-                        className={`flex w-full items-center justify-between rounded-none border-b border-line bg-white px-3 py-2 text-left text-ink shadow-none last:border-b-0 hover:bg-panel ${
+                        className={`flex w-full items-center justify-between rounded-none border-b border-line bg-surface px-3 py-2 text-left text-ink shadow-none last:border-b-0 hover:bg-surface-alt ${
                           form.repo_full_name === repo.full_name ? "bg-emerald-50" : ""
                         }`}
                       >
                         <span className="min-w-0">
                           <span className="block truncate text-sm font-medium">{repo.full_name}</span>
-                          <span className="text-xs text-neutral-600">{repo.private ? "Private" : "Public"} · {repo.default_branch}</span>
+                          <span className="text-xs text-muted">{repo.private ? "Private" : "Public"} · {repo.default_branch}</span>
                         </span>
                         {form.repo_full_name === repo.full_name && <CheckCircle2 size={17} className="text-action" />}
                       </button>
@@ -236,7 +236,7 @@ export default function CreateApp() {
                   <Plus size={16} />
                   {creating ? "Creating..." : "Create app"}
                 </button>
-                {message && <p className="mt-3 rounded-md border border-line bg-panel p-3 text-sm text-neutral-700">{message}</p>}
+                {message && <p className="mt-3 rounded-md border border-line bg-surface-alt p-3 text-sm text-muted">{message}</p>}
               </section>
               <section className="panel-muted p-4">
                 <div className="flex items-center gap-2 font-medium">
@@ -255,7 +255,7 @@ export default function CreateApp() {
 
 function Toggle({ checked, onChange, icon: Icon, label }: { checked: boolean; onChange: (value: boolean) => void; icon: LucideIcon; label: string }) {
   return (
-    <label className={`flex items-center gap-3 rounded-lg border p-3 ${checked ? "border-emerald-200 bg-emerald-50" : "border-line bg-white"}`}>
+    <label className={`flex items-center gap-3 rounded-lg border p-3 ${checked ? "border-emerald-200 bg-emerald-50" : "border-line bg-surface"}`}>
       <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
       <Icon size={17} className={checked ? "text-action" : "text-neutral-500"} />
       <span>{label}</span>
@@ -265,7 +265,7 @@ function Toggle({ checked, onChange, icon: Icon, label }: { checked: boolean; on
 
 function Summary({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md bg-panel px-3 py-2 text-sm">
+    <div className="rounded-md bg-surface-alt px-3 py-2 text-sm">
       <div className="eyebrow">{label}</div>
       <div className="mt-1 break-words font-medium">{value}</div>
     </div>

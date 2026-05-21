@@ -109,7 +109,7 @@ function StatusCard({
     <section className="panel p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-panel ring-1 ring-line">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-surface-alt ring-1 ring-line">
             <Icon size={20} />
           </div>
           <div>
@@ -121,8 +121,8 @@ function StatusCard({
       </div>
       <div className="mt-5 grid gap-2">
         {rows.map(([label, value]) => (
-          <div key={label} className="flex items-center justify-between gap-4 rounded-md bg-panel px-3 py-2 text-sm">
-            <span className="text-neutral-500">{label}</span>
+          <div key={label} className="flex items-center justify-between gap-4 rounded-md bg-surface-alt px-3 py-2 text-sm">
+            <span className="text-muted">{label}</span>
             <span className="break-all text-right font-medium">{value}</span>
           </div>
         ))}

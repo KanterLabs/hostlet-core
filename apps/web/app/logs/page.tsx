@@ -54,7 +54,7 @@ export default function Logs() {
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
                       <StatusPill status={app.latestDeployment?.status || "unknown"} />
-                      <span className="text-sm text-neutral-500">{formatTime(app.latestDeployment?.finishedAt || app.latestDeployment?.startedAt)}</span>
+                      <span className="text-sm text-muted">{formatTime(app.latestDeployment?.finishedAt || app.latestDeployment?.startedAt)}</span>
                     </div>
                   </div>
                 </Link>

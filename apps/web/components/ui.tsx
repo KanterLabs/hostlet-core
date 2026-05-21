@@ -15,13 +15,13 @@ export function PageHeader({
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+    <div className="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-line pb-5">
       <div>
         {eyebrow && <div className="eyebrow mb-2">{eyebrow}</div>}
         <h1 className="text-2xl font-semibold sm:text-3xl">{title}</h1>
         {description && <p className="muted mt-2 max-w-2xl">{description}</p>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2 sm:justify-end">{actions}</div>}
     </div>
   );
 }
@@ -31,14 +31,17 @@ export function StatusPill({ status, label }: { status?: string | null; label?: 
   const active = ["queued", "running", "building", "starting", "health_checking", "routing"].includes(value);
   const success = ["success", "online", "connected", "open", "enabled"].includes(value);
   const failed = ["failed", "offline", "missing", "closed", "disabled", "not configured"].includes(value);
-  const Icon = success ? CheckCircle2 : failed ? XCircle : active ? Loader2 : CircleDashed;
+  const warning = ["needs attention", "not deployed"].includes(value);
+  const Icon = success ? CheckCircle2 : failed ? XCircle : active ? Loader2 : warning ? AlertTriangle : CircleDashed;
   const tone = success
     ? "bg-emerald-50 text-emerald-800 ring-emerald-200"
     : failed
       ? "bg-red-50 text-red-800 ring-red-200"
       : active
         ? "bg-amber-50 text-amber-800 ring-amber-200"
-        : "bg-neutral-100 text-neutral-700 ring-neutral-200";
+        : warning
+          ? "bg-amber-50 text-amber-800 ring-amber-200"
+          : "bg-neutral-100 text-neutral-700 ring-neutral-200";
 
   return (
     <span className={`pill ${tone}`}>
@@ -65,8 +68,8 @@ export function Metric({
         <div className="eyebrow">{label}</div>
         {Icon && <Icon size={17} className="text-neutral-500" />}
       </div>
-      <div className="mt-2 truncate text-xl font-semibold">{value}</div>
-      {detail && <div className="muted mt-1 truncate">{detail}</div>}
+      <div className="mt-2 break-words text-lg font-semibold leading-tight">{value}</div>
+      {detail && <div className="muted mt-1 break-words">{detail}</div>}
     </div>
   );
 }
@@ -86,7 +89,7 @@ export function EmptyState({
 }) {
   return (
     <div className="panel flex flex-col items-start p-6">
-      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-panel text-ink ring-1 ring-line">
+      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-surface-alt text-ink ring-1 ring-line">
         <Icon size={20} />
       </div>
       <div className="font-medium">{title}</div>
@@ -116,7 +119,7 @@ export function Field({
   return (
     <label className="block">
       <span>{label}</span>
-      <input className="mt-1" type={type} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+      <input className="mt-1.5" type={type} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }

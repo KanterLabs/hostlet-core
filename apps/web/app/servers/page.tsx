@@ -52,7 +52,7 @@ export default function Servers() {
                       <div className="flex flex-wrap items-center gap-2">
                         <h2 className="truncate text-lg font-semibold">{server.name}</h2>
                         <StatusPill status={server.status} />
-                        <span className="pill bg-neutral-100 text-neutral-700 ring-neutral-200">{server.kind}</span>
+                        <span className="pill bg-surface-alt text-muted ring-line">{server.kind}</span>
                       </div>
                       <p className="muted mt-1">{server.kind === "local" ? "Default deploy target on this machine" : server.publicIp || "No IP saved"}</p>
                     </div>

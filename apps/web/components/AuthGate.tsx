@@ -67,9 +67,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (!status) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-panel p-6">
-        <section className="panel w-full max-w-md p-6">
+        <section className="panel w-full max-w-md border-t-4 border-t-action p-6">
           <AuthBrand />
-          <div className="mt-5 rounded-md border border-line bg-panel p-3 text-sm text-neutral-700">
+          <div className="mt-5 rounded-md border border-line bg-surface-alt p-3 text-sm text-muted">
             Checking control-plane security status...
           </div>
           {error && <p className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
@@ -81,11 +81,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const setup = status.setupRequired;
   return (
     <main className="flex min-h-screen items-center justify-center bg-panel p-6">
-      <section className="panel w-full max-w-md p-6">
+      <section className="panel w-full max-w-md border-t-4 border-t-action p-6">
         <AuthBrand />
-        <div className="mt-5 rounded-lg border border-line bg-panel p-4">
+        <div className="mt-5 rounded-lg border border-line bg-surface-alt p-4">
           <div className="flex items-center gap-3">
-            <div className="rounded-md border border-line bg-white p-2 text-ink">
+            <div className="rounded-md border border-line bg-surface p-2 text-ink">
               {setup ? <ShieldCheck size={18} /> : <LockKeyhole size={18} />}
             </div>
             <div>
@@ -149,7 +149,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 function AuthBrand() {
   return (
     <div className="flex items-center gap-3">
-      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-ink text-white">
+      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-action text-white">
         <TerminalSquare size={22} />
       </div>
       <div>

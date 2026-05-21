@@ -128,7 +128,7 @@ export function GitHubDeviceFlow({
 
   return (
     <div className={`space-y-3 ${className}`}>
-      <div className="rounded-md border border-line bg-white p-4">
+      <div className="rounded-md border border-line bg-surface-alt p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="eyebrow">GitHub code</div>
@@ -146,7 +146,7 @@ export function GitHubDeviceFlow({
           </div>
         </div>
       </div>
-      <div className="flex items-center gap-2 text-sm text-neutral-700">
+      <div className="flex items-center gap-2 text-sm text-muted">
         {status === "authorized" ? (
           <CheckCircle2 size={16} className="text-emerald-700" />
         ) : status === "pending" ? (

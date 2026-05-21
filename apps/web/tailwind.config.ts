@@ -5,10 +5,15 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#151a18",
-        line: "#dce2dd",
-        panel: "#f6f8f6",
-        action: "#176f53"
+        ink: "var(--ink)",
+        muted: "var(--muted)",
+        line: "var(--line)",
+        panel: "var(--panel)",
+        surface: "var(--surface)",
+        "surface-alt": "var(--surface-alt)",
+        action: "var(--action)",
+        "action-strong": "var(--action-strong)",
+        rail: "var(--rail)"
       }
     }
   },

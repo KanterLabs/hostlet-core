@@ -85,8 +85,8 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                     const done = status === "failed" ? index < Math.max(activeIndex, 0) : activeIndex >= index;
                     const current = status === step;
                     return (
-                      <div key={step} className="flex items-center gap-3 rounded-md bg-panel px-3 py-2">
-                        <span className={`flex h-7 w-7 items-center justify-center rounded-full ${status === "failed" && current ? "bg-red-100 text-red-700" : done ? "bg-emerald-100 text-emerald-700" : "bg-white text-neutral-500 ring-1 ring-line"}`}>
+                      <div key={step} className="flex items-center gap-3 rounded-md bg-surface-alt px-3 py-2">
+                        <span className={`flex h-7 w-7 items-center justify-center rounded-full ${status === "failed" && current ? "bg-red-100 text-red-700" : done ? "bg-emerald-100 text-emerald-700" : "bg-surface text-muted ring-1 ring-line"}`}>
                           {status === "failed" && current ? <XCircle size={15} /> : done ? <CheckCircle2 size={15} /> : <Clock size={15} />}
                         </span>
                         <span className="text-sm font-medium">{humanStatus(step)}</span>
@@ -107,7 +107,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                   <TerminalSquare size={18} />
                   <h2 className="font-semibold">Live output</h2>
                 </div>
-                <div className="text-xs text-neutral-500">{logs.length} lines</div>
+                <div className="text-xs text-muted">{logs.length} lines</div>
               </div>
               <pre className="h-[68vh] max-w-full overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-sm leading-6 text-green-100 shadow-sm shadow-neutral-950/20 [overflow-wrap:normal] [white-space:pre]">
                 {groupedLogs || "Waiting for deployment logs..."}

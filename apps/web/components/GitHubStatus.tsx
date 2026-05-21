@@ -33,7 +33,7 @@ export function GitHubStatus({ compact = false, showConnect = true }: { compact?
   const icon = !status ? <CircleDashed size={16} /> : status.oauthConfigured && (status.tokenValid === true || !status.authenticated)
     ? <CheckCircle2 size={16} />
     : <CircleAlert size={16} />;
-  const tone = !status ? "border-line bg-panel text-neutral-700" : status.oauthConfigured && (status.tokenValid === true || !status.authenticated)
+  const tone = !status ? "border-line bg-surface-alt text-muted" : status.oauthConfigured && (status.tokenValid === true || !status.authenticated)
     ? "border-emerald-200 bg-emerald-50 text-emerald-900"
     : "border-red-200 bg-red-50 text-red-900";
 

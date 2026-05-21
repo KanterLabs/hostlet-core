@@ -18,7 +18,8 @@ import {
   Trash2,
 } from "lucide-react";
 import { Nav } from "@/components/Nav";
-import { api, apiUrl } from "@/lib/api";
+import { api } from "@/lib/api";
+import { webhookReadiness } from "@/lib/webhooks";
 import { Field, Metric, PageHeader, StatusPill } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 
@@ -283,6 +284,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const deploymentStatus = app?.latestDeployment?.status || (app?.currentDeploymentId ? "success" : "not deployed");
   const active = isActiveDeploy(app?.latestDeployment?.status);
   const cpu = cpuDisplay(resources?.cpuPercent || "0.00%");
+  const webhook = webhookReadiness();
 
   return (
     <main className="app-shell">
@@ -348,7 +350,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <h2 className="font-semibold">Resource usage</h2>
                     <p className="muted mt-1">Live Docker stats for the current running container.</p>
                   </div>
-                  {resources?.sampledAt && <p className="text-xs text-neutral-500">Updated {new Date(resources.sampledAt).toLocaleTimeString()}</p>}
+                  {resources?.sampledAt && <p className="text-xs text-muted">Updated {new Date(resources.sampledAt).toLocaleTimeString()}</p>}
                 </div>
                 {resources ? (
                   <div className="grid gap-3 md:grid-cols-3">
@@ -360,7 +362,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <Metric label="Container" value={app?.currentDeploymentId ? "running" : "not deployed"} />
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-line bg-panel p-4 text-sm text-neutral-700">{resourceMessage}</div>
+                  <div className="rounded-lg border border-line bg-surface-alt p-4 text-sm text-muted">{resourceMessage}</div>
                 )}
               </section>
 
@@ -401,11 +403,11 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   </div>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-4">
-                  <label className="flex items-center gap-2 rounded-md border border-line bg-panel px-3 py-2">
+                  <label className="flex items-center gap-2 rounded-md border border-line bg-surface-alt px-3 py-2">
                     <input type="checkbox" checked={settings.public_exposure} onChange={(event) => setSettings({ ...settings, public_exposure: event.target.checked })} />
                     Public URL
                   </label>
-                  <label className="flex items-center gap-2 rounded-md border border-line bg-panel px-3 py-2">
+                  <label className="flex items-center gap-2 rounded-md border border-line bg-surface-alt px-3 py-2">
                     <input type="checkbox" checked={settings.auto_deploy} onChange={(event) => setSettings({ ...settings, auto_deploy: event.target.checked })} />
                     Auto redeploy on branch push
                   </label>
@@ -434,7 +436,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     </div>
                   ))}
                   {envKeys.length === 0 && <p className="muted">No environment variables set.</p>}
-                  <div className="rounded-md border border-line bg-panel p-3">
+                  <div className="rounded-md border border-line bg-surface-alt p-3">
                     <input value={newEnv.key} onChange={(event) => setNewEnv({ ...newEnv, key: event.target.value.toUpperCase() })} placeholder="KEY" />
                     <input className="mt-2" type="password" value={newEnv.value} onChange={(event) => setNewEnv({ ...newEnv, value: event.target.value })} placeholder="Value" />
                     <button className="mt-2 w-full" disabled={!!busyAction || !newEnv.key || !newEnv.value} onClick={() => saveEnvVar(newEnv.key, newEnv.value)}><KeyRound size={16} />Add variable</button>
@@ -449,9 +451,9 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <Summary label="Public URL" value={app?.publicExposure ? "published" : "private"} />
                   <Summary label="Latest webhook" value={webhookSummary(app?.latestWebhook)} />
                 </div>
-                <div className="mt-4 rounded-md border border-line bg-panel p-3 text-sm">
+                <div className="mt-4 rounded-md border border-line bg-surface-alt p-3 text-sm">
                   <div className="font-medium">GitHub webhook</div>
-                  <div className="mt-2 break-all font-mono text-xs">{apiUrl()}/webhooks/github</div>
+                  <div className="mt-2 break-all font-mono text-xs">{webhook.webhookUrl}</div>
                 </div>
               </section>
 
@@ -464,7 +466,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             </aside>
           </div>
 
-          {message && <p className="mt-6 rounded-md border border-line bg-white p-3 text-sm shadow-sm shadow-neutral-950/5">{message}</p>}
+          {message && <p className="mt-6 rounded-md border border-line bg-surface p-3 text-sm shadow-sm shadow-neutral-950/5">{message}</p>}
         </div>
       </section>
     </main>
@@ -473,7 +475,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
 function Summary({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md bg-panel px-3 py-2 text-sm">
+    <div className="rounded-md bg-surface-alt px-3 py-2 text-sm">
       <div className="eyebrow">{label}</div>
       <div className="mt-1 break-words font-medium">{value}</div>
     </div>

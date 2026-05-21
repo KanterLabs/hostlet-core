@@ -4,13 +4,15 @@
 
 :root {
   color-scheme: light;
-  --ink: #151a18;
-  --muted: #68736d;
-  --line: #dce2dd;
-  --panel: #f6f8f6;
+  --ink: #141a17;
+  --muted: #657168;
+  --line: #d8dfd8;
+  --panel: #eef3ee;
   --surface: #ffffff;
-  --action: #176f53;
-  --action-strong: #11563f;
+  --surface-alt: #f8faf7;
+  --action: #11775c;
+  --action-strong: #0b5c47;
+  --rail: #101815;
 }
 
 html {
@@ -18,7 +20,8 @@ html {
 }
 
 body {
-  background: #f6f8f6;
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f4f7f3 0%, var(--panel) 100%);
   color: var(--ink);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
@@ -36,7 +39,7 @@ a {
 }
 
 input, select, textarea {
-  @apply w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-action focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-500;
+  @apply w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink outline-none transition placeholder:text-neutral-400 focus:border-action focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-500;
 }
 
 input[type="checkbox"] {
@@ -48,11 +51,11 @@ label {
 }
 
 button, .button {
-  @apply inline-flex min-h-9 items-center justify-center gap-2 rounded-md bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-action-strong focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .button-secondary {
-  @apply bg-white text-ink ring-1 ring-line shadow-none hover:bg-panel;
+  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-line bg-surface px-3 py-2 text-sm font-medium text-ink shadow-sm shadow-neutral-950/5 ring-0 transition hover:border-neutral-300 hover:bg-surface-alt focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .button-danger {
@@ -60,7 +63,7 @@ button, .button {
 }
 
 .app-shell {
-  @apply grid min-h-screen grid-cols-1 lg:grid-cols-[244px_minmax(0,1fr)];
+  @apply grid min-h-screen grid-cols-1 lg:grid-cols-[252px_minmax(0,1fr)];
 }
 
 .page {
@@ -72,15 +75,15 @@ button, .button {
 }
 
 .panel {
-  @apply rounded-lg border border-line bg-white shadow-sm shadow-neutral-950/5;
+  @apply rounded-lg border border-line bg-surface shadow-sm shadow-neutral-950/5;
 }
 
 .panel-muted {
-  @apply rounded-lg border border-line bg-panel;
+  @apply rounded-lg border border-line bg-surface-alt;
 }
 
 .metric {
-  @apply rounded-lg border border-line bg-white p-4 shadow-sm shadow-neutral-950/5;
+  @apply rounded-lg border border-line bg-surface p-4 shadow-sm shadow-neutral-950/5;
 }
 
 .pill {
@@ -88,11 +91,11 @@ button, .button {
 }
 
 .muted {
-  @apply text-sm text-neutral-600;
+  @apply text-sm text-muted;
 }
 
 .eyebrow {
-  @apply text-xs font-medium text-neutral-500;
+  @apply text-xs font-medium text-muted;
 }
 
 .code-box {

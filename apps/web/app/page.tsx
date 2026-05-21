@@ -82,7 +82,7 @@ export default function Dashboard() {
               {recentApps.length > 0 ? (
                 <div>
                   {recentApps.map((app) => (
-                    <Link key={app.id} href={`/apps/${app.id}`} className="grid gap-3 border-t border-line px-4 py-4 first:border-t-0 hover:bg-panel md:grid-cols-[1fr_170px_150px]">
+                    <Link key={app.id} href={`/apps/${app.id}`} className="grid gap-3 border-t border-line px-4 py-4 first:border-t-0 hover:bg-surface-alt md:grid-cols-[1fr_170px_150px]">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <div className="truncate font-medium">{app.name}</div>
@@ -104,7 +104,7 @@ export default function Dashboard() {
               ) : (
                 <div className="p-6">
                   <div className="flex flex-col items-start">
-                    <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-panel text-ink ring-1 ring-line">
+                    <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-surface-alt text-ink ring-1 ring-line">
                       <Box size={20} />
                     </div>
                     <div className="font-medium">No apps yet</div>
@@ -145,8 +145,8 @@ export default function Dashboard() {
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-md bg-panel px-3 py-2 text-sm">
-      <span className="text-neutral-500">{label}</span>
+    <div className="flex items-center justify-between gap-4 rounded-md bg-surface-alt px-3 py-2 text-sm">
+      <span className="text-muted">{label}</span>
       <span className="font-medium">{value}</span>
     </div>
   );

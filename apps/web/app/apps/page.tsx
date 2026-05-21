@@ -77,13 +77,18 @@ export default function Apps() {
             actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
           />
 
-          <div className="mb-5 flex flex-wrap items-center gap-2">
-            <span className="button-secondary min-h-9 cursor-default"><ListFilter size={16} />Filter</span>
-            {(["all", "active", "failed", "public"] as const).map((item) => (
-              <button key={item} className={filter === item ? "" : "button-secondary"} onClick={() => setFilter(item)}>
-                {item}
-              </button>
-            ))}
+          <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface p-2 shadow-sm shadow-neutral-950/5">
+            <div className="flex items-center gap-2 px-2 text-sm font-medium text-muted">
+              <ListFilter size={16} />
+              Filter
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(["all", "active", "failed", "public"] as const).map((item) => (
+                <button key={item} className={`${filter === item ? "" : "button-secondary"} min-h-8 px-3 py-1.5 capitalize`} onClick={() => setFilter(item)}>
+                  {item}
+                </button>
+              ))}
+            </div>
           </div>
 
           {filtered.length > 0 ? (
@@ -93,13 +98,13 @@ export default function Apps() {
                   <div className="flex flex-wrap items-start justify-between gap-4 p-4">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <Link href={`/apps/${app.id}`} className="truncate text-xl font-semibold hover:text-action">{app.name}</Link>
+                        <Link href={`/apps/${app.id}`} className="truncate text-lg font-semibold hover:text-action">{app.name}</Link>
                         <StatusPill status={app.latestDeployment?.status || app.currentDeployment?.status || "not deployed"} />
                         <StatusPill status={app.server?.status || "offline"} label={`machine ${app.server?.status || "offline"}`} />
                       </div>
                       <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex shrink-0 flex-wrap gap-2">
                       <Link className="button-secondary" href={`/apps/${app.id}`}><Box size={16} />Open</Link>
                       {app.latestDeployment?.id && (
                         <Link className="button-secondary" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />Logs</Link>
