@@ -58,17 +58,21 @@ export function GitHubDeviceFlow({
 
   useEffect(() => {
     if (!flow || status !== "pending") return;
+    const activeFlow = flow;
     let cancelled = false;
-    const timeout = window.setTimeout(async () => {
+    let timeout: number | undefined;
+
+    async function poll() {
       try {
         const result = await api<DevicePoll>("/auth/github/device/poll", {
           method: "POST",
-          body: JSON.stringify({ flow_id: flow.flowId }),
+          body: JSON.stringify({ flow_id: activeFlow.flowId }),
         });
         if (cancelled) return;
         setMessage(result.message);
-        if (result.interval && result.interval !== flow.interval) {
-          setFlow({ ...flow, interval: result.interval });
+        if (result.interval && result.interval !== activeFlow.interval) {
+          setFlow({ ...activeFlow, interval: result.interval });
+          return;
         }
         if (result.status === "authorized") {
           setStatus("authorized");
@@ -78,17 +82,21 @@ export function GitHubDeviceFlow({
         }
         if (result.status === "expired" || result.status === "denied") {
           setStatus(result.status);
+          return;
         }
+        timeout = window.setTimeout(poll, Math.max(result.interval || activeFlow.interval, 5) * 1000);
       } catch (error) {
         if (!cancelled) {
           setStatus("error");
           setMessage(error instanceof Error ? error.message : "Could not poll GitHub authorization.");
         }
       }
-    }, Math.max(flow.interval, 5) * 1000);
+    }
+
+    timeout = window.setTimeout(poll, Math.max(activeFlow.interval, 5) * 1000);
     return () => {
       cancelled = true;
-      window.clearTimeout(timeout);
+      if (timeout) window.clearTimeout(timeout);
     };
   }, [flow, status, onAuthorized]);
 
