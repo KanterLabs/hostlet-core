@@ -95,6 +95,9 @@ services:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:?Run hostlet init first}
+        NEXT_PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:?Run hostlet init first}
