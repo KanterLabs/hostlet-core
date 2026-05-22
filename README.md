@@ -167,7 +167,7 @@ PUBLIC_WEBHOOK_URL=https://hostlet.example.com
 
 1. Run `hostlet up --tunnel` (or set `PUBLIC_WEBHOOK_URL`)
 2. Enable **Auto redeploy on branch push** for your app
-3. Add a GitHub webhook:
+3. Hostlet creates or updates the GitHub webhook using your connected GitHub token:
    ```
    Payload URL: PUBLIC_WEBHOOK_URL/webhooks/github
    Content type: application/json
@@ -175,7 +175,7 @@ PUBLIC_WEBHOOK_URL=https://hostlet.example.com
    Events: push
    ```
 
-Only matching repo/branch pushes trigger deployments. Magic! ✨
+Only matching repo/branch pushes trigger deployments, and only for apps where auto-redeploy is enabled.
 
 ---
 

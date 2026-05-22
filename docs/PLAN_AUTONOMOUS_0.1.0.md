@@ -2,6 +2,8 @@
 
 Date: 2026-05-21
 
+Status update, 2026-05-22: this is a historical implementation plan. The updated `0.1.0` package is local-machine-only, with app settings/env editing, app delete cleanup, opt-in auto-redeploy, backup/restore commands, production Compose, and in-memory rate limits implemented. Current capabilities and remaining limits are summarized in [FEATURE_GAPS.md](FEATURE_GAPS.md) and [SHIP_PLAN_0.1.0.md](SHIP_PLAN_0.1.0.md).
+
 This plan contains work Codex can implement independently in the repository and local environment. External account validation is called out separately in [Owner Input Plan](PLAN_OWNER_INPUT_0.1.0.md).
 
 ## Default Product Decisions
@@ -14,7 +16,7 @@ Use these defaults unless Shane explicitly overrides them:
 - App delete: remove all Hostlet-managed containers, images, Caddy snippets, resource snapshots, and Hostlet-managed DNS for that app.
 - Failed deployment containers: preserve initially for debugging, but expose cleanup.
 - Backup target: local archive directory for `0.1.0`; external backup destinations can wait.
-- Remote VPS support: documented beta unless Shane provides a VPS for full validation.
+- Remote VPS support: disabled for the updated `0.1.0` package.
 - Public exposure: optional per app. Default private.
 - Production packaging: Docker image plus production Compose, not a full installer.
 
@@ -250,11 +252,11 @@ Verify locally:
 
 ## Phase 8: Remote Agent Install
 
-Implement:
+Status for updated `0.1.0`: remote agent install is intentionally disabled. The historical tasks below are deferred until a later remote-agent release:
 
 - remove fake `https://github.com/example/Hostlet.git` default
 - make `HOSTLET_REPO_URL` required or configure real default
-- generated install command includes repo URL placeholder/config
+- generated install command includes a real repo URL or required repo URL configuration
 - add reinstall/troubleshooting docs
 
 Recommended default:

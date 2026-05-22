@@ -17,10 +17,23 @@ import {
   Settings,
   Trash2,
 } from "lucide-react";
-import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
 import { webhookReadiness } from "@/lib/webhooks";
-import { Field, Metric, PageHeader, StatusPill } from "@/components/ui";
+import {
+  AppShell,
+  DataList,
+  Field,
+  Metric,
+  MetricsGrid,
+  Notice,
+  PageHeader,
+  Panel,
+  SectionHeader,
+  SelectField,
+  StatusPill,
+  SummaryItem,
+  ToggleCard,
+} from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 
 type ResourceStats = {
@@ -287,10 +300,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const webhook = webhookReadiness();
 
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner">
+    <AppShell>
           <PageHeader
             eyebrow="Application"
             title={app?.name || "App"}
@@ -311,12 +321,12 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             }
           />
 
-          <div className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <MetricsGrid>
             <Metric label="Deployment" value={deploymentStatus.replaceAll("_", " ")} detail={shortSha(app?.latestDeployment?.commitSha)} icon={Activity} />
             <Metric label="Machine" value={app?.server?.name || "Unknown"} detail={app?.server?.status || "offline"} icon={Box} />
             <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={displayDomain(app?.domain || "") || "No domain"} icon={Globe2} />
             <Metric label="Automation" value={app?.autoDeploy ? "auto deploy" : "manual"} detail={webhookSummary(app?.latestWebhook)} icon={GitBranch} />
-          </div>
+          </MetricsGrid>
 
           <div className="mb-6 flex flex-wrap gap-2">
             <StatusPill status={deploymentStatus} />
@@ -327,50 +337,49 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
           <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />
 
           {app && !app.currentDeploymentId && (
-            <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-4">
-              <div className="font-medium text-amber-950">This app has not been deployed yet.</div>
-              <p className="mt-1 text-sm text-amber-900">Start the first deployment to build, run, check health, and publish the route.</p>
-              <button disabled={!!busyAction || active} onClick={deploy} className="mt-4"><Play size={16} />Start first deployment</button>
-            </div>
+            <Notice
+              tone="warning"
+              className="mb-6"
+              title="This app has not been deployed yet."
+              description="Start the first deployment to build, run, check health, and publish the route."
+              action={<button disabled={!!busyAction || active} onClick={deploy}><Play size={16} />Start first deployment</button>}
+            />
           )}
 
           {app?.latestDeployment?.status === "failed" && (
-            <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4">
-              <div className="font-medium text-red-950">Latest deployment failed.</div>
-              <p className="mt-1 text-sm text-red-900">{app.latestDeployment.failure || "Open the logs to inspect the failure."}</p>
-              {app.latestDeployment.id && <Link className="button-secondary mt-4 text-red-900 ring-red-200 hover:bg-red-100" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />View failure logs</Link>}
-            </div>
+            <Notice
+              tone="danger"
+              className="mb-6"
+              title="Latest deployment failed."
+              description={app.latestDeployment.failure || "Open the logs to inspect the failure."}
+              action={app.latestDeployment.id && <Link className="button-secondary text-red-900 ring-red-200 hover:bg-red-100" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />View failure logs</Link>}
+            />
           )}
 
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_390px]">
             <div className="space-y-6">
               <section>
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="font-semibold">Resource usage</h2>
-                    <p className="muted mt-1">Live Docker stats for the current running container.</p>
-                  </div>
-                  {resources?.sampledAt && <p className="text-xs text-muted">Updated {new Date(resources.sampledAt).toLocaleTimeString()}</p>}
-                </div>
+                <SectionHeader
+                  title="Resource usage"
+                  description="Live Docker stats for the current running container."
+                  action={resources?.sampledAt && <p className="text-xs text-muted">Updated {new Date(resources.sampledAt).toLocaleTimeString()}</p>}
+                />
                 {resources ? (
-                  <div className="grid gap-3 md:grid-cols-3">
+                  <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
                     <Metric label="CPU" value={cpu.value} detail={cpu.detail} icon={Cpu} />
                     <Metric label="Memory" value={resources.memoryUsage} detail={resources.memoryPercent} />
                     <Metric label="Processes" value={resources.pids} />
                     <Metric label="Network I/O" value={resources.networkIo} />
                     <Metric label="Disk I/O" value={resources.blockIo} />
                     <Metric label="Container" value={app?.currentDeploymentId ? "running" : "not deployed"} />
-                  </div>
+                  </MetricsGrid>
                 ) : (
-                  <div className="rounded-lg border border-line bg-surface-alt p-4 text-sm text-muted">{resourceMessage}</div>
+                  <Notice tone="neutral" description={resourceMessage} />
                 )}
               </section>
 
-              <section className="panel p-4">
-                <div className="mb-4 flex items-center gap-2">
-                  <Settings size={18} />
-                  <h2 className="font-semibold">App settings</h2>
-                </div>
+              <Panel>
+                <SectionHeader icon={Settings} title="App settings" />
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="Domain" value={settings.domain} onChange={(value) => setSettings({ ...settings, domain: value })} />
                   <Field label="Health path" value={settings.health_path} onChange={(value) => setSettings({ ...settings, health_path: value })} />
@@ -380,48 +389,35 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <Field label="Build command" value={settings.build_command} onChange={(value) => setSettings({ ...settings, build_command: value })} />
                   <Field label="Start command" value={settings.start_command} onChange={(value) => setSettings({ ...settings, start_command: value })} />
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <label className="block">Memory
-                      <select className="mt-1" value={settings.memory_limit_mb} onChange={(event) => setSettings({ ...settings, memory_limit_mb: event.target.value })}>
-                        <option value="">No cap</option>
-                        <option value="256">256 MB</option>
-                        <option value="512">512 MB</option>
-                        <option value="1024">1 GB</option>
-                        <option value="2048">2 GB</option>
-                        <option value="4096">4 GB</option>
-                      </select>
-                    </label>
-                    <label className="block">CPU
-                      <select className="mt-1" value={settings.cpu_limit} onChange={(event) => setSettings({ ...settings, cpu_limit: event.target.value })}>
-                        <option value="">No cap</option>
-                        <option value="0.25">0.25 CPU</option>
-                        <option value="0.5">0.5 CPU</option>
-                        <option value="1">1 CPU</option>
-                        <option value="2">2 CPUs</option>
-                        <option value="4">4 CPUs</option>
-                      </select>
-                    </label>
+                    <SelectField label="Memory" value={settings.memory_limit_mb} onChange={(value) => setSettings({ ...settings, memory_limit_mb: value })}>
+                      <option value="">No cap</option>
+                      <option value="256">256 MB</option>
+                      <option value="512">512 MB</option>
+                      <option value="1024">1 GB</option>
+                      <option value="2048">2 GB</option>
+                      <option value="4096">4 GB</option>
+                    </SelectField>
+                    <SelectField label="CPU" value={settings.cpu_limit} onChange={(value) => setSettings({ ...settings, cpu_limit: value })}>
+                      <option value="">No cap</option>
+                      <option value="0.25">0.25 CPU</option>
+                      <option value="0.5">0.5 CPU</option>
+                      <option value="1">1 CPU</option>
+                      <option value="2">2 CPUs</option>
+                      <option value="4">4 CPUs</option>
+                    </SelectField>
                   </div>
                 </div>
-                <div className="mt-4 flex flex-wrap gap-4">
-                  <label className="flex items-center gap-2 rounded-md border border-line bg-surface-alt px-3 py-2">
-                    <input type="checkbox" checked={settings.public_exposure} onChange={(event) => setSettings({ ...settings, public_exposure: event.target.checked })} />
-                    Public URL
-                  </label>
-                  <label className="flex items-center gap-2 rounded-md border border-line bg-surface-alt px-3 py-2">
-                    <input type="checkbox" checked={settings.auto_deploy} onChange={(event) => setSettings({ ...settings, auto_deploy: event.target.checked })} />
-                    Auto redeploy on branch push
-                  </label>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <ToggleCard checked={settings.public_exposure} onChange={(value) => setSettings({ ...settings, public_exposure: value })} icon={Globe2} label="Public URL" />
+                  <ToggleCard checked={settings.auto_deploy} onChange={(value) => setSettings({ ...settings, auto_deploy: value })} icon={GitBranch} label="Auto redeploy on branch push" />
                 </div>
                 <button className="mt-4" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
-              </section>
+              </Panel>
             </div>
 
             <aside className="space-y-6">
-              <section className="panel p-4">
-                <div className="mb-4 flex items-center gap-2">
-                  <KeyRound size={18} />
-                  <h2 className="font-semibold">Environment</h2>
-                </div>
+              <Panel>
+                <SectionHeader icon={KeyRound} title="Environment" />
                 <div className="space-y-3">
                   {envKeys.map(({ key }) => (
                     <div key={key} className="rounded-md border border-line p-3">
@@ -442,20 +438,20 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <button className="mt-2 w-full" disabled={!!busyAction || !newEnv.key || !newEnv.value} onClick={() => saveEnvVar(newEnv.key, newEnv.value)}><KeyRound size={16} />Add variable</button>
                   </div>
                 </div>
-              </section>
+              </Panel>
 
-              <section className="panel p-4">
-                <h2 className="font-semibold">Automation</h2>
-                <div className="mt-4 grid gap-2">
-                  <Summary label="Auto redeploy" value={app?.autoDeploy ? "enabled" : "disabled"} />
-                  <Summary label="Public URL" value={app?.publicExposure ? "published" : "private"} />
-                  <Summary label="Latest webhook" value={webhookSummary(app?.latestWebhook)} />
-                </div>
+              <Panel>
+                <SectionHeader title="Automation" />
+                <DataList className="mt-4">
+                  <SummaryItem label="Auto redeploy" value={app?.autoDeploy ? "enabled" : "disabled"} />
+                  <SummaryItem label="Public URL" value={app?.publicExposure ? "published" : "private"} />
+                  <SummaryItem label="Latest webhook" value={webhookSummary(app?.latestWebhook)} />
+                </DataList>
                 <div className="mt-4 rounded-md border border-line bg-surface-alt p-3 text-sm">
                   <div className="font-medium">GitHub webhook</div>
                   <div className="mt-2 break-all font-mono text-xs">{webhook.webhookUrl}</div>
                 </div>
-              </section>
+              </Panel>
 
               {app?.publicExposure && app.domain && (
                 <a className="button-secondary w-full" href={externalHref(app.domain)} target="_blank" rel="noreferrer">
@@ -466,19 +462,8 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             </aside>
           </div>
 
-          {message && <p className="mt-6 rounded-md border border-line bg-surface p-3 text-sm shadow-sm shadow-neutral-950/5">{message}</p>}
-        </div>
-      </section>
-    </main>
-  );
-}
-
-function Summary({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md bg-surface-alt px-3 py-2 text-sm">
-      <div className="eyebrow">{label}</div>
-      <div className="mt-1 break-words font-medium">{value}</div>
-    </div>
+          {message && <Notice tone="neutral" className="mt-6" description={message} />}
+    </AppShell>
   );
 }
 

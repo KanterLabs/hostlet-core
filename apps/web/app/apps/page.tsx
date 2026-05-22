@@ -3,9 +3,8 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Box, ExternalLink, ListFilter, Plus, ScrollText } from "lucide-react";
-import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
-import { EmptyState, PageHeader, StatusPill } from "@/components/ui";
+import { AppShell, EmptyState, FilterTabs, KeyValueGrid, KeyValueItem, PageHeader, Panel, StatusPill } from "@/components/ui";
 
 type Deployment = {
   id: string;
@@ -66,10 +65,7 @@ export default function Apps() {
   }, [apps, filter]);
 
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner">
+    <AppShell>
           <PageHeader
             eyebrow="Applications"
             title="Apps"
@@ -77,24 +73,12 @@ export default function Apps() {
             actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
           />
 
-          <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface p-2 shadow-sm shadow-neutral-950/5">
-            <div className="flex items-center gap-2 px-2 text-sm font-medium text-muted">
-              <ListFilter size={16} />
-              Filter
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {(["all", "active", "failed", "public"] as const).map((item) => (
-                <button key={item} className={`${filter === item ? "" : "button-secondary"} min-h-8 px-3 py-1.5 capitalize`} onClick={() => setFilter(item)}>
-                  {item}
-                </button>
-              ))}
-            </div>
-          </div>
+          <FilterTabs label="Filter" icon={ListFilter} value={filter} items={["all", "active", "failed", "public"] as const} onChange={setFilter} />
 
           {filtered.length > 0 ? (
             <div className="grid gap-4">
               {filtered.map((app) => (
-                <article key={app.id} className="panel overflow-hidden">
+                <Panel key={app.id} className="overflow-hidden" padded={false}>
                   <div className="flex flex-wrap items-start justify-between gap-4 p-4">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -112,23 +96,23 @@ export default function Apps() {
                     </div>
                   </div>
 
-                  <div className="grid border-t border-line md:grid-cols-4">
-                    <Info label="Domain" value={displayDomain(app.domain)} href={domainHref(app)} />
-                    <Info label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
-                    <Info label="Runtime" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
-                    <Info label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
-                    <Info label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
-                    <Info label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
-                    <Info label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />
-                    <Info label="Webhook" value={webhookSummary(app.latestWebhook)} />
-                  </div>
+                  <KeyValueGrid>
+                    <KeyValueItem label="Domain" value={displayDomain(app.domain)} href={domainHref(app)} externalIcon={<ExternalLink size={13} />} />
+                    <KeyValueItem label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
+                    <KeyValueItem label="Runtime" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
+                    <KeyValueItem label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
+                    <KeyValueItem label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
+                    <KeyValueItem label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
+                    <KeyValueItem label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />
+                    <KeyValueItem label="Webhook" value={webhookSummary(app.latestWebhook)} />
+                  </KeyValueGrid>
 
                   {app.latestDeployment?.failure && (
                     <div className="border-t border-red-100 bg-red-50 px-4 py-3 text-sm text-red-900">
                       {app.latestDeployment.failure}
                     </div>
                   )}
-                </article>
+                </Panel>
               ))}
             </div>
           ) : (
@@ -140,25 +124,7 @@ export default function Apps() {
               actionLabel="Create app"
             />
           )}
-        </div>
-      </section>
-    </main>
-  );
-}
-
-function Info({ label, value, href }: { label: string; value?: string | null; href?: string | null }) {
-  return (
-    <div className="min-w-0 border-t border-line px-4 py-3 first:border-t-0 md:border-l md:border-t-0 md:first:border-l-0">
-      <div className="eyebrow">{label}</div>
-      {href ? (
-        <a className="mt-1 flex items-center gap-1 truncate text-sm font-medium hover:text-action" href={href} target="_blank" rel="noreferrer">
-          <span className="truncate">{value || "Not set"}</span>
-          <ExternalLink size={13} />
-        </a>
-      ) : (
-        <div className="mt-1 truncate text-sm font-medium">{value || "Not set"}</div>
-      )}
-    </div>
+    </AppShell>
   );
 }
 

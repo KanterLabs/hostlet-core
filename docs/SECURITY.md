@@ -15,6 +15,7 @@ Hostlet controls Docker deployments and should be treated as infrastructure soft
 - Security headers on API and web responses.
 - GitHub webhook signature verification.
 - Webhook replay resistance with GitHub delivery ID dedupe.
+- In-memory rate limiting for setup, unlock, GitHub Device Flow, agent registration/events, agent WebSocket connection attempts, and GitHub webhooks.
 - Agent authentication with hashed agent tokens.
 - Signed deployment jobs verified by the agent.
 - Agent-originated logs are size-limited.
@@ -73,7 +74,9 @@ Hostlet only manages app records when all are true:
 - `HOSTLET_BASE_DOMAIN` is configured.
 - The app domain ends with `.<HOSTLET_BASE_DOMAIN>`.
 - The app domain has a single label before the base domain.
-- That label starts with `HOSTLET_DOMAIN_PREFIX`.
+- The app domain does not include a port.
+- The app label is not reserved, including `www`, `mail`, `api`, `hostlet`, or other common infrastructure names.
+- The Cloudflare CNAME is owned by the requesting app in `app_public_dns_records`, is unclaimed in Cloudflare, or is an old `HOSTLET_DOMAIN_PREFIX` legacy record.
 
 This prevents Hostlet from deleting or changing the apex domain, portfolio hostnames, `www`, or unrelated records.
 
@@ -97,13 +100,14 @@ The agent redacts obvious secret-looking command output, but log redaction is no
 
 Back up `ENCRYPTION_KEY`. If it is lost, encrypted GitHub tokens and app environment variables cannot be decrypted.
 
+App containers receive a writable `/data` Docker volume. Treat `hostlet-app-data-*` volumes as application data: include them in backups, restrict host access to trusted administrators, and delete apps only when their persistent data can also be removed.
+
 ## Known Gaps
 
 See [FEATURE_GAPS.md](FEATURE_GAPS.md) for the full product and security backlog. Highest-priority security gaps:
 
-- no backup/restore tooling
 - no audit log UI
 - no role-based access control
-- no rate limiting
-- incomplete production deployment packaging
+- no durable rate-limit storage across API restarts
+- backup/restore exists, but scheduled/off-host backup and clean-machine restore validation are still manual
 - no automated dependency/image scanning pipeline

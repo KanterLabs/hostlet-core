@@ -97,7 +97,7 @@ pub async fn github_device_start(
         .header("Accept", "application/json")
         .form(&[
             ("client_id", state.github_client_id.as_str()),
-            ("scope", "repo read:user"),
+            ("scope", "repo read:user admin:repo_hook"),
         ])
         .send()
         .await

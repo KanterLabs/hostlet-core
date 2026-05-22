@@ -3,10 +3,9 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Box, GitBranch, HardDrive, Plus, Rocket, ShieldCheck } from "lucide-react";
-import { Nav } from "@/components/Nav";
 import { GitHubStatus } from "@/components/GitHubStatus";
 import { api } from "@/lib/api";
-import { Metric, PageHeader, StatusPill } from "@/components/ui";
+import { AppShell, DataList, DataRow, IconFrame, Metric, MetricsGrid, Notice, PageHeader, Panel, PanelHeader, SectionHeader, StatusPill } from "@/components/ui";
 
 type App = {
   id: string;
@@ -47,10 +46,7 @@ export default function Dashboard() {
   const recentApps = useMemo(() => apps.slice(0, 5), [apps]);
 
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner">
+    <AppShell>
           <PageHeader
             eyebrow="Control plane"
             title="Overview"
@@ -60,22 +56,16 @@ export default function Dashboard() {
             }
           />
 
-          <div className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <MetricsGrid>
             <Metric label="Apps" value={String(apps.length)} detail={`${healthyApps} healthy`} icon={Box} />
             <Metric label="Active deploys" value={String(activeDeploys)} detail="builds, checks, routing" icon={Rocket} />
             <Metric label="Public apps" value={String(publicApps)} detail="Cloudflare DNS open" icon={ShieldCheck} />
             <Metric label="Machines online" value={`${onlineServers}/${servers.length || 1}`} detail="agent heartbeat" icon={HardDrive} />
-          </div>
+          </MetricsGrid>
 
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-            <section className="panel overflow-hidden">
-              <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
-                <div>
-                  <h2 className="font-semibold">Recent apps</h2>
-                  <p className="muted mt-1">Latest deployment state by project.</p>
-                </div>
-                <Link className="button-secondary" href="/apps">View all</Link>
-              </div>
+            <Panel className="overflow-hidden" padded={false}>
+              <PanelHeader title="Recent apps" description="Latest deployment state by project." action={<Link className="button-secondary" href="/apps">View all</Link>} />
               {recentApps.length > 0 ? (
                 <div>
                   {recentApps.map((app) => (
@@ -101,51 +91,33 @@ export default function Dashboard() {
               ) : (
                 <div className="p-6">
                   <div className="flex flex-col items-start">
-                    <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-surface-alt text-ink ring-1 ring-line">
-                      <Box size={20} />
-                    </div>
+                    <IconFrame icon={Box} className="mb-4" />
                     <div className="font-medium">No apps yet</div>
                     <p className="muted mt-2 max-w-xl">Create the first app, connect a GitHub repo, then start a deployment.</p>
                     <Link className="button mt-5" href="/apps/new">Create app</Link>
                   </div>
                 </div>
               )}
-            </section>
+            </Panel>
 
             <aside className="space-y-6">
               <GitHubStatus />
-              <section className="panel p-4">
-                <div className="flex items-center gap-2">
-                  <GitBranch size={18} />
-                  <h2 className="font-semibold">Release state</h2>
-                </div>
-                <div className="mt-4 grid gap-2">
-                  <Row label="Version" value="0.1.0" />
-                  <Row label="Runtime" value="Docker + Caddy" />
-                  <Row label="Default access" value="Private apps" />
-                  <Row label="CI target" value="self-hosted Linux X64" />
-                </div>
-              </section>
+              <Panel>
+                <SectionHeader icon={GitBranch} title="Release state" />
+                <DataList className="mt-4">
+                  <DataRow label="Version" value="0.1.0" />
+                  <DataRow label="Runtime" value="Docker + Caddy" />
+                  <DataRow label="Default access" value="Private apps" />
+                  <DataRow label="CI target" value="self-hosted Linux X64" />
+                </DataList>
+              </Panel>
             </aside>
           </div>
 
           {message && (
-            <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-              {message}
-            </div>
+            <Notice tone="warning" className="mt-6" description={message} />
           )}
-        </div>
-      </section>
-    </main>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4 rounded-md bg-surface-alt px-3 py-2 text-sm">
-      <span className="text-muted">{label}</span>
-      <span className="font-medium">{value}</span>
-    </div>
+    </AppShell>
   );
 }
 

@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { LockKeyhole, ShieldCheck, TerminalSquare } from "lucide-react";
 import { apiUrl } from "@/lib/api";
+import { IconFrame, Notice, Panel } from "@/components/ui";
 
 type SetupStatus = {
   setupRequired: boolean;
@@ -67,13 +68,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (!status) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-panel p-6">
-        <section className="panel w-full max-w-md border-t-4 border-t-action p-6">
+        <Panel className="w-full max-w-md border-t-4 border-t-action p-6" padded={false}>
           <AuthBrand />
-          <div className="mt-5 rounded-md border border-line bg-surface-alt p-3 text-sm text-muted">
-            Checking control-plane security status...
-          </div>
-          {error && <p className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
-        </section>
+          <Notice tone="neutral" className="mt-5" description="Checking control-plane security status..." />
+          {error && <Notice tone="danger" className="mt-3" description={error} />}
+        </Panel>
       </main>
     );
   }
@@ -81,13 +80,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const setup = status.setupRequired;
   return (
     <main className="flex min-h-screen items-center justify-center bg-panel p-6">
-      <section className="panel w-full max-w-md border-t-4 border-t-action p-6">
+      <Panel className="w-full max-w-md border-t-4 border-t-action p-6" padded={false}>
         <AuthBrand />
         <div className="mt-5 rounded-lg border border-line bg-surface-alt p-4">
           <div className="flex items-center gap-3">
-            <div className="rounded-md border border-line bg-surface p-2 text-ink">
-              {setup ? <ShieldCheck size={18} /> : <LockKeyhole size={18} />}
-            </div>
+            <IconFrame icon={setup ? ShieldCheck : LockKeyhole} className="h-9 w-9 rounded-md bg-surface" />
             <div>
               <h1 className="text-lg font-semibold">{setup ? "Secure Hostlet" : "Unlock Hostlet"}</h1>
               <p className="muted mt-1">
@@ -136,12 +133,12 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               />
             </label>
           )}
-          {error && <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
+          {error && <Notice tone="danger" description={error} />}
           <button className="w-full" disabled={saving || !status}>
             {saving ? "Saving..." : setup ? "Set password" : "Unlock"}
           </button>
         </form>
-      </section>
+      </Panel>
     </main>
   );
 }
@@ -149,9 +146,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 function AuthBrand() {
   return (
     <div className="flex items-center gap-3">
-      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-action text-white">
-        <TerminalSquare size={22} />
-      </div>
+      <IconFrame icon={TerminalSquare} className="h-11 w-11 bg-action text-white ring-0" />
       <div>
         <div className="text-xl font-semibold">Hostlet</div>
         <p className="muted mt-0.5">Self-hosted deployments</p>

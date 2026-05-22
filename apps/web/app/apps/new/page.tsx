@@ -3,15 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { LucideIcon } from "lucide-react";
 import { Box, CheckCircle2, Cpu, GitBranch, HardDrive, Lock, Plus, Search, Server } from "lucide-react";
-import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
-import { Field, PageHeader, StatusPill } from "@/components/ui";
+import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 
 type Repo = { full_name: string; private: boolean; default_branch: string; updated_at?: string };
 type ServerRow = { id: string; name: string; kind: string; status: string };
+type CloudflareStatus = {
+  baseDomain?: string | null;
+  defaultDomainPattern?: string | null;
+};
 
 export default function CreateApp() {
   const router = useRouter();
@@ -37,6 +39,7 @@ export default function CreateApp() {
   const [repoSearch, setRepoSearch] = useState("");
   const [repoMessage, setRepoMessage] = useState("Loading GitHub repositories...");
   const [servers, setServers] = useState<ServerRow[]>([]);
+  const [cloudflare, setCloudflare] = useState<CloudflareStatus | null>(null);
   const [message, setMessage] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -55,6 +58,9 @@ export default function CreateApp() {
         setRepoMessage(rows.length ? "" : "No repositories returned from GitHub.");
       })
       .catch((error) => setRepoMessage(`Could not load repos. ${error instanceof Error ? error.message : "Paste a repo link instead."}`));
+    api<CloudflareStatus>("/api/cloudflare/status")
+      .then(setCloudflare)
+      .catch(() => setCloudflare(null));
   }, []);
 
   const filteredRepos = useMemo(
@@ -104,13 +110,16 @@ export default function CreateApp() {
   }
 
   const selectedServer = servers.find((server) => server.id === form.server_id);
+  const generatedDomain = useMemo(() => {
+    if (!cloudflare?.baseDomain) return "";
+    const source = form.name || form.repo_full_name.split("/")[1] || "app";
+    return `${slugAppName(source)}.${cloudflare.baseDomain}`;
+  }, [cloudflare?.baseDomain, form.name, form.repo_full_name]);
+  const routePreview = form.domain.trim() || generatedDomain || "Hostlet will generate one";
   const canCreate = !!form.repo_full_name && !!form.name && !!form.branch && !!form.server_id;
 
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner">
+    <AppShell>
           <PageHeader
             eyebrow="New application"
             title="Create app"
@@ -122,14 +131,12 @@ export default function CreateApp() {
 
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
             <div className="space-y-6">
-              <section className="panel p-4">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <GitBranch size={18} />
-                    <h2 className="font-semibold">Repository</h2>
-                  </div>
-                  {form.repo_full_name && <StatusPill status="success" label={form.repo_full_name} />}
-                </div>
+              <Panel>
+                <SectionHeader
+                  icon={GitBranch}
+                  title="Repository"
+                  action={form.repo_full_name && <StatusPill status="success" label={form.repo_full_name} />}
+                />
                 <label className="block">
                   <span className="flex items-center gap-2"><Search size={15} />Search repositories</span>
                   <input className="mt-1" value={repoSearch} onChange={(event) => setRepoSearch(event.target.value)} placeholder="owner/repo" />
@@ -159,116 +166,93 @@ export default function CreateApp() {
                   <Field label="GitHub repo link" value={repoLink} onChange={updateRepoLink} placeholder="https://github.com/owner/repo" />
                   {repoLink && !form.repo_full_name && <p className="mt-2 text-sm text-red-700">Paste a GitHub URL, SSH URL, or owner/repo.</p>}
                 </div>
-              </section>
+              </Panel>
 
-              <section className="panel p-4">
-                <div className="mb-4 flex items-center gap-2">
-                  <Server size={18} />
-                  <h2 className="font-semibold">Local target and route</h2>
-                </div>
+              <Panel>
+                <SectionHeader icon={Server} title="Local target and route" />
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="App name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} placeholder="my-app" />
                   <Field label="Branch" value={form.branch} onChange={(value) => setForm({ ...form, branch: value })} placeholder="main" />
-                  <label className="block">
-                    <span>Deploy target</span>
-                    <select className="mt-1" value={form.server_id} onChange={(event) => setForm({ ...form, server_id: event.target.value })}>
-                      {servers.map((server) => <option key={server.id} value={server.id}>{server.name} (local)</option>)}
-                      {servers.length === 0 && <option value="">This machine</option>}
-                    </select>
-                  </label>
-                  <Field label="Domain" value={form.domain} onChange={(value) => setForm({ ...form, domain: value })} placeholder="optional for local deploys" />
+                  <SelectField label="Deploy target" value={form.server_id} onChange={(value) => setForm({ ...form, server_id: value })}>
+                    {servers.map((server) => <option key={server.id} value={server.id}>{server.name} (local)</option>)}
+                    {servers.length === 0 && <option value="">This machine</option>}
+                  </SelectField>
+                  <div>
+                    <Field
+                      label="Domain"
+                      value={form.domain}
+                      onChange={(value) => setForm({ ...form, domain: value })}
+                      placeholder={generatedDomain || cloudflare?.defaultDomainPattern || "optional for local deploys"}
+                    />
+                    {generatedDomain && <p className="muted mt-2 text-sm">Default route: {generatedDomain}</p>}
+                  </div>
                 </div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <Toggle checked={form.public_exposure} onChange={(value) => setForm({ ...form, public_exposure: value })} icon={Lock} label="Publish app URL" />
-                  <Toggle checked={form.auto_deploy} onChange={(value) => setForm({ ...form, auto_deploy: value })} icon={GitBranch} label="Auto redeploy" />
+                  <ToggleCard checked={form.public_exposure} onChange={(value) => setForm({ ...form, public_exposure: value })} icon={Lock} label="Publish app URL" />
+                  <ToggleCard checked={form.auto_deploy} onChange={(value) => setForm({ ...form, auto_deploy: value })} icon={GitBranch} label="Auto redeploy" />
                 </div>
-              </section>
+              </Panel>
 
-              <section className="panel p-4">
-                <div className="mb-4 flex items-center gap-2">
-                  <Cpu size={18} />
-                  <h2 className="font-semibold">Runtime</h2>
-                </div>
+              <Panel>
+                <SectionHeader icon={Cpu} title="Runtime" />
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="Root directory" value={form.root_directory} onChange={(value) => setForm({ ...form, root_directory: value })} placeholder="." />
                   <Field label="Container port" type="number" value={String(form.container_port)} onChange={(value) => setForm({ ...form, container_port: Number(value) })} />
                   <Field label="Health path" value={form.health_path} onChange={(value) => setForm({ ...form, health_path: value })} />
-                  <label className="block">
-                    <span>Memory limit</span>
-                    <select className="mt-1" value={form.memory_limit_mb} onChange={(event) => setForm({ ...form, memory_limit_mb: Number(event.target.value) })}>
-                      <option value={256}>256 MB</option>
-                      <option value={512}>512 MB</option>
-                      <option value={1024}>1 GB</option>
-                      <option value={2048}>2 GB</option>
-                      <option value={4096}>4 GB</option>
-                    </select>
-                  </label>
-                  <label className="block">
-                    <span>CPU limit</span>
-                    <select className="mt-1" value={form.cpu_limit} onChange={(event) => setForm({ ...form, cpu_limit: Number(event.target.value) })}>
-                      <option value={0.25}>0.25 CPU</option>
-                      <option value={0.5}>0.5 CPU</option>
-                      <option value={1}>1 CPU</option>
-                      <option value={2}>2 CPUs</option>
-                      <option value={4}>4 CPUs</option>
-                    </select>
-                  </label>
+                  <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })}>
+                    <option value={256}>256 MB</option>
+                    <option value={512}>512 MB</option>
+                    <option value={1024}>1 GB</option>
+                    <option value={2048}>2 GB</option>
+                    <option value={4096}>4 GB</option>
+                  </SelectField>
+                  <SelectField label="CPU limit" value={form.cpu_limit} onChange={(value) => setForm({ ...form, cpu_limit: Number(value) })}>
+                    <option value={0.25}>0.25 CPU</option>
+                    <option value={0.5}>0.5 CPU</option>
+                    <option value={1}>1 CPU</option>
+                    <option value={2}>2 CPUs</option>
+                    <option value={4}>4 CPUs</option>
+                  </SelectField>
                 </div>
                 <div className="mt-4 grid gap-4">
                   <Field label="Install command" value={form.install_command} onChange={(value) => setForm({ ...form, install_command: value })} placeholder="auto, npm install, pnpm install" />
                   <Field label="Build command" value={form.build_command} onChange={(value) => setForm({ ...form, build_command: value })} placeholder="optional, npm run build" />
                   <Field label="Start command" value={form.start_command} onChange={(value) => setForm({ ...form, start_command: value })} placeholder="npm start, vite preview --host 0.0.0.0 --port $PORT" />
                 </div>
-              </section>
+              </Panel>
             </div>
 
             <aside className="space-y-6 xl:sticky xl:top-7 xl:self-start">
-              <section className="panel p-4">
-                <h2 className="font-semibold">Create summary</h2>
-                <div className="mt-4 grid gap-2">
-                  <Summary label="Repo" value={form.repo_full_name || "Choose a repo"} />
-                  <Summary label="Machine" value={selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
-                  <Summary label="Route" value={form.domain || "Hostlet will generate one"} />
-                  <Summary label="Runtime" value={`:${form.container_port}${form.health_path}`} />
-                  <Summary label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
-                </div>
+              <Panel>
+                <SectionHeader title="Create summary" />
+                <DataList className="mt-4">
+                  <SummaryItem label="Repo" value={form.repo_full_name || "Choose a repo"} />
+                  <SummaryItem label="Machine" value={selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
+                  <SummaryItem label="Route" value={routePreview} />
+                  <SummaryItem label="Runtime" value={`:${form.container_port}${form.health_path}`} />
+                  <SummaryItem label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
+                </DataList>
                 <button className="mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
                   <Plus size={16} />
                   {creating ? "Creating..." : "Create app"}
                 </button>
                 {message && <p className="mt-3 rounded-md border border-line bg-surface-alt p-3 text-sm text-muted">{message}</p>}
-              </section>
-              <section className="panel-muted p-4">
-                <div className="flex items-center gap-2 font-medium">
-                  <HardDrive size={17} />
-                  Target status
-                </div>
-                <p className="muted mt-2">Hostlet will build from GitHub, start a Docker container on this machine, health check it, then publish the route after success.</p>
-              </section>
+              </Panel>
+              <Notice
+                tone="neutral"
+                description={
+                  <div>
+                    <div className="flex items-center gap-2 font-medium text-ink">
+                      <HardDrive size={17} />
+                      Target status
+                    </div>
+                    <p className="muted mt-2">Hostlet will build from GitHub, start a Docker container on this machine, health check it, then publish the route after success.</p>
+                  </div>
+                }
+              />
             </aside>
           </div>
-        </div>
-      </section>
-    </main>
-  );
-}
-
-function Toggle({ checked, onChange, icon: Icon, label }: { checked: boolean; onChange: (value: boolean) => void; icon: LucideIcon; label: string }) {
-  return (
-    <label className={`flex items-center gap-3 rounded-lg border p-3 ${checked ? "border-emerald-200 bg-emerald-50" : "border-line bg-surface"}`}>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
-      <Icon size={17} className={checked ? "text-action" : "text-neutral-500"} />
-      <span>{label}</span>
-    </label>
-  );
-}
-
-function Summary({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md bg-surface-alt px-3 py-2 text-sm">
-      <div className="eyebrow">{label}</div>
-      <div className="mt-1 break-words font-medium">{value}</div>
-    </div>
+    </AppShell>
   );
 }
 
@@ -289,4 +273,13 @@ function parseGitHubRepo(input: string): string | null {
   } catch {
     return null;
   }
+}
+
+function slugAppName(value: string) {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "app";
 }

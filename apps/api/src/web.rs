@@ -1,4 +1,4 @@
-use crate::{auth::current_user_id, deploy, state::AppState};
+use crate::{auth::current_user_id, deploy, github, state::AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -385,16 +385,11 @@ pub async fn create_app(
     };
     let domain = if body.domain.trim().is_empty() {
         match &state.base_domain {
-            Some(base_domain) => format!(
-                "{}{}.{}",
-                state.domain_prefix,
-                app_slug(app_name),
-                base_domain
-            ),
+            Some(base_domain) => format!("{}.{}", app_slug(app_name), base_domain),
             None => format!("localhost:{}", 20000 + (body.container_port as u16 % 20000)),
         }
     } else {
-        body.domain.trim().to_string()
+        body.domain.trim().to_ascii_lowercase()
     };
     if !valid_domain(&domain) {
         return (
@@ -403,7 +398,19 @@ pub async fn create_app(
         )
             .into_response();
     }
+    if app_domain_in_use(&state, &domain, None).await {
+        return (
+            StatusCode::CONFLICT,
+            "domain is already assigned to another app",
+        )
+            .into_response();
+    }
     let public_exposure = body.public_exposure.unwrap_or(false);
+    if public_exposure {
+        if let Err(err) = hostlet_public_cloudflare_host(&state, &domain) {
+            return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+        }
+    }
     let health_path = {
         let value = body.health_path.trim();
         if value.is_empty() {
@@ -447,6 +454,12 @@ pub async fn create_app(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let auto_deploy = body.auto_deploy.unwrap_or(false);
+    if auto_deploy {
+        if let Err(err) = github::ensure_repo_webhook(&state, user_id, repo_full_name).await {
+            tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
+            return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
+        }
+    }
     let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id")
         .bind(user_id).bind(server_id).bind(app_name).bind(repo_full_name).bind(branch).bind(body.container_port).bind(health_path).bind(&domain)
         .bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
@@ -476,7 +489,7 @@ pub async fn create_app(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     if public_exposure {
-        if let Err(err) = ensure_cloudflare_app_dns(&state, &domain).await {
+        if let Err(err) = ensure_cloudflare_app_dns(&state, app_id, &domain).await {
             tracing::warn!(error = %err, domain = %domain, "failed to open public tunnel");
             delete_created_app_row(&state, app_id).await;
             return (
@@ -491,7 +504,7 @@ pub async fn create_app(
             .await
             .is_err()
         {
-            let _ = delete_cloudflare_app_dns(&state, &domain).await;
+            let _ = delete_cloudflare_app_dns(&state, app_id, &domain).await;
             delete_created_app_row(&state, app_id).await;
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -508,8 +521,9 @@ pub async fn update_app(
     let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let row =
-        sqlx::query("SELECT id, domain, public_exposure FROM apps WHERE id=$1 AND user_id=$2")
+    let row = sqlx::query(
+        "SELECT id, domain, public_exposure, repo_full_name, auto_deploy FROM apps WHERE id=$1 AND user_id=$2",
+    )
             .bind(id)
             .bind(user_id)
             .fetch_optional(&state.db)
@@ -520,10 +534,12 @@ pub async fn update_app(
     };
     let old_domain = row.get::<String, _>("domain");
     let old_public_exposure = row.get::<bool, _>("public_exposure");
+    let repo_full_name = row.get::<String, _>("repo_full_name");
+    let old_auto_deploy = row.get::<bool, _>("auto_deploy");
     let domain_changed = body.domain.is_some();
     let mut app_domain = old_domain.clone();
     if let Some(domain) = &body.domain {
-        let domain = domain.trim().to_string();
+        let domain = domain.trim().to_ascii_lowercase();
         if domain.is_empty() {
             return (StatusCode::BAD_REQUEST, "domain is required").into_response();
         }
@@ -534,9 +550,21 @@ pub async fn update_app(
             )
                 .into_response();
         }
+        if app_domain_in_use(&state, &domain, Some(id)).await {
+            return (
+                StatusCode::CONFLICT,
+                "domain is already assigned to another app",
+            )
+                .into_response();
+        }
         app_domain = domain;
     }
     let desired_public_exposure = body.public_exposure.unwrap_or(old_public_exposure);
+    if desired_public_exposure {
+        if let Err(err) = hostlet_public_cloudflare_host(&state, &app_domain) {
+            return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+        }
+    }
     let health_path = match body.health_path {
         Some(path) => {
             let path = path.trim().to_string();
@@ -623,8 +651,14 @@ pub async fn update_app(
             return (StatusCode::BAD_REQUEST, message).into_response();
         }
     }
+    if body.auto_deploy == Some(true) && !old_auto_deploy {
+        if let Err(err) = github::ensure_repo_webhook(&state, user_id, &repo_full_name).await {
+            tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
+            return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
+        }
+    }
     if desired_public_exposure {
-        if let Err(err) = ensure_cloudflare_app_dns(&state, &app_domain).await {
+        if let Err(err) = ensure_cloudflare_app_dns(&state, id, &app_domain).await {
             tracing::warn!(
                 error = %err,
                 domain = %app_domain,
@@ -640,7 +674,7 @@ pub async fn update_app(
     let should_close_old_dns =
         old_public_exposure && (!desired_public_exposure || old_domain != app_domain);
     if should_close_old_dns {
-        if let Err(err) = delete_cloudflare_app_dns(&state, &old_domain).await {
+        if let Err(err) = delete_cloudflare_app_dns(&state, id, &old_domain).await {
             tracing::warn!(
                 error = %err,
                 domain = %old_domain,
@@ -759,6 +793,7 @@ pub async fn update_app(
             &state,
             &old_domain,
             &app_domain,
+            id,
             old_public_exposure,
             desired_public_exposure,
         )
@@ -932,7 +967,7 @@ pub async fn delete_app(
     };
     if deployment_rows.is_empty() {
         if public_exposure {
-            if let Err(err) = delete_cloudflare_app_dns(&state, &domain).await {
+            if let Err(err) = delete_cloudflare_app_dns(&state, id, &domain).await {
                 tracing::warn!(error = %err, domain = %domain, "failed to remove public tunnel DNS while deleting app");
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -1037,7 +1072,7 @@ async fn finalize_delete_app(
         return;
     }
     if public_exposure {
-        if let Err(err) = delete_cloudflare_app_dns(&state, &domain).await {
+        if let Err(err) = delete_cloudflare_app_dns(&state, app_id, &domain).await {
             tracing::warn!(error = %err, domain = %domain, "failed to remove public tunnel DNS while deleting app");
             mark_agent_job_failed(&state, job_id, &err.to_string()).await;
             return;
@@ -1109,6 +1144,26 @@ async fn app_belongs_to_user(state: &AppState, app_id: Uuid, user_id: Uuid) -> b
     )
 }
 
+async fn app_domain_in_use(state: &AppState, domain: &str, except_app_id: Option<Uuid>) -> bool {
+    match except_app_id {
+        Some(app_id) => matches!(
+            sqlx::query("SELECT 1 FROM apps WHERE lower(domain)=lower($1) AND id<>$2 LIMIT 1")
+                .bind(domain)
+                .bind(app_id)
+                .fetch_optional(&state.db)
+                .await,
+            Ok(Some(_))
+        ),
+        None => matches!(
+            sqlx::query("SELECT 1 FROM apps WHERE lower(domain)=lower($1) LIMIT 1")
+                .bind(domain)
+                .fetch_optional(&state.db)
+                .await,
+            Ok(Some(_))
+        ),
+    }
+}
+
 async fn delete_created_app_row(state: &AppState, app_id: Uuid) {
     let _ = sqlx::query("DELETE FROM apps WHERE id=$1")
         .bind(app_id)
@@ -1120,6 +1175,7 @@ async fn compensate_failed_app_update_dns(
     state: &AppState,
     old_domain: &str,
     app_domain: &str,
+    app_id: Uuid,
     old_public_exposure: bool,
     desired_public_exposure: bool,
 ) {
@@ -1128,12 +1184,12 @@ async fn compensate_failed_app_update_dns(
     let closed_old_dns =
         old_public_exposure && (!desired_public_exposure || old_domain != app_domain);
     if opened_new_dns {
-        if let Err(err) = delete_cloudflare_app_dns(state, app_domain).await {
+        if let Err(err) = delete_cloudflare_app_dns(state, app_id, app_domain).await {
             tracing::warn!(error = %err, domain = %app_domain, "failed to compensate new public tunnel after DB update failure");
         }
     }
     if closed_old_dns {
-        if let Err(err) = ensure_cloudflare_app_dns(state, old_domain).await {
+        if let Err(err) = ensure_cloudflare_app_dns(state, app_id, old_domain).await {
             tracing::warn!(error = %err, domain = %old_domain, "failed to restore old public tunnel after DB update failure");
         }
     }
@@ -1397,6 +1453,7 @@ pub async fn cloudflare_status(
             "tokenValid": null,
             "baseDomain": state.base_domain.as_deref(),
             "domainPrefix": state.domain_prefix,
+            "defaultDomainPattern": default_domain_pattern(&state),
             "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
             "message": "CLOUDFLARE_API_TOKEN is not set."
         }))
@@ -1408,6 +1465,7 @@ pub async fn cloudflare_status(
             "tokenValid": null,
             "baseDomain": state.base_domain.as_deref(),
             "domainPrefix": state.domain_prefix,
+            "defaultDomainPattern": default_domain_pattern(&state),
             "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
             "message": "CLOUDFLARE_ZONE_ID is not set."
         }))
@@ -1427,6 +1485,7 @@ pub async fn cloudflare_status(
             "tokenValid": true,
             "baseDomain": state.base_domain.as_deref(),
             "domainPrefix": state.domain_prefix,
+            "defaultDomainPattern": default_domain_pattern(&state),
             "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
             "message": "Cloudflare API token can access the configured zone."
         }))
@@ -1436,6 +1495,7 @@ pub async fn cloudflare_status(
             "tokenValid": false,
             "baseDomain": state.base_domain.as_deref(),
             "domainPrefix": state.domain_prefix,
+            "defaultDomainPattern": default_domain_pattern(&state),
             "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
             "message": format!("Cloudflare zone check failed with status {}.", resp.status())
         }))
@@ -1445,6 +1505,7 @@ pub async fn cloudflare_status(
             "tokenValid": false,
             "baseDomain": state.base_domain.as_deref(),
             "domainPrefix": state.domain_prefix,
+            "defaultDomainPattern": default_domain_pattern(&state),
             "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
             "message": "Could not reach Cloudflare from the API container."
         }))
@@ -1452,10 +1513,12 @@ pub async fn cloudflare_status(
     }
 }
 
-async fn ensure_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Result<()> {
-    let Some(host) = hostlet_managed_cloudflare_host(state, domain) else {
-        anyhow::bail!("app domain is not managed by Hostlet public tunnel DNS");
-    };
+async fn ensure_cloudflare_app_dns(
+    state: &AppState,
+    app_id: Uuid,
+    domain: &str,
+) -> anyhow::Result<()> {
+    let host = hostlet_public_cloudflare_host(state, domain)?;
     let (Some(token), Some(zone_id), Some(target)) = (
         &state.cloudflare_api_token,
         &state.cloudflare_zone_id,
@@ -1469,20 +1532,43 @@ async fn ensure_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Re
     let existing = client
         .get(&base)
         .bearer_auth(token)
-        .query(&[("type", "CNAME"), ("name", host)])
+        .query(&[("type", "CNAME"), ("name", host.as_str())])
         .send()
         .await?
         .error_for_status()?
         .json::<CloudflareListResponse>()
         .await?;
 
+    let owned = sqlx::query(
+        "SELECT app_id, cloudflare_record_id
+         FROM app_public_dns_records
+         WHERE zone_id=$1 AND hostname=$2",
+    )
+    .bind(zone_id)
+    .bind(&host)
+    .fetch_optional(&state.db)
+    .await?;
+
     let payload = CloudflareDnsRecord {
         record_type: "CNAME",
-        name: host,
+        name: &host,
         content: target,
         proxied: true,
     };
-    if let Some(record) = existing.result.first() {
+
+    if let Some(owner) = owned.as_ref() {
+        let owner_app_id = owner.get::<Uuid, _>("app_id");
+        if owner_app_id != app_id {
+            anyhow::bail!("{host} is already managed by another Hostlet app");
+        }
+    }
+
+    let record_id = if let Some(record) = existing.result.first() {
+        if owned.is_none() && !hostlet_legacy_prefixed_host(state, &host) {
+            anyhow::bail!(
+                "{host} already has a Cloudflare CNAME record not managed by this Hostlet app"
+            );
+        }
         client
             .patch(format!("{base}/{}", record.id))
             .bearer_auth(token)
@@ -1490,6 +1576,7 @@ async fn ensure_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Re
             .send()
             .await?
             .error_for_status()?;
+        record.id.clone()
     } else {
         client
             .post(&base)
@@ -1497,13 +1584,35 @@ async fn ensure_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Re
             .json(&payload)
             .send()
             .await?
-            .error_for_status()?;
-    }
+            .error_for_status()?
+            .json::<CloudflareMutationResponse>()
+            .await?
+            .result
+            .id
+    };
+
+    sqlx::query(
+        "INSERT INTO app_public_dns_records (app_id, zone_id, hostname, cloudflare_record_id, target)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (zone_id, hostname)
+         DO UPDATE SET app_id=$1, cloudflare_record_id=$4, target=$5, updated_at=now()",
+    )
+    .bind(app_id)
+    .bind(zone_id)
+    .bind(&host)
+    .bind(record_id)
+    .bind(target)
+    .execute(&state.db)
+    .await?;
     Ok(())
 }
 
-async fn delete_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Result<()> {
-    let Some(host) = hostlet_managed_cloudflare_host(state, domain) else {
+async fn delete_cloudflare_app_dns(
+    state: &AppState,
+    app_id: Uuid,
+    domain: &str,
+) -> anyhow::Result<()> {
+    let Ok(host) = hostlet_public_cloudflare_host(state, domain) else {
         return Ok(());
     };
     let (Some(token), Some(zone_id)) = (&state.cloudflare_api_token, &state.cloudflare_zone_id)
@@ -1513,10 +1622,46 @@ async fn delete_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Re
 
     let client = &state.http;
     let base = format!("https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records");
+    let owned = sqlx::query(
+        "SELECT cloudflare_record_id
+         FROM app_public_dns_records
+         WHERE app_id=$1 AND zone_id=$2 AND hostname=$3",
+    )
+    .bind(app_id)
+    .bind(zone_id)
+    .bind(&host)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if let Some(record) = owned {
+        let record_id = record.get::<String, _>("cloudflare_record_id");
+        let resp = client
+            .delete(format!("{base}/{record_id}"))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
+            resp.error_for_status()?;
+        }
+        sqlx::query(
+            "DELETE FROM app_public_dns_records WHERE app_id=$1 AND zone_id=$2 AND hostname=$3",
+        )
+        .bind(app_id)
+        .bind(zone_id)
+        .bind(&host)
+        .execute(&state.db)
+        .await?;
+        return Ok(());
+    }
+
+    if !hostlet_legacy_prefixed_host(state, &host) {
+        return Ok(());
+    }
+
     let existing = client
         .get(&base)
         .bearer_auth(token)
-        .query(&[("type", "CNAME"), ("name", host)])
+        .query(&[("type", "CNAME"), ("name", host.as_str())])
         .send()
         .await?
         .error_for_status()?
@@ -1524,24 +1669,88 @@ async fn delete_cloudflare_app_dns(state: &AppState, domain: &str) -> anyhow::Re
         .await?;
 
     for record in existing.result {
-        client
+        let resp = client
             .delete(format!("{base}/{}", record.id))
             .bearer_auth(token)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
+            resp.error_for_status()?;
+        }
     }
+
     Ok(())
 }
 
-fn hostlet_managed_cloudflare_host<'a>(state: &AppState, domain: &'a str) -> Option<&'a str> {
-    let host = domain_host(domain)?;
-    let base_domain = state.base_domain.as_ref()?;
-    let label = host.strip_suffix(&format!(".{base_domain}"))?;
-    if label.contains('.') || !label.starts_with(&state.domain_prefix) {
-        return None;
+fn default_domain_pattern(state: &AppState) -> Option<String> {
+    state
+        .base_domain
+        .as_ref()
+        .map(|base_domain| format!("{{app}}.{base_domain}"))
+}
+
+fn hostlet_public_cloudflare_host(state: &AppState, domain: &str) -> anyhow::Result<String> {
+    if domain.contains(':') {
+        anyhow::bail!("public app domain cannot include a port");
     }
-    Some(host)
+    let Some(host) = domain_host(domain) else {
+        anyhow::bail!("app domain is not a valid hostname");
+    };
+    let host = host.to_ascii_lowercase();
+    if !valid_hostname(&host) {
+        anyhow::bail!("app domain is not a valid hostname");
+    }
+    let Some(base_domain) = state.base_domain.as_ref() else {
+        anyhow::bail!("HOSTLET_BASE_DOMAIN is not configured");
+    };
+    let Some(label) = host.strip_suffix(&format!(".{base_domain}")) else {
+        anyhow::bail!("app domain must end with .{base_domain}");
+    };
+    if label.is_empty() {
+        anyhow::bail!("app domain must use a label before {base_domain}");
+    }
+    if label.contains('.') {
+        anyhow::bail!("app domain must use a single label before {base_domain}");
+    }
+    if reserved_public_domain_label(label) {
+        anyhow::bail!("{label}.{base_domain} is reserved");
+    }
+    Ok(host)
+}
+
+fn hostlet_legacy_prefixed_host(state: &AppState, host: &str) -> bool {
+    let Some(base_domain) = state.base_domain.as_ref() else {
+        return false;
+    };
+    host.strip_suffix(&format!(".{base_domain}"))
+        .is_some_and(|label| label.starts_with(&state.domain_prefix) && !label.contains('.'))
+}
+
+fn reserved_public_domain_label(label: &str) -> bool {
+    matches!(
+        label.to_ascii_lowercase().as_str(),
+        "@" | "admin"
+            | "api"
+            | "app"
+            | "apps"
+            | "blog"
+            | "cloudflare"
+            | "cpanel"
+            | "dns"
+            | "ftp"
+            | "hostlet"
+            | "imap"
+            | "mail"
+            | "mx"
+            | "ns1"
+            | "ns2"
+            | "pop"
+            | "smtp"
+            | "ssh"
+            | "status"
+            | "support"
+            | "www"
+    )
 }
 
 fn domain_host(value: &str) -> Option<&str> {
@@ -1561,6 +1770,11 @@ struct CloudflareListResponse {
 #[derive(Deserialize)]
 struct CloudflareRecord {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct CloudflareMutationResponse {
+    result: CloudflareRecord,
 }
 
 #[derive(Serialize)]

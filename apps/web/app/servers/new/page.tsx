@@ -2,15 +2,11 @@
 
 import Link from "next/link";
 import { HardDrive } from "lucide-react";
-import { Nav } from "@/components/Nav";
-import { EmptyState, PageHeader } from "@/components/ui";
+import { AppShell, EmptyState, PageHeader } from "@/components/ui";
 
 export default function AddServer() {
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner max-w-4xl">
+    <AppShell maxWidth="max-w-4xl">
           <PageHeader
             eyebrow="Remote agents"
             title="VPS support is deferred"
@@ -25,8 +21,6 @@ export default function AddServer() {
             actionHref="/apps/new"
             actionLabel="Create app"
           />
-        </div>
-      </section>
-    </main>
+    </AppShell>
   );
 }

@@ -39,9 +39,10 @@ Cloudflare edge -> cloudflared -> 127.0.0.1:18080 -> Caddy -> local app containe
 - local machine status
 - app list and app creation
 - app detail page with deploy, rollback, public tunnel toggle, delete, and resource usage
+- app settings and encrypted environment-variable editing
 - deployment detail page with status and live logs
 - logs index
-- placeholder settings page
+- settings page with GitHub and Cloudflare status plus GitHub reconnect
 
 The web app calls the API with cookies and sends `X-Hostlet-CSRF: 1` on state-changing requests.
 
@@ -54,12 +55,14 @@ The web app calls the API with cookies and sends `X-Hostlet-CSRF: 1` on state-ch
 - GitHub OAuth
 - GitHub repository listing
 - GitHub webhooks
+- app settings and encrypted environment variable management
 - app/server CRUD
 - deployment and rollback job creation
 - authenticated agent WebSocket
 - authenticated agent event ingestion
 - deployment log storage and WebSocket fanout
 - Cloudflare DNS management for app tunnel open/close
+- basic in-memory rate limiting for high-risk public endpoints
 
 The API does not require Docker access. Docker operations are delegated to agents.
 
@@ -105,8 +108,11 @@ Main tables:
 - `deployment_logs`: stored build/runtime logs
 - `rollback_events`: rollback audit records
 - `webhook_events`: GitHub webhook dedupe and payload storage
+- `webhook_app_events`: per-app webhook outcomes for app detail status
+- `agent_jobs`: local cleanup jobs such as app deletion
 - `settings`: control-plane password hash and small settings
 - `app_resource_snapshots`: latest agent-reported Docker stats
+- `app_public_dns_records`: app-owned Cloudflare DNS records
 
 ## Deployment Flow
 
@@ -116,13 +122,15 @@ Main tables:
 4. Agent verifies the signature.
 5. Agent fetches the repo and checks out either `HEAD` or a webhook commit SHA.
 6. Agent builds a Docker image from the repo Dockerfile or a generated Node Dockerfile.
-7. Agent starts a new container on a host loopback port.
+7. Agent starts a new container on a host loopback port with the app's persistent data directory mounted at `/data`.
 8. Agent health-checks the configured path.
 9. If healthy, agent writes/updates route config and reloads Caddy.
 10. Agent reports success with image, container, local URL, and published port.
 11. API marks the app's current deployment.
 
 Failed health checks preserve the previous working app. Failed new containers are left available for inspection.
+
+Each local app gets a stable Docker volume named `hostlet-app-data-<app-id>`, mounted into every deployment as `/data`. The agent injects `HOSTLET_DATA_DIR=/data` and, when the app has not set it explicitly, `DATA_DIR=/data`. Redeploys and rollbacks reuse the same volume; deleting the app removes it.
 
 ## Rollback Flow
 
@@ -136,15 +144,16 @@ Rollback changes routing only; it does not delete containers or images.
 
 ## Public Exposure Flow
 
-1. User clicks **Open tunnel** on an app.
+1. User clicks **Publish URL** on an app.
 2. API verifies the hostname is a Hostlet-managed hostname:
    - under `HOSTLET_BASE_DOMAIN`
    - single label before the base domain
-   - starts with `HOSTLET_DOMAIN_PREFIX`
-3. API creates or updates a proxied CNAME/Tunnel record pointing at `CLOUDFLARE_TUNNEL_TARGET`.
+   - not one of Hostlet's reserved labels such as `www`, `mail`, `api`, or `hostlet`
+   - either owned by that app in `app_public_dns_records`, unclaimed in Cloudflare, or an old `HOSTLET_DOMAIN_PREFIX` legacy record
+3. API creates or updates a proxied CNAME/Tunnel record pointing at `CLOUDFLARE_TUNNEL_TARGET` and records ownership in `app_public_dns_records`.
 4. API marks `apps.public_exposure=true`.
 
-Closing the tunnel deletes that DNS record and marks `public_exposure=false`.
+Making the app private deletes only that app's owned DNS record and marks `public_exposure=false`.
 
 ## Trust Boundaries
 
@@ -157,7 +166,6 @@ Closing the tunnel deletes that DNS record and marks `public_exposure=false`.
 ## Current Constraints
 
 - One local default server is seeded by environment.
-- Remote agents exist but are minimally surfaced in the UI.
-- Settings and app edit workflows are incomplete in the UI.
+- Remote VPS agents are intentionally disabled in 0.1.0.
 - No queue worker exists; jobs are sent directly to connected agents.
 - Logs and resource snapshots are retained indefinitely unless cleaned manually.

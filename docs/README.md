@@ -217,6 +217,7 @@ Required `.env` values:
 
 ```bash
 HOSTLET_BASE_DOMAIN=example.com
+# Optional legacy cleanup prefix for old managed app records.
 HOSTLET_DOMAIN_PREFIX=hostlet-
 CLOUDFLARE_API_TOKEN=...
 CLOUDFLARE_ZONE_ID=...
@@ -227,9 +228,12 @@ CLOUDFLARE_TUNNEL_TOKEN=...
 Behavior:
 
 - New apps default to private.
+- When `HOSTLET_BASE_DOMAIN` is configured, blank app domains default to `<app-slug>.<HOSTLET_BASE_DOMAIN>`, for example `runcomp.shanekanterman.dev`.
 - **Publish URL** creates or updates a proxied Cloudflare CNAME/Tunnel record for the app hostname.
 - **Make private** deletes the app hostname record.
-- Hostlet only manages single-label hostnames that start with `HOSTLET_DOMAIN_PREFIX` under `HOSTLET_BASE_DOMAIN`.
+- Hostlet only manages single-label app hostnames under `HOSTLET_BASE_DOMAIN`.
+- Reserved labels such as `www`, `mail`, `api`, and `hostlet` are blocked.
+- Hostlet stores each created Cloudflare record in `app_public_dns_records` and will not claim unrelated CNAME records.
 - Existing unrelated records, including the apex portfolio site, are not managed by Hostlet.
 
 Cloudflare Tunnel ingress is wildcard-based:
@@ -273,7 +277,7 @@ For auto-redeploy, run tunnel mode or another public HTTPS reverse proxy:
 hostlet up --tunnel
 ```
 
-Then configure the repository webhook manually:
+When you enable **Auto redeploy on branch push**, Hostlet uses the connected GitHub token to create or update the repository webhook:
 
 - Payload URL: `PUBLIC_WEBHOOK_URL/webhooks/github`, or `PUBLIC_API_URL/webhooks/github` when `PUBLIC_API_URL` is public HTTPS
 - Content type: `application/json`
@@ -281,6 +285,8 @@ Then configure the repository webhook manually:
 - Events: push
 
 When a push event matches an app repository and branch, Hostlet creates a deployment for that exact commit SHA only if **Auto redeploy on branch push** is enabled for that app. Webhook deliveries are deduplicated by GitHub delivery ID and the app detail page shows the latest webhook result.
+
+Manual webhook setup is still possible if you do not want Hostlet to manage the hook. Use the same payload URL, content type, secret, and push event configuration shown above.
 
 ## Deployment Target
 
@@ -316,6 +322,19 @@ Limits:
 Rollback finds the previous successful deployment for the app and routes traffic back to that container. If routing fails, Hostlet preserves the current working app.
 
 Rollback currently changes routing only. It does not remove newer containers or reconcile application data.
+
+## App Data Persistence
+
+Every deployed app receives a writable persistent Docker volume mounted at `/data`. Hostlet names it `hostlet-app-data-<app-id>`, so redeploys and updates replace containers without deleting app data.
+
+The agent injects:
+
+```bash
+HOSTLET_DATA_DIR=/data
+DATA_DIR=/data
+```
+
+If an app explicitly sets `DATA_DIR`, Hostlet preserves that value and still sets `HOSTLET_DATA_DIR`. Deleting an app removes its persistent data directory.
 
 ## Backup and Restore
 

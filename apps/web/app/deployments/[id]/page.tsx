@@ -3,9 +3,8 @@
 import { use, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle2, Clock, ScrollText, TerminalSquare, XCircle } from "lucide-react";
-import { Nav } from "@/components/Nav";
 import { api, apiUrl } from "@/lib/api";
-import { PageHeader, StatusPill } from "@/components/ui";
+import { AppShell, Notice, PageHeader, Panel, SectionHeader, StatusPill } from "@/components/ui";
 
 type Deployment = {
   id: string;
@@ -59,10 +58,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
   const groupedLogs = useMemo(() => logs.join("\n"), [logs]);
 
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner">
+    <AppShell>
           <PageHeader
             eyebrow="Deployment"
             title="Deployment logs"
@@ -72,14 +68,8 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
 
           <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
             <aside className="space-y-6">
-              <section className="panel p-4">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <ScrollText size={18} />
-                    <h2 className="font-semibold">Status</h2>
-                  </div>
-                  <StatusPill status={status} />
-                </div>
+              <Panel>
+                <SectionHeader icon={ScrollText} title="Status" action={<StatusPill status={status} />} />
                 <div className="space-y-3">
                   {steps.map((step, index) => {
                     const done = status === "failed" ? index < Math.max(activeIndex, 0) : activeIndex >= index;
@@ -95,28 +85,20 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                   })}
                 </div>
                 <p className="muted mt-4">{statusHelp(status)}</p>
-              </section>
+              </Panel>
 
-              {redirecting && <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Deployment succeeded. Returning to Apps...</div>}
-              {deployment?.failure && <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">{deployment.failure}</div>}
+              {redirecting && <Notice tone="success" description="Deployment succeeded. Returning to Apps..." />}
+              {deployment?.failure && <Notice tone="danger" description={deployment.failure} />}
             </aside>
 
             <section className="min-w-0">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <TerminalSquare size={18} />
-                  <h2 className="font-semibold">Live output</h2>
-                </div>
-                <div className="text-xs text-muted">{logs.length} lines</div>
-              </div>
+              <SectionHeader icon={TerminalSquare} title="Live output" className="mb-3" action={<div className="text-xs text-muted">{logs.length} lines</div>} />
               <pre className="h-[68vh] max-w-full overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-sm leading-6 text-green-100 shadow-sm shadow-neutral-950/20 [overflow-wrap:normal] [white-space:pre]">
                 {groupedLogs || "Waiting for deployment logs..."}
               </pre>
             </section>
           </div>
-        </div>
-      </section>
-    </main>
+    </AppShell>
   );
 }
 

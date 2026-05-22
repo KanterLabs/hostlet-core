@@ -333,6 +333,9 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     status(&cfg, deployment_id, "starting", None).await;
     let container = format!("hostlet-{app_name}-{deployment_id}");
     let port_map = format!("127.0.0.1::{port}");
+    let data_volume = app_data_volume(app_id);
+    ensure_app_data_volume(&cfg, deployment_id, &data_volume).await?;
+    let data_mount = format!("type=volume,source={data_volume},target=/data");
     let mut args = vec![
         "run",
         "-d",
@@ -348,6 +351,8 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         "256",
         "-p",
         &port_map,
+        "--mount",
+        &data_mount,
     ];
     let memory_limit = p
         .get("memory_limit_mb")
@@ -372,7 +377,13 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         args.push("--tmpfs");
         args.push("/tmp");
     }
-    let env_pairs = env_args(&p);
+    let mut env_pairs = env_args(&p);
+    if !env_pairs_has_key(&env_pairs, "HOSTLET_DATA_DIR") {
+        env_pairs.push("HOSTLET_DATA_DIR=/data".into());
+    }
+    if !env_pairs_has_key(&env_pairs, "DATA_DIR") {
+        env_pairs.push("DATA_DIR=/data".into());
+    }
     for pair in &env_pairs {
         args.push("-e");
         args.push(pair);
@@ -528,6 +539,10 @@ async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
 }
 
 async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
+    let app_id = p
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok());
     let route_key = p
         .get("route_key")
         .and_then(|v| v.as_str())
@@ -560,10 +575,16 @@ async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
             remove_local_caddy_route(router, &route_key).await?;
             run_router_reload_quiet(router).await?;
         }
+        if let Some(app_id) = app_id {
+            remove_app_data_volume(app_id).await?;
+        }
         return Ok(());
     }
     remove_caddy_route(&route_key).await?;
     run_quiet("caddy", &["reload", "--config", "/etc/caddy/Caddyfile"]).await?;
+    if let Some(app_id) = app_id {
+        remove_app_data_volume(app_id).await?;
+    }
     Ok(())
 }
 
@@ -1520,6 +1541,52 @@ fn env_args(p: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn env_pairs_has_key(pairs: &[String], key: &str) -> bool {
+    pairs
+        .iter()
+        .filter_map(|pair| pair.split_once('='))
+        .any(|(existing, _)| existing == key)
+}
+
+fn app_data_volume(app_id: Uuid) -> String {
+    format!("hostlet-app-data-{app_id}")
+}
+
+async fn ensure_app_data_volume(
+    cfg: &Config,
+    deployment_id: Uuid,
+    volume: &str,
+) -> anyhow::Result<()> {
+    run_log(cfg, deployment_id, "docker", &["volume", "create", volume]).await?;
+    let volume_mount = format!("{volume}:/data");
+    run_log(
+        cfg,
+        deployment_id,
+        "docker",
+        &[
+            "run",
+            "--rm",
+            "-v",
+            &volume_mount,
+            "alpine:3.20",
+            "sh",
+            "-lc",
+            "chmod 0777 /data",
+        ],
+    )
+    .await
+}
+
+async fn remove_app_data_volume(app_id: Uuid) -> anyhow::Result<()> {
+    let volume = app_data_volume(app_id);
+    run_quiet_absent_ok(
+        "docker",
+        &["volume", "rm", "-f", &volume],
+        &["No such volume"],
+    )
+    .await
 }
 
 fn validate_repo(value: &str) -> anyhow::Result<()> {

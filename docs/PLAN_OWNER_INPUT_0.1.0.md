@@ -2,6 +2,8 @@
 
 Date: 2026-05-21
 
+Status update, 2026-05-22: this is a historical owner-input plan from before the updated `0.1.0` repackage. Current `0.1.0` is local-machine-only; remote VPS agents are disabled rather than shipped as beta. Current capabilities and remaining limits are summarized in [FEATURE_GAPS.md](FEATURE_GAPS.md) and [SHIP_PLAN_0.1.0.md](SHIP_PLAN_0.1.0.md).
+
 This plan lists the things Codex cannot fully complete alone because they require external account access, a real repository, a domain/tunnel, a release decision, or a clean validation machine.
 
 ## Decisions Already Defaulted
@@ -13,7 +15,7 @@ No action needed unless you disagree:
 - App delete: remove all Hostlet-managed runtime resources for that app.
 - Public tunnel exposure: off by default.
 - Backup: local archive scripts for `0.1.0`.
-- Remote VPS: documented beta unless you provide a VPS for release validation.
+- Remote VPS: disabled for the updated `0.1.0` package.
 - Production packaging: Docker images plus production Compose.
 
 ## Needed From You
@@ -29,7 +31,7 @@ Needed for:
 Recommended:
 
 - Use the final public GitHub URL for this project.
-- If the repository is private for now, make `HOSTLET_REPO_URL` required in the install command instead of hardcoding a placeholder.
+- Obsolete for updated `0.1.0`: remote install commands are disabled, so `HOSTLET_REPO_URL` is not part of the release path.
 
 What to provide:
 
@@ -105,13 +107,13 @@ Needed for:
 Recommended:
 
 - Use a dedicated test zone or subdomain for validation.
-- Keep the Hostlet prefix, e.g. `hostlet-`, to avoid unrelated records.
+- Use single-label app hostnames under the configured base domain, e.g. `runcomp.example.com`.
 - Continue not touching apex/root records.
 
 What to provide:
 
 - Confirmation the current Cloudflare token/zone/tunnel are still valid for testing.
-- Permission to create/delete only `hostlet-*` records under the chosen test domain.
+- Permission to create/delete app CNAME records under the chosen test domain.
 
 ### 6. Clean Install Validation Machine
 
@@ -134,17 +136,16 @@ What to provide:
 
 Needed for:
 
-- deciding whether remote VPS must block `0.1.0`
-- validating `scripts/install-agent.sh`
+- later re-enabling remote VPS agents after the local-machine release
 
 Recommended:
 
-- Do not block `0.1.0` on full remote VPS validation.
-- Ship remote VPS as documented beta unless you provide a VPS.
+- Do not include remote VPS support in the updated `0.1.0` package.
+- Keep remote registration and install commands disabled until agent binaries, token rotation, uninstall/reinstall, and disposable VPS validation exist.
 
 What to provide:
 
-- Confirm remote VPS is beta for `0.1.0`, or provide a disposable VPS and SSH access/instructions.
+- Nothing for the updated `0.1.0` package.
 
 ### 8. Production Domain Choice
 
@@ -170,7 +171,7 @@ Recommended production shape:
 
 - Web: `https://hostlet.example.com`
 - API: `https://hostlet-api.example.com`
-- Apps: `https://hostlet-<app>.example.com`
+- Apps: `https://<app>.example.com`
 
 ### 9. Release Versioning
 

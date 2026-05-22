@@ -3,9 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Plus, ScrollText } from "lucide-react";
-import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
-import { EmptyState, PageHeader, StatusPill } from "@/components/ui";
+import { AppShell, EmptyState, PageHeader, Panel, StatusPill } from "@/components/ui";
 
 type App = {
   id: string;
@@ -29,10 +28,7 @@ export default function Logs() {
   }, []);
 
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner">
+    <AppShell>
           <PageHeader
             eyebrow="Deployments"
             title="Logs"
@@ -43,7 +39,8 @@ export default function Logs() {
           {apps.length > 0 ? (
             <div className="grid gap-4">
               {apps.map((app) => (
-                <Link key={app.id} href={`/deployments/${app.latestDeployment?.id}`} className="panel block p-4 transition hover:border-action">
+                <Panel key={app.id} className="transition hover:border-action">
+                  <Link href={`/deployments/${app.latestDeployment?.id}`} className="block">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -57,7 +54,8 @@ export default function Logs() {
                       <span className="text-sm text-muted">{formatTime(app.latestDeployment?.finishedAt || app.latestDeployment?.startedAt)}</span>
                     </div>
                   </div>
-                </Link>
+                  </Link>
+                </Panel>
               ))}
             </div>
           ) : (
@@ -69,9 +67,7 @@ export default function Logs() {
               actionLabel="View apps"
             />
           )}
-        </div>
-      </section>
-    </main>
+    </AppShell>
   );
 }
 

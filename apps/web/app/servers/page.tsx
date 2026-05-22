@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { HardDrive, Server } from "lucide-react";
-import { Nav } from "@/components/Nav";
 import { api } from "@/lib/api";
-import { EmptyState, Metric, PageHeader, StatusPill } from "@/components/ui";
+import { AppShell, EmptyState, Metric, MetricsGrid, PageHeader, Panel, StatusPill } from "@/components/ui";
 
 type ServerRow = { id: string; name: string; publicIp?: string; kind: string; status: string; lastSeenAt?: string };
 
@@ -25,26 +24,23 @@ export default function Servers() {
   const local = servers.filter((server) => server.kind === "local").length;
 
   return (
-    <main className="app-shell">
-      <Nav />
-      <section className="page">
-        <div className="page-inner">
+    <AppShell>
           <PageHeader
             eyebrow="Machines"
             title="This machine"
             description="Hostlet 0.1.0 deploys apps onto the same machine that runs this control plane."
           />
 
-          <div className="mb-6 grid gap-4 md:grid-cols-3">
+          <MetricsGrid columns="md:grid-cols-3">
             <Metric label="Local machines" value={String(local)} detail="current deploy target" icon={Server} />
             <Metric label="Online agents" value={`${online}/${servers.length || 1}`} detail="websocket heartbeat" icon={HardDrive} />
             <Metric label="Deployment mode" value="local" detail="remote VPS deferred" icon={HardDrive} />
-          </div>
+          </MetricsGrid>
 
           {servers.length > 0 ? (
             <div className="grid gap-4">
               {servers.map((server) => (
-                <article key={server.id} className="panel p-4">
+                <Panel key={server.id}>
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -59,7 +55,7 @@ export default function Servers() {
                       <div className="mt-1 font-medium">{server.lastSeenAt ? new Date(server.lastSeenAt).toLocaleString() : "Not seen yet"}</div>
                     </div>
                   </div>
-                </article>
+                </Panel>
               ))}
             </div>
           ) : (
@@ -69,8 +65,6 @@ export default function Servers() {
               description="The local agent should appear here when Hostlet is running."
             />
           )}
-        </div>
-      </section>
-    </main>
+    </AppShell>
   );
 }

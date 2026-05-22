@@ -34,7 +34,7 @@ Reviewed the control-plane API, GitHub OAuth/webhooks, frontend auth gate, deplo
 
 - The local agent still needs Docker socket access and host networking to build/run apps on this machine. Treat the agent as privileged host control. Production should isolate it with rootless Docker, a constrained Docker proxy, or a dedicated build host.
 - The API still exposes the control plane on `8080` for LAN web access. Keep `PUBLIC_WEB_URL` and `HOSTLET_ALLOWED_WEB_ORIGINS` exact, and do not expose the API directly to the public internet without an auth proxy or VPN.
-- Deleting an app removes database records but does not yet enqueue a teardown job to stop containers, remove images, and delete routes.
+- Deleting an app now enqueues local agent teardown for managed containers, images, app data volume, and routes before removing database records. Delete finalization still needs durable API-restart reconciliation.
 - Agent events are still bearer-token authenticated. Stronger production hardening should add per-job nonces/signatures and stricter status transition checks.
 - Job signing still uses a shared secret. A multi-server production version should use per-server keys and expiry-bound signed envelopes.
 - Compose still uses dev-oriented floating images. Production should use built, pinned images and separate dev/prod Compose profiles.

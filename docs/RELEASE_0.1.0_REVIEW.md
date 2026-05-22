@@ -2,6 +2,8 @@
 
 Date: 2026-05-21 UTC
 
+Updated for repackaged `v0.1.0`: 2026-05-22 UTC
+
 Reviewed release: `v0.1.0`
 
 Release commit: `9f0879634563e7cec1763a9c06835a6bd358054e`
@@ -56,19 +58,19 @@ It is not yet production-hardened. The main gaps are security controls around a 
 
 ## Findings and Fix Plan
 
-### High: Public Control Plane Lacks Abuse Controls
+### High: Public Control Plane Needs More Durable Abuse Controls
 
-Cloudflare Tunnel UI/API mode intentionally exposes the Hostlet UI, API, and webhooks through one public hostname. The current security model has owner allowlisting and CSRF/origin checks, but no API rate limiting, no audit log UI, and no role-based access control.
+Cloudflare Tunnel UI/API mode intentionally exposes the Hostlet UI, API, and webhooks through one public hostname. The current security model has owner allowlisting, CSRF/origin checks, request body limits, and in-memory rate limits for setup, unlock, OAuth, agent, and webhook endpoints. It still has no durable rate-limit storage, audit log UI, or role-based access control.
 
 Evidence:
 
-- `docs/SECURITY.md` lists missing audit log UI, RBAC, rate limiting, and scanning.
+- `docs/SECURITY.md` lists missing audit log UI, RBAC, durable rate-limit storage, and scanning.
 - `README.md` documents tunnel exposure for the UI/API.
 - API routes include setup, unlock, GitHub Device Flow, deploy, rollback, server registration, and app mutation endpoints behind the same public control plane.
 
 Strong fix:
 
-- Add rate limiting middleware for `/api/setup`, `/api/unlock`, `/auth/github/device/start`, `/auth/github/device/poll`, `/webhooks/github`, app mutations, and deploy actions.
+- Move rate limiting to durable storage and extend it to app mutations and deploy actions.
 - Add an `audit_events` table and write audit events for login, unlock, app create/update/delete, deploy, rollback, tunnel open/close, env var changes, server registration, token rotation, and logout.
 - Surface audit events in Settings and per-app views.
 - Keep single-owner mode as default, but add a real owner/admin/viewer permission model before multi-user use.
@@ -188,16 +190,15 @@ Strong fix:
 
 ### Medium: Backup and Restore Need a Real Production Story
 
-Backup/restore scripts exist, but docs still contain stale text saying backup/restore tooling is missing. The restore path is not validated in CI or with a clean-machine smoke test, and backup does not include live secrets by design, which is correct but easy for users to miss.
+Backup/restore scripts and CLI commands exist, and the docs now state that `.env` must be stored separately. The restore path still needs CI coverage or a clean-machine owner smoke test.
 
 Evidence:
 
 - `scripts/backup.sh` and `scripts/restore.sh` exist.
-- `docs/SECURITY.md` still lists "no backup/restore tooling" as a highest-priority gap.
+- `docs/SECURITY.md` now lists scheduled/off-host backup and clean-machine restore validation as remaining work.
 
 Strong fix:
 
-- Update security docs and feature gap docs to match current state.
 - Add `hostlet backup` and `hostlet restore` docs that clearly state `.env` must be stored separately.
 - Add a restore smoke test procedure against a clean Compose project.
 - Add scheduled/off-host backup guidance.
@@ -214,11 +215,10 @@ Strong fix:
 
 ### Low: Tunnel Wording Is Overloaded
 
-The docs now clarify that "Cloudflare Tunnel for Hostlet UI/API" means the Hostlet control plane is reachable through the tunnel, while apps are private by default. In the UI, app actions still use "Open tunnel" and "Close tunnel", which can be confused with the control-plane tunnel mode.
+The docs now clarify that "Cloudflare Tunnel for Hostlet UI/API" means the Hostlet control plane is reachable through the tunnel, while apps are private by default. The app UI uses "Publish URL" and "Make private" for per-app exposure.
 
 Strong fix:
 
-- Rename app actions to "Make public" and "Make private" or "Publish app URL" and "Unpublish app URL".
 - Keep "Cloudflare Tunnel for Hostlet UI/API" only for control-plane access mode.
 - In app settings, show the exact domain and whether DNS exists.
 
@@ -242,22 +242,21 @@ Strong fix:
 
 ## Recommended Next Release Plan
 
-### 0.1.1: Immediate Hardening and Clarity
+### Updated 0.1.0 Repackage Checklist
 
-- Update docs to remove stale backup/restore and settings gaps.
-- Add checksum verification instructions.
-- Add CI jobs for `cargo audit`, `pnpm audit`, and image scanning.
-- Document the `rsa/sqlx-mysql` audit finding with an expiry-dated ignore only if accepted.
-- Rename public app tunnel actions to reduce confusion.
-- Add preflight checks before `hostlet up`.
-- Add a fresh-machine setup walkthrough.
+- Keep the version string and public tag at `0.1.0`.
+- Rebuild and replace the `hostlet-linux-x64` asset from the updated tree.
+- Regenerate and publish the checksum.
+- Update the release notes to state that `0.1.0` is local-machine-only and includes app settings/env editing, app delete cleanup, opt-in auto-redeploy with GitHub webhook management, backup/restore commands, production Compose, and in-memory rate limits.
+- Run the release gates in `docs/SHIP_PLAN_0.1.0.md`.
+- Run a clean-host smoke test before replacing the public release asset.
 
 ### 0.2.0: Reliability Backbone
 
 - Implement durable `agent_jobs` for all deployment operations.
 - Add agent claim/retry/reconciliation.
 - Add audit event storage and UI.
-- Add API rate limiting and unlock/OAuth backoff.
+- Add durable API rate limiting and unlock/OAuth backoff.
 - Publish prebuilt agent binaries.
 - Add release signing, attestations, and static Linux assets.
 
@@ -271,4 +270,4 @@ Strong fix:
 
 ## Final Assessment
 
-Ship `0.1.0` only as a technical beta. It is good enough for controlled single-owner testing, especially on the known self-hosted runner and homelab environment. It should not be presented as production hardened until durable job execution, public control-plane abuse controls, security scanning, and release signing are in place.
+Ship the updated `0.1.0` only as a technical beta. It is good enough for controlled single-owner local-machine testing after the release gates pass. It should not be presented as production hardened until durable job execution, durable public control-plane abuse controls, security scanning, and release signing are in place.

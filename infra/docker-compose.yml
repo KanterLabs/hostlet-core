@@ -18,6 +18,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
       BIND_ADDR: 0.0.0.0:8080
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
+      PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
       PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-http://localhost:3000}
       HOSTLET_CONTROL_PLANE_HOST: ${HOSTLET_CONTROL_PLANE_HOST:-localhost}
       HOSTLET_ALLOWED_WEB_ORIGINS: ${HOSTLET_ALLOWED_WEB_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}

@@ -18,6 +18,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub github_client_id: String,
     pub github_webhook_secret: String,
+    pub public_webhook_url: String,
     pub public_api_url: String,
     pub public_web_url: String,
     pub allowed_web_origins: Vec<String>,
@@ -71,6 +72,11 @@ impl AppState {
         }
         let public_api_url =
             std::env::var("PUBLIC_API_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+        let public_webhook_url = std::env::var("PUBLIC_WEBHOOK_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| public_api_url.trim_end_matches('/').to_string());
         let public_web_url =
             std::env::var("PUBLIC_WEB_URL").unwrap_or_else(|_| "http://localhost:3000".into());
         let allowed_web_origins =
@@ -90,12 +96,15 @@ impl AppState {
                 "GITHUB_WEBHOOK_SECRET",
                 allow_insecure_dev_defaults,
             )?,
+            public_webhook_url,
             public_api_url,
             public_web_url,
             allowed_web_origins,
-            base_domain: nonempty_env("HOSTLET_BASE_DOMAIN"),
+            base_domain: nonempty_env("HOSTLET_BASE_DOMAIN")
+                .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase()),
             domain_prefix: std::env::var("HOSTLET_DOMAIN_PREFIX")
-                .unwrap_or_else(|_| "hostlet-".into()),
+                .unwrap_or_else(|_| "hostlet-".into())
+                .to_ascii_lowercase(),
             cloudflare_api_token: nonempty_env("CLOUDFLARE_API_TOKEN"),
             cloudflare_zone_id: nonempty_env("CLOUDFLARE_ZONE_ID"),
             cloudflare_tunnel_target: nonempty_env("CLOUDFLARE_TUNNEL_TARGET"),

@@ -9,7 +9,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -138,6 +138,102 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
         },
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
+}
+
+pub async fn ensure_repo_webhook(
+    state: &AppState,
+    user_id: Uuid,
+    repo_full_name: &str,
+) -> anyhow::Result<()> {
+    let token = github_access_token(state, user_id).await?;
+    let webhook_url = format!(
+        "{}/webhooks/github",
+        state.public_webhook_url.trim_end_matches('/')
+    );
+    let hooks_url = format!("https://api.github.com/repos/{repo_full_name}/hooks");
+    let hooks = state
+        .http
+        .get(&hooks_url)
+        .bearer_auth(&token)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "could not list GitHub webhooks for {repo_full_name}; reconnect GitHub with repo hook permissions: {err}"
+            )
+        })?
+        .json::<Value>()
+        .await?;
+
+    if let Some(existing) = hooks.as_array().and_then(|items| {
+        items.iter().find(|hook| {
+            hook.pointer("/config/url")
+                .and_then(|value| value.as_str())
+                .is_some_and(|url| url == webhook_url)
+        })
+    }) {
+        let Some(id) = existing.get("id").and_then(|value| value.as_i64()) else {
+            anyhow::bail!("GitHub returned a webhook without an id");
+        };
+        let patch_url = format!("{hooks_url}/{id}");
+        state
+            .http
+            .patch(patch_url)
+            .bearer_auth(&token)
+            .json(&json!({
+                "active": true,
+                "events": ["push"],
+                "config": {
+                    "url": webhook_url,
+                    "content_type": "json",
+                    "secret": state.github_webhook_secret,
+                },
+            }))
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|err| {
+                anyhow::anyhow!("could not update GitHub webhook for {repo_full_name}: {err}")
+            })?;
+        return Ok(());
+    }
+
+    state
+        .http
+        .post(hooks_url)
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "web",
+            "active": true,
+            "events": ["push"],
+            "config": {
+                "url": webhook_url,
+                "content_type": "json",
+                "secret": state.github_webhook_secret,
+            },
+        }))
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|err| {
+            anyhow::anyhow!("could not create GitHub webhook for {repo_full_name}: {err}")
+        })?;
+    Ok(())
+}
+
+async fn github_access_token(state: &AppState, user_id: Uuid) -> anyhow::Result<String> {
+    let row = sqlx::query(
+        "SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("connect GitHub before enabling auto deploy"))?;
+    state
+        .crypto
+        .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
+        .map_err(|_| anyhow::anyhow!("stored GitHub token could not be decrypted"))
 }
 
 pub async fn webhook(
