@@ -27,9 +27,9 @@ type App = {
   cpuLimit?: number | null;
   rootDirectory: string;
   currentDeploymentId?: string | null;
-  server?: { id: string; name: string; kind: string; status: string; lastSeenAt?: string | null } | null;
+  server?: { id: string; name: string; kind: string; status: string; publicIp?: string | null; lastSeenAt?: string | null } | null;
   latestDeployment?: Deployment | null;
-  currentDeployment?: { status: string; finishedAt?: string | null } | null;
+  currentDeployment?: { status: string; publishedPort?: number | null; finishedAt?: string | null } | null;
   publicExposure?: boolean | null;
   autoDeploy?: boolean | null;
   latestWebhook?: {
@@ -119,6 +119,9 @@ export default function Apps() {
                       <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
+                      {appVisitHref(app) && (
+                        <a className="button" href={appVisitHref(app) || "#"} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit</a>
+                      )}
                       <Link className="button-secondary" href={`/apps/${app.id}`}><Box size={16} />Open</Link>
                       {app.latestDeployment?.id && (
                         <Link className="button-secondary" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />Logs</Link>
@@ -127,7 +130,7 @@ export default function Apps() {
                   </div>
 
                   <KeyValueGrid>
-                    <KeyValueItem label="Domain" value={displayDomain(app.domain)} href={domainHref(app)} externalIcon={<ExternalLink size={13} />} />
+                    <KeyValueItem label={app.publicExposure ? "Public URL" : "Private URL"} value={appVisitLabel(app)} href={appVisitHref(app)} externalIcon={<ExternalLink size={13} />} />
                     <KeyValueItem label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
                     <KeyValueItem label="Runtime" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
                     <KeyValueItem label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
@@ -185,8 +188,13 @@ function healthSummary(health?: RuntimeHealth | null) {
   return bits.join(" · ");
 }
 
-function domainHref(app: App) {
-  if (!app.publicExposure) return null;
+function appVisitHref(app: App) {
+  if (!app.currentDeploymentId) return null;
+  if (!app.publicExposure) {
+    const port = app.currentDeployment?.publishedPort;
+    const host = privateAppHost(app);
+    return port && host ? `http://${host}:${port}` : null;
+  }
   const display = displayDomain(app.domain);
   if (!display) return null;
   if (display.startsWith("http://") || display.startsWith("https://")) return display;
@@ -199,6 +207,20 @@ function domainHref(app: App) {
     return null;
   }
   return `https://${display}`;
+}
+
+function appVisitLabel(app: App) {
+  if (app.publicExposure) return displayDomain(app.domain) || "No public URL";
+  const port = app.currentDeployment?.publishedPort;
+  const host = privateAppHost(app);
+  return port && host ? `${host}:${port}` : "Deploy to assign a private port";
+}
+
+function privateAppHost(app: App) {
+  const host = app.server?.publicIp?.trim();
+  if (host && host !== "127.0.0.1" && host !== "localhost" && host !== "0.0.0.0") return host;
+  if (typeof window !== "undefined") return window.location.hostname;
+  return host || null;
 }
 
 function displayDomain(domain: string) {

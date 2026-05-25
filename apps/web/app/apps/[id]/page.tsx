@@ -91,8 +91,9 @@ type App = {
   currentDeploymentId?: string | null;
   publicExposure?: boolean | null;
   autoDeploy?: boolean | null;
-  server?: { id: string; name: string; kind: string; status: string; lastSeenAt?: string | null } | null;
+  server?: { id: string; name: string; kind: string; status: string; publicIp?: string | null; lastSeenAt?: string | null } | null;
   latestDeployment?: { id: string; status?: string | null; failure?: string | null; commitSha?: string | null; startedAt?: string | null; finishedAt?: string | null } | null;
+  currentDeployment?: { status: string; publishedPort?: number | null; finishedAt?: string | null } | null;
   latestWebhook?: {
     status: string;
     ignoredReason?: string | null;
@@ -405,6 +406,9 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             description={app ? `${app.repoFullName} · ${app.branch} · ${displayDomain(app.domain)}` : "Loading app..."}
             actions={
               <>
+                {appVisitHref(app) && (
+                  <a className="button" href={appVisitHref(app) || "#"} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit app</a>
+                )}
                 {app?.latestDeployment?.id && <Link className="button-secondary" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />Logs</Link>}
                 {app && (
                   <button disabled={!!busyAction} className="button-secondary" onClick={toggleExposure}>
@@ -423,7 +427,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             <Metric label="Deployment" value={deploymentStatus.replaceAll("_", " ")} detail={shortSha(app?.latestDeployment?.commitSha)} icon={Activity} />
             <Metric label="Runtime health" value={health?.status || "unknown"} detail={healthMetricDetail(health)} icon={AlertTriangle} />
             <Metric label="Machine" value={app?.server?.name || "Unknown"} detail={app?.server?.status || "offline"} icon={Box} />
-            <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={displayDomain(app?.domain || "") || "No domain"} icon={Globe2} />
+            <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={app ? appVisitLabel(app) : "No route"} icon={Globe2} />
           </MetricsGrid>
 
           <div className="mb-6 flex flex-wrap gap-2">
@@ -601,10 +605,10 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 </div>
               </Panel>
 
-              {app?.publicExposure && app.domain && (
-                <a className="button-secondary w-full" href={externalHref(app.domain)} target="_blank" rel="noreferrer">
+              {appVisitHref(app) && (
+                <a className="button-secondary w-full" href={appVisitHref(app) || "#"} target="_blank" rel="noreferrer">
                   <ExternalLink size={16} />
-                  Open app URL
+                  Open {app?.publicExposure ? "public URL" : "private URL"}
                 </a>
               )}
             </aside>
@@ -683,9 +687,15 @@ function displayDomain(domain: string) {
   return domain;
 }
 
-function externalHref(domain: string) {
-  const display = displayDomain(domain);
-  if (!display) return "#";
+function appVisitHref(app?: App | null) {
+  if (!app?.currentDeploymentId) return null;
+  if (!app.publicExposure) {
+    const port = app.currentDeployment?.publishedPort;
+    const host = privateAppHost(app);
+    return port && host ? `http://${host}:${port}` : null;
+  }
+  const display = displayDomain(app.domain);
+  if (!display) return null;
   if (display.startsWith("http://") || display.startsWith("https://")) return display;
   try {
     const url = new URL(`http://${display}`);
@@ -693,7 +703,21 @@ function externalHref(domain: string) {
       return `http://${display}`;
     }
   } catch {
-    return "#";
+    return null;
   }
   return `https://${display}`;
+}
+
+function appVisitLabel(app: App) {
+  if (app.publicExposure) return displayDomain(app.domain) || "No public URL";
+  const port = app.currentDeployment?.publishedPort;
+  const host = privateAppHost(app);
+  return port && host ? `${host}:${port}` : "Deploy to assign a private port";
+}
+
+function privateAppHost(app: App) {
+  const host = app.server?.publicIp?.trim();
+  if (host && host !== "127.0.0.1" && host !== "localhost" && host !== "0.0.0.0") return host;
+  if (typeof window !== "undefined") return window.location.hostname;
+  return host || null;
 }

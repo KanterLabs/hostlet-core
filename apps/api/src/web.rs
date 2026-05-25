@@ -577,6 +577,7 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           a.created_at,
           s.id AS server_id,
           s.name AS server_name,
+          s.public_ip AS server_public_ip,
           s.kind AS server_kind,
           s.status AS server_status,
           s.last_seen_at AS server_last_seen_at,
@@ -587,6 +588,7 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           latest.started_at AS latest_started_at,
           latest.finished_at AS latest_finished_at,
           current.status AS current_deployment_status,
+          current.published_port AS current_published_port,
           current.finished_at AS current_deployment_finished_at,
           latest_webhook.status AS latest_webhook_status,
           latest_webhook.ignored_reason AS latest_webhook_ignored_reason,
@@ -667,6 +669,7 @@ pub async fn get_app(
           a.created_at,
           s.id AS server_id,
           s.name AS server_name,
+          s.public_ip AS server_public_ip,
           s.kind AS server_kind,
           s.status AS server_status,
           s.last_seen_at AS server_last_seen_at,
@@ -677,6 +680,7 @@ pub async fn get_app(
           latest.started_at AS latest_started_at,
           latest.finished_at AS latest_finished_at,
           current.status AS current_deployment_status,
+          current.published_port AS current_published_port,
           current.finished_at AS current_deployment_finished_at,
           latest_webhook.status AS latest_webhook_status,
           latest_webhook.ignored_reason AS latest_webhook_ignored_reason,
@@ -2544,6 +2548,7 @@ fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
         "server": r.try_get::<Uuid,_>("server_id").ok().map(|id| serde_json::json!({
             "id": id,
             "name": r.try_get::<String,_>("server_name").unwrap_or_else(|_| "Server".into()),
+            "publicIp": r.try_get::<Option<String>,_>("server_public_ip").unwrap_or(None),
             "kind": r.try_get::<String,_>("server_kind").unwrap_or_else(|_| "remote".into()),
             "status": r.try_get::<String,_>("server_status").unwrap_or_else(|_| "offline".into()),
             "lastSeenAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("server_last_seen_at").unwrap_or(None)
@@ -2558,6 +2563,7 @@ fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
         })),
         "currentDeployment": r.try_get::<Option<String>,_>("current_deployment_status").unwrap_or(None).map(|status| serde_json::json!({
             "status": status,
+            "publishedPort": r.try_get::<Option<i32>,_>("current_published_port").unwrap_or(None),
             "finishedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("current_deployment_finished_at").unwrap_or(None)
         })),
         "latestWebhook": r.try_get::<Option<String>,_>("latest_webhook_status").unwrap_or(None).map(|status| serde_json::json!({

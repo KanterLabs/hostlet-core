@@ -440,7 +440,7 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     .await?;
     status(&cfg, deployment_id, "starting", None).await;
     let container = format!("hostlet-{app_name}-{deployment_id}");
-    let port_map = format!("127.0.0.1::{port}");
+    let port_map = format!("0.0.0.0::{port}");
     let data_volume = app_data_volume(app_id);
     ensure_app_data_volume(&cfg, deployment_id, &data_volume).await?;
     let data_mount = format!("type=volume,source={data_volume},target=/data");
@@ -2383,7 +2383,7 @@ fn compose_override_yaml(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
+        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    ports:\n      - target: {port}\n        host_ip: 0.0.0.0\n        protocol: tcp\n"
     )
 }
 
