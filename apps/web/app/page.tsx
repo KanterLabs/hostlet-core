@@ -21,10 +21,12 @@ type App = {
 };
 
 type Server = { id: string; name: string; kind: string; status: string; lastSeenAt?: string | null };
+type VersionPayload = { currentVersion: string };
 
 export default function Dashboard() {
   const [apps, setApps] = useState<App[]>([]);
   const [servers, setServers] = useState<Server[]>([]);
+  const [version, setVersion] = useState<VersionPayload | null>(null);
   const [message, setMessage] = useState("Loading Hostlet...");
 
   useEffect(() => {
@@ -52,6 +54,10 @@ export default function Dashboard() {
       active = false;
       clearInterval(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    api<VersionPayload>("/api/system/version").then(setVersion).catch(() => setVersion(null));
   }, []);
 
   const activeDeploys = apps.filter((app) => isActive(app.latestDeployment?.status)).length;
@@ -123,7 +129,7 @@ export default function Dashboard() {
               <Panel>
                 <SectionHeader icon={GitBranch} title="Release state" />
                 <DataList className="mt-4">
-                  <DataRow label="Version" value="0.2.0" />
+                  <DataRow label="Version" value={version?.currentVersion || "loading"} />
                   <DataRow label="Runtime" value="Docker + Caddy" />
                   <DataRow label="Default access" value="Private apps" />
                   <DataRow label="CI target" value="self-hosted Linux X64" />

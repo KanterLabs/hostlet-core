@@ -36,7 +36,7 @@ export default function Servers() {
           <PageHeader
             eyebrow="Machines"
             title="This machine"
-            description="Hostlet 0.2.0 deploys apps onto the same machine that runs this control plane."
+            description="Hostlet deploys apps onto the same machine that runs this control plane."
           />
 
           <MetricsGrid columns="md:grid-cols-3">
