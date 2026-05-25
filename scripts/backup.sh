@@ -10,6 +10,7 @@ BACKUP_DIR="${1:-$BACKUP_ROOT/hostlet-$STAMP}"
 POSTGRES_USER="${POSTGRES_USER:-hostlet}"
 POSTGRES_DB="${POSTGRES_DB:-hostlet}"
 AGENT_VOLUME="${HOSTLET_AGENT_VOLUME:-infra_hostlet-agent}"
+SCHEDULED="${HOSTLET_BACKUP_SCHEDULED:-false}"
 
 mkdir -p "$BACKUP_DIR"
 
@@ -46,6 +47,7 @@ compose_file=$COMPOSE_FILE
 postgres_db=$POSTGRES_DB
 postgres_user=$POSTGRES_USER
 agent_volume=$AGENT_VOLUME
+scheduled=$SCHEDULED
 TXT
 
 echo "Backup written to $BACKUP_DIR"

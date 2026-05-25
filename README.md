@@ -42,11 +42,13 @@
 | 🔄 Auto-redeploy on Git Push | ✅ Ready |
 | 🔐 GitHub OAuth Device Flow | ✅ Ready |
 | 📊 Live Deployment Logs | ✅ Ready |
+| ❤️ Runtime Health Checks | ✅ Ready |
+| ⬆️ Update Detection + CLI Update | ✅ Ready |
 | 🗄️ PostgreSQL Database | ✅ Ready |
 | 🛡️ Caddy Reverse Proxy | ✅ Ready |
 | 💾 Backup & Restore Scripts | ✅ Ready |
 
-> Hostlet 0.1.0 is local-machine-only: the UI/API and deployed app containers run on the same host. Remote VPS agents are deferred.
+> Hostlet 0.2.0 is local-machine-only: the UI/API and deployed app containers run on the same host. Remote VPS agents are deferred.
 
 ## 🚀 Quick Start
 
@@ -128,6 +130,22 @@ In LAN mode, deploy manually:
 3. Click **Deploy latest** 🚀
 
 For automatic deploys, use Cloudflare Tunnel mode or set `PUBLIC_WEBHOOK_URL`.
+
+---
+
+## Runtime Health and Updates
+
+Hostlet keeps checking deployed apps after deployment. The dashboard shows runtime health separately from deployment status, with **Check now** and **Restart container** actions on each app detail page.
+
+Keep Hostlet itself current from the server:
+
+```bash
+hostlet update check
+hostlet update --dry-run
+hostlet update
+```
+
+The Settings page also shows update availability and links to release notes.
 
 ---
 

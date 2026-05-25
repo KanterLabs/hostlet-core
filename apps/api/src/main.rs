@@ -39,6 +39,18 @@ async fn main() -> anyhow::Result<()> {
     if recovered > 0 {
         tracing::warn!(recovered, "marked stale deployments as failed");
     }
+    let recovered_jobs = agent::recover_stale_agent_jobs(&state).await?;
+    if recovered_jobs > 0 {
+        tracing::warn!(recovered_jobs, "reconciled stale agent jobs");
+    }
+    if state.update_checks_enabled {
+        let update_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(err) = web::refresh_update_check_if_stale(&update_state).await {
+                tracing::warn!(error = %err, "Hostlet update check failed");
+            }
+        });
+    }
     let allowed_cors_origins = state
         .allowed_web_origins
         .iter()
@@ -70,6 +82,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/github/status", get(github::status))
         .route("/api/github/repos", get(github::repos))
         .route("/api/cloudflare/status", get(web::cloudflare_status))
+        .route("/api/system/version", get(web::system_version))
+        .route("/api/system/update-check", post(web::system_update_check))
+        .route("/api/system/operator-status", get(web::operator_status))
+        .route("/api/audit-events", get(web::audit_events))
         .route(
             "/api/servers",
             get(web::list_servers).post(web::create_server),
@@ -77,6 +93,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/servers/:id/install", get(web::server_install_command))
         .route("/api/agent/register", post(agent::register))
         .route("/api/agent/events", post(agent::event))
+        .route("/api/agent/health-targets", get(agent::health_targets))
+        .route("/api/agent/jobs/claim", post(agent::claim_job))
+        .route("/api/agent/jobs/:id/complete", post(agent::complete_job))
         .route("/api/apps", get(web::list_apps).post(web::create_app))
         .route(
             "/api/apps/:id",
@@ -85,6 +104,14 @@ async fn main() -> anyhow::Result<()> {
                 .delete(web::delete_app),
         )
         .route("/api/apps/:id/resources", get(web::app_resources))
+        .route("/api/apps/:id/health", get(web::app_health))
+        .route("/api/apps/:id/health/events", get(web::app_health_events))
+        .route(
+            "/api/apps/:id/health/check-now",
+            post(web::check_app_health_now),
+        )
+        .route("/api/apps/:id/restart", post(web::restart_app_container))
+        .route("/api/health/summary", get(web::health_summary))
         .route("/api/apps/:id/env", get(web::app_env_vars))
         .route(
             "/api/apps/:id/env/:key",
@@ -92,7 +119,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/apps/:id/deploy", post(deploy::manual_deploy))
         .route("/api/apps/:id/rollback", post(deploy::rollback))
+        .route("/api/agent-jobs", get(web::list_agent_jobs))
         .route("/api/agent-jobs/:id", get(web::agent_job_status))
+        .route("/api/agent-jobs/:id/retry", post(web::retry_agent_job))
+        .route("/api/agent-jobs/:id/cancel", post(web::cancel_agent_job))
         .route("/api/deployments/:id", get(deploy::get_deployment))
         .route("/api/deployments/:id/logs", get(deploy::deployment_logs))
         .route("/ws/agent", get(agent::ws))

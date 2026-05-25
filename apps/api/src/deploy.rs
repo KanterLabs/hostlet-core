@@ -1,4 +1,4 @@
-use crate::{auth::current_user_id, crypto::sign, state::AppState};
+use crate::{auth::current_user_id, state::AppState};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -226,15 +226,25 @@ async fn send_job(
     deployment_id: Uuid,
     payload: serde_json::Value,
 ) -> anyhow::Result<()> {
-    match send_agent_job(state, server_id, payload).await {
-        Ok(()) => {}
-        Err(err) => {
-            if err.to_string().contains("server agent is offline") {
-                sqlx::query("UPDATE deployments SET status='failed', failure_summary='Server agent is offline. Check the systemd service and network access.', finished_at=now() WHERE id=$1").bind(deployment_id).execute(&state.db).await?;
-            }
-            return Err(err);
-        }
-    }
+    let job_type = payload
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("deployment")
+        .to_string();
+    let app_id = payload
+        .get("app_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    enqueue_agent_job(
+        state,
+        server_id,
+        app_id,
+        Some(deployment_id),
+        &job_type,
+        payload,
+        10,
+    )
+    .await?;
     sqlx::query("UPDATE deployments SET status='running' WHERE id=$1")
         .bind(deployment_id)
         .execute(&state.db)
@@ -242,27 +252,34 @@ async fn send_job(
     Ok(())
 }
 
-pub async fn send_agent_job(
+pub async fn enqueue_agent_job(
     state: &AppState,
     server_id: Uuid,
+    app_id: Option<Uuid>,
+    deployment_id: Option<Uuid>,
+    job_type: &str,
     payload: serde_json::Value,
-) -> anyhow::Result<()> {
-    let sender = {
-        let agents = state.agents.read().await;
-        agents
-            .get(&server_id)
-            .map(|connection| connection.sender.clone())
-    }
-    .ok_or_else(|| anyhow::anyhow!("server agent is offline"))?;
-    let job_signing_secret = job_signing_secret_for_server(state, server_id).await?;
-    let body = serde_json::to_vec(&payload)?;
-    let signed =
-        json!({"type":"job","payload": payload, "signature": sign(&job_signing_secret, &body)});
-    sender.send(signed).await?;
-    Ok(())
+    priority: i32,
+) -> anyhow::Result<Uuid> {
+    let id = sqlx::query(
+        "INSERT INTO agent_jobs
+           (server_id,app_id,deployment_id,job_type,status,payload_json,priority)
+         VALUES ($1,$2,$3,$4,'queued',$5,$6)
+         RETURNING id",
+    )
+    .bind(server_id)
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(job_type)
+    .bind(payload)
+    .bind(priority)
+    .fetch_one(&state.db)
+    .await?
+    .get::<Uuid, _>("id");
+    Ok(id)
 }
 
-async fn job_signing_secret_for_server(
+pub async fn job_signing_secret_for_server(
     state: &AppState,
     server_id: Uuid,
 ) -> anyhow::Result<String> {

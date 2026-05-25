@@ -120,9 +120,9 @@ export function PanelHeader({
 export function StatusPill({ status, label }: { status?: string | null; label?: string }) {
   const value = status || "unknown";
   const active = ["queued", "running", "building", "starting", "health_checking", "routing"].includes(value);
-  const success = ["success", "online", "connected", "open", "enabled"].includes(value);
-  const failed = ["failed", "offline", "missing", "closed", "disabled", "not configured"].includes(value);
-  const warning = ["needs attention", "not deployed"].includes(value);
+  const success = ["success", "online", "connected", "open", "enabled", "healthy"].includes(value);
+  const failed = ["failed", "offline", "missing", "closed", "disabled", "not configured", "unhealthy"].includes(value);
+  const warning = ["needs attention", "not deployed", "degraded"].includes(value);
   const Icon = success ? CheckCircle2 : failed ? XCircle : active ? Loader2 : warning ? AlertTriangle : CircleDashed;
   const tone = success
     ? "bg-emerald-50 text-emerald-800 ring-emerald-200"

@@ -39,20 +39,45 @@ type App = {
     branch?: string | null;
     createdAt?: string | null;
   } | null;
+  health?: RuntimeHealth | null;
+};
+
+type RuntimeHealth = {
+  status: string;
+  httpStatus?: number | null;
+  latencyMs?: number | null;
+  failureCount?: number | null;
+  lastError?: string | null;
+  lastCheckedAt?: string | null;
+  lastHealthyAt?: string | null;
 };
 
 export default function Apps() {
   const [apps, setApps] = useState<App[]>([]);
   const [message, setMessage] = useState("Loading apps...");
-  const [filter, setFilter] = useState<"all" | "active" | "failed" | "public">("all");
+  const [filter, setFilter] = useState<"all" | "active" | "failed" | "public" | "healthy" | "degraded" | "unhealthy" | "unknown">("all");
 
   useEffect(() => {
-    api<App[]>("/api/apps")
-      .then((rows) => {
+    let active = true;
+    async function loadApps() {
+      try {
+        const rows = await api<App[]>("/api/apps");
+        if (!active) return;
         setApps(rows);
         setMessage(rows.length ? "" : "No apps yet.");
-      })
-      .catch((e) => setMessage(`Could not load apps. ${e instanceof Error ? e.message : "Sign in again."}`));
+      } catch (e) {
+        if (!active) return;
+        setMessage(`Could not load apps. ${e instanceof Error ? e.message : "Sign in again."}`);
+      }
+    }
+    loadApps();
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") loadApps();
+    }, 10000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, []);
 
   const filtered = useMemo(() => {
@@ -60,6 +85,10 @@ export default function Apps() {
       if (filter === "active") return isActiveDeploy(app.latestDeployment?.status);
       if (filter === "failed") return app.latestDeployment?.status === "failed";
       if (filter === "public") return !!app.publicExposure;
+      if (filter === "healthy") return app.health?.status === "healthy";
+      if (filter === "degraded") return app.health?.status === "degraded";
+      if (filter === "unhealthy") return app.health?.status === "unhealthy";
+      if (filter === "unknown") return !app.health || app.health.status === "unknown";
       return true;
     });
   }, [apps, filter]);
@@ -73,7 +102,7 @@ export default function Apps() {
             actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
           />
 
-          <FilterTabs label="Filter" icon={ListFilter} value={filter} items={["all", "active", "failed", "public"] as const} onChange={setFilter} />
+          <FilterTabs label="Filter" icon={ListFilter} value={filter} items={["all", "active", "failed", "public", "healthy", "degraded", "unhealthy", "unknown"] as const} onChange={setFilter} />
 
           {filtered.length > 0 ? (
             <div className="grid gap-4">
@@ -84,6 +113,7 @@ export default function Apps() {
                       <div className="flex flex-wrap items-center gap-2">
                         <Link href={`/apps/${app.id}`} className="truncate text-lg font-semibold hover:text-action">{app.name}</Link>
                         <StatusPill status={app.latestDeployment?.status || app.currentDeployment?.status || "not deployed"} />
+                        <StatusPill status={app.health?.status || "unknown"} label={`health ${app.health?.status || "unknown"}`} />
                         <StatusPill status={app.server?.status || "offline"} label={`machine ${app.server?.status || "offline"}`} />
                       </div>
                       <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
@@ -101,6 +131,7 @@ export default function Apps() {
                     <KeyValueItem label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
                     <KeyValueItem label="Runtime" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
                     <KeyValueItem label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
+                    <KeyValueItem label="Runtime health" value={healthSummary(app.health)} />
                     <KeyValueItem label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
                     <KeyValueItem label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
                     <KeyValueItem label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />
@@ -143,6 +174,15 @@ function webhookSummary(webhook?: App["latestWebhook"]) {
   if (!webhook) return "No branch push seen";
   const sha = webhook.commitSha ? ` ${webhook.commitSha.slice(0, 7)}` : "";
   return webhook.ignoredReason ? `${webhook.status}${sha}: ${webhook.ignoredReason}` : `${webhook.status}${sha}`;
+}
+
+function healthSummary(health?: RuntimeHealth | null) {
+  if (!health) return "unknown";
+  const bits = [health.status];
+  if (health.httpStatus) bits.push(`HTTP ${health.httpStatus}`);
+  if (typeof health.latencyMs === "number") bits.push(`${health.latencyMs} ms`);
+  if (health.lastCheckedAt) bits.push(`checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}`);
+  return bits.join(" · ");
 }
 
 function domainHref(app: App) {

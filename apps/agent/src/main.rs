@@ -1,6 +1,7 @@
 use anyhow::{bail, Context};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
+use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::{
@@ -80,11 +81,16 @@ async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
         .insert("x-hostlet-agent-token", cfg.agent_token.parse()?);
     let (mut ws, _) = connect_async(req).await?;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    let mut job_claim = tokio::time::interval(Duration::from_secs(3));
     let mut resource_stats = tokio::time::interval(Duration::from_secs(5));
+    let mut runtime_health = tokio::time::interval(Duration::from_secs(60));
+    let mut health_counts: HashMap<Uuid, HealthCounts> = HashMap::new();
     loop {
         tokio::select! {
             _ = heartbeat.tick() => ws.send(Message::Text(json!({"type":"heartbeat"}).to_string())).await?,
+            _ = job_claim.tick() => claim_and_run_job(&cfg).await,
             _ = resource_stats.tick() => publish_resource_stats(&cfg).await,
+            _ = runtime_health.tick() => publish_runtime_health(&cfg, &mut health_counts).await,
             msg = ws.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => handle_ws_text(&cfg, &text).await,
@@ -96,6 +102,82 @@ async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+async fn claim_and_run_job(cfg: &Config) {
+    let response = cfg
+        .http
+        .post(format!("{}/api/agent/jobs/claim", cfg.api_url))
+        .header("x-hostlet-server-id", cfg.server_id.to_string())
+        .header("x-hostlet-agent-token", &cfg.agent_token)
+        .json(&json!({"agent_id": cfg.server_id.to_string()}))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return;
+    };
+    if !response.status().is_success() {
+        return;
+    }
+    let Ok(value) = response.json::<Value>().await else {
+        return;
+    };
+    let Some(job) = value.get("job").filter(|job| !job.is_null()) else {
+        return;
+    };
+    let Some(payload) = job.get("payload").cloned() else {
+        return;
+    };
+    let Some(signature) = job.get("signature").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Ok(raw) = serde_json::to_vec(&payload) else {
+        return;
+    };
+    if !verify_signature(&cfg.job_signing_secret, &raw, signature) {
+        tracing::warn!("ignored claimed job with invalid signature");
+        return;
+    }
+    let Some(job_id) = payload
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+    else {
+        return;
+    };
+    match handle_job(cfg.clone(), payload.clone()).await {
+        Ok(()) => complete_claimed_job(cfg, job_id, "success", None).await,
+        Err(err) => {
+            let message = format!("{err}");
+            if let Some(deployment_id) = payload
+                .get("deployment_id")
+                .and_then(|v| v.as_str())
+                .and_then(|v| Uuid::parse_str(v).ok())
+            {
+                log(cfg, deployment_id, "stderr", &message).await;
+                status(
+                    cfg,
+                    deployment_id,
+                    "failed",
+                    Some(&format!("{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run.")),
+                )
+                .await;
+            }
+            complete_claimed_job(cfg, job_id, "failed", Some(&message)).await;
+            tracing::warn!("claimed job failed: {message}");
+        }
+    }
+}
+
+async fn complete_claimed_job(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
+    let _ = cfg
+        .http
+        .post(format!("{}/api/agent/jobs/{id}/complete", cfg.api_url))
+        .header("x-hostlet-server-id", cfg.server_id.to_string())
+        .header("x-hostlet-agent-token", &cfg.agent_token)
+        .json(&json!({"status":status,"failure":failure}))
+        .send()
+        .await;
 }
 
 async fn handle_ws_text(cfg: &Config, text: &str) {
@@ -161,6 +243,14 @@ async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
         Some("deploy") => deploy(cfg, payload).await,
         Some("rollback") => rollback(cfg, payload).await,
         Some("delete_app") => delete_app(cfg, payload).await,
+        Some("health_check") => {
+            health_check_job(&cfg, &payload).await;
+            Ok(())
+        }
+        Some("restart_container") => {
+            restart_container_job(&cfg, &payload).await?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -1276,6 +1366,245 @@ async fn post(cfg: &Config, msg: Value) {
         .json(&msg)
         .send()
         .await;
+}
+
+#[derive(Default)]
+struct HealthCounts {
+    failures: u32,
+    successes: u32,
+}
+
+struct HealthTarget {
+    app_id: Uuid,
+    deployment_id: Uuid,
+    container_name: String,
+    published_port: u16,
+    health_path: String,
+}
+
+async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uuid, HealthCounts>) {
+    let Ok(targets) = health_targets(cfg).await else {
+        return;
+    };
+    for target in targets {
+        let result = probe_health_target(cfg, &target).await;
+        let entry = counts.entry(target.app_id).or_default();
+        if result.healthy {
+            entry.successes = entry.successes.saturating_add(1);
+            entry.failures = 0;
+        } else {
+            entry.failures = entry.failures.saturating_add(1);
+        }
+        let status = if result.healthy {
+            "healthy"
+        } else if entry.failures >= 3 {
+            "unhealthy"
+        } else {
+            "degraded"
+        };
+        post(
+            cfg,
+            json!({
+                "type": "health_status",
+                "app_id": target.app_id,
+                "deployment_id": target.deployment_id,
+                "container_name": target.container_name,
+                "status": status,
+                "checked_url": result.url,
+                "http_status": result.http_status,
+                "latency_ms": result.latency_ms,
+                "failure_count": entry.failures,
+                "success_count": entry.successes,
+                "error": result.error,
+            }),
+        )
+        .await;
+    }
+}
+
+async fn health_check_job(cfg: &Config, payload: &Value) {
+    let Some(target) = health_target_from_payload(payload) else {
+        return;
+    };
+    let result = probe_health_target(cfg, &target).await;
+    post(
+        cfg,
+        json!({
+            "type": "health_status",
+            "app_id": target.app_id,
+            "deployment_id": target.deployment_id,
+            "container_name": target.container_name,
+            "status": if result.healthy { "healthy" } else { "degraded" },
+            "checked_url": result.url,
+            "http_status": result.http_status,
+            "latency_ms": result.latency_ms,
+            "failure_count": if result.healthy { 0 } else { 1 },
+            "success_count": if result.healthy { 1 } else { 0 },
+            "error": result.error,
+        }),
+    )
+    .await;
+}
+
+async fn restart_container_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
+    let Some(target) = health_target_from_payload(payload) else {
+        bail!("restart job missing valid health target");
+    };
+    run_quiet("docker", &["restart", &target.container_name]).await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let result = probe_health_target(cfg, &target).await;
+    post(
+        cfg,
+        json!({
+            "type": "health_status",
+            "app_id": target.app_id,
+            "deployment_id": target.deployment_id,
+            "container_name": target.container_name,
+            "status": if result.healthy { "healthy" } else { "degraded" },
+            "checked_url": result.url,
+            "http_status": result.http_status,
+            "latency_ms": result.latency_ms,
+            "failure_count": if result.healthy { 0 } else { 1 },
+            "success_count": if result.healthy { 1 } else { 0 },
+            "error": result.error,
+        }),
+    )
+    .await;
+    Ok(())
+}
+
+async fn health_targets(cfg: &Config) -> anyhow::Result<Vec<HealthTarget>> {
+    let raw = cfg
+        .http
+        .get(format!("{}/api/agent/health-targets", cfg.api_url))
+        .header("x-hostlet-server-id", cfg.server_id.to_string())
+        .header("x-hostlet-agent-token", &cfg.agent_token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Value>>()
+        .await?;
+    Ok(raw
+        .iter()
+        .filter_map(health_target_from_payload)
+        .collect::<Vec<_>>())
+}
+
+fn health_target_from_payload(value: &Value) -> Option<HealthTarget> {
+    let app_id = value
+        .get("appId")
+        .or_else(|| value.get("app_id"))
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())?;
+    let deployment_id = value
+        .get("deploymentId")
+        .or_else(|| value.get("deployment_id"))
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())?;
+    let container_name = value
+        .get("containerName")
+        .or_else(|| value.get("container_name"))
+        .and_then(|v| v.as_str())?
+        .to_string();
+    if !valid_container_name(&container_name) {
+        return None;
+    }
+    let published_port = value
+        .get("publishedPort")
+        .or_else(|| value.get("published_port"))
+        .and_then(|v| v.as_i64())
+        .and_then(|v| (1..=65_535).contains(&v).then_some(v as u16))?;
+    let health_path = value
+        .get("healthPath")
+        .or_else(|| value.get("health_path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("/");
+    if validate_health_path(health_path).is_err() {
+        return None;
+    }
+    Some(HealthTarget {
+        app_id,
+        deployment_id,
+        container_name,
+        published_port,
+        health_path: health_path.to_string(),
+    })
+}
+
+struct HealthProbeResult {
+    healthy: bool,
+    url: String,
+    http_status: Option<u16>,
+    latency_ms: u128,
+    error: Option<String>,
+}
+
+async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> HealthProbeResult {
+    let url = format!(
+        "http://{}:{}{}",
+        cfg.health_host, target.published_port, target.health_path
+    );
+    let started = std::time::Instant::now();
+    let running = container_running(&target.container_name).await;
+    if let Err(err) = running {
+        return HealthProbeResult {
+            healthy: false,
+            url,
+            http_status: None,
+            latency_ms: started.elapsed().as_millis(),
+            error: Some(err.to_string()),
+        };
+    }
+    match cfg
+        .http
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            HealthProbeResult {
+                healthy: status.is_success() || status.is_redirection(),
+                url,
+                http_status: Some(status.as_u16()),
+                latency_ms: started.elapsed().as_millis(),
+                error: health_error_for_status(status),
+            }
+        }
+        Err(err) => HealthProbeResult {
+            healthy: false,
+            url,
+            http_status: None,
+            latency_ms: started.elapsed().as_millis(),
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn health_error_for_status(status: StatusCode) -> Option<String> {
+    if status.is_success() || status.is_redirection() {
+        None
+    } else {
+        Some(format!("HTTP {status}"))
+    }
+}
+
+async fn container_running(container: &str) -> anyhow::Result<()> {
+    let output = command_output(
+        "docker",
+        &["inspect", "-f", "{{.State.Running}}", container],
+        Duration::from_secs(10),
+    )
+    .await?;
+    if !output.status.success() {
+        bail!("container does not exist");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim() != "true" {
+        bail!("container is not running");
+    }
+    Ok(())
 }
 
 async fn publish_resource_stats(cfg: &Config) {

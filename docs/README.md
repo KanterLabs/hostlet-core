@@ -2,6 +2,12 @@
 
 This guide documents the current Hostlet implementation: local setup, Cloudflare tunnel setup, app deployment, webhooks, operations, and known limits.
 
+Planning documents:
+
+- [Hostlet 0.2.0 Plan](PLAN_0.2.0.md): recurring app health checks, live status refresh, update detection, easy CLI updates, and manual refresh work.
+- [Hostlet 0.3.0 Plan](PLAN_0.3.0.md): durable agent jobs, recovery, audit history, retention, backups, release hardening, and remote-agent readiness.
+- [Hostlet 0.3.0 Validation Checklist](VALIDATION_0.3.0.md): pre-tag validation for durable jobs, audit events, release artifacts, and production updates.
+
 ## Components
 
 - `apps/web`: Next.js dashboard on port `3000`.
@@ -62,6 +68,9 @@ Operational commands:
 
 ```bash
 hostlet logs
+hostlet status
+hostlet update check
+hostlet update
 hostlet backup
 hostlet restore backups/hostlet-YYYYMMDDTHHMMSSZ
 hostlet down
@@ -176,6 +185,19 @@ In secure mode, set `HOSTLET_SETUP_TOKEN`. First setup requests must include tha
 
 Hostlet deploys by sending a signed job to the selected agent. The agent clones or updates the repository, builds a Docker image, starts a container, health-checks it, and updates local routing after the health check passes.
 
+## Runtime Health
+
+After a successful deployment, the local agent keeps checking the current app container on its configured port and health path. Runtime health is separate from deployment status: a deployment can remain `success` while the running app later becomes `degraded` or `unhealthy`.
+
+Health states:
+
+- `healthy`: the container is running and the health URL returns HTTP `2xx` or `3xx`.
+- `degraded`: the latest check failed, but the failure threshold has not been reached.
+- `unhealthy`: three consecutive checks failed.
+- `unknown`: no runtime health check has been recorded yet.
+
+The app list, dashboard, and app detail page poll for fresh health data. On the app detail page, use **Check now** for an immediate probe or **Restart container** to manually restart the current running container. Automatic restart and rollback policies are intentionally off by default.
+
 ## Build Detection
 
 If the repository contains a `Dockerfile`, Hostlet uses it.
@@ -208,6 +230,35 @@ Each app detail page includes editable settings for:
 Runtime changes require a redeploy before they affect the running container.
 
 Environment variables are stored encrypted. The UI lists keys only and never displays decrypted values. To change a value, enter a replacement value and save it, then redeploy the app.
+
+## Updating Hostlet
+
+Hostlet checks GitHub Releases for stable updates. The Settings page shows the current version, latest checked version, release notes, and the command to run.
+
+Check from the server:
+
+```bash
+hostlet update check
+hostlet update --dry-run
+```
+
+Apply an update:
+
+```bash
+hostlet update
+```
+
+The update command verifies release assets and checksums, creates a pre-update backup by default, saves the previous CLI binary and current Compose files, downloads the new CLI, restarts the Compose stack, and runs `hostlet doctor`. If the CLI replacement fails because the binary is installed under `/usr/local/bin`, rerun the command with appropriate privileges.
+
+Releases may include `hostlet-release.json`. When present, Hostlet uses it to show the exact version, minimum supported direct-upgrade version, release date, and whether Compose or database migrations are expected. If the manifest is not present, Hostlet falls back to GitHub release metadata and the checksum asset.
+
+Rollback support restores the previous CLI binary, restores saved Compose files when available, and restarts services:
+
+```bash
+hostlet update rollback
+```
+
+Database rollback is not automatic. Keep the pre-update backup until the upgraded stack has been validated.
 
 ## Public Tunnel Exposure
 
@@ -290,7 +341,7 @@ Manual webhook setup is still possible if you do not want Hostlet to manage the 
 
 ## Deployment Target
 
-Hostlet 0.1.0 is intentionally local-machine-only. The UI, API, database, Caddy, and local agent run on the same host, and apps deploy as Docker containers on that host.
+Hostlet 0.2.0 is intentionally local-machine-only. The UI, API, database, Caddy, and local agent run on the same host, and apps deploy as Docker containers on that host.
 
 Remote VPS agent registration and install commands are disabled for this release while the local deploy path is hardened.
 

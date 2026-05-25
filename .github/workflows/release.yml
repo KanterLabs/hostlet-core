@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   linux-cli:
@@ -23,15 +25,62 @@ jobs:
           chmod +x dist/hostlet-linux-x64
           cd dist
           sha256sum hostlet-linux-x64 > hostlet-linux-x64.sha256
+          VERSION="${GITHUB_REF_NAME#v}"
+          CHECKSUM="$(cut -d ' ' -f 1 hostlet-linux-x64.sha256)"
+          RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > hostlet-release.json <<EOF
+          {
+            "version": "${VERSION}",
+            "released_at": "${RELEASED_AT}",
+            "minimum_supported_version": "0.1.0",
+            "assets": {
+              "hostlet-linux-x64": {
+                "sha256": "${CHECKSUM}"
+              }
+            },
+            "compose_migrations": true,
+            "database_migrations": true,
+            "notes_url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+          }
+          EOF
+      - name: Sign checksum
+        if: env.HOSTLET_RELEASE_GPG_PRIVATE_KEY != ''
+        env:
+          HOSTLET_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.HOSTLET_RELEASE_GPG_PRIVATE_KEY }}
+          HOSTLET_RELEASE_GPG_PASSPHRASE: ${{ secrets.HOSTLET_RELEASE_GPG_PASSPHRASE }}
+        run: |
+          install -m 700 -d ~/.gnupg
+          printf '%s' "$HOSTLET_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --yes --pinentry-mode loopback \
+            --passphrase "$HOSTLET_RELEASE_GPG_PASSPHRASE" \
+            --armor --detach-sign dist/hostlet-linux-x64.sha256
+      - uses: anchore/sbom-action@v0
+        with:
+          file: dist/hostlet-linux-x64
+          format: spdx-json
+          output-file: dist/hostlet-linux-x64.spdx.json
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/hostlet-linux-x64
+            dist/hostlet-linux-x64.sha256
+            dist/hostlet-release.json
+            dist/hostlet-linux-x64.spdx.json
       - uses: actions/upload-artifact@v4
         with:
           name: hostlet-linux-x64
           path: |
             dist/hostlet-linux-x64
             dist/hostlet-linux-x64.sha256
+            dist/hostlet-linux-x64.sha256.asc*
+            dist/hostlet-release.json
+            dist/hostlet-linux-x64.spdx.json
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             dist/hostlet-linux-x64
             dist/hostlet-linux-x64.sha256
+            dist/hostlet-linux-x64.sha256.asc*
+            dist/hostlet-release.json
+            dist/hostlet-linux-x64.spdx.json

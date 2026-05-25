@@ -4,6 +4,7 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
+  AlertTriangle,
   Box,
   Cpu,
   ExternalLink,
@@ -46,6 +47,31 @@ type ResourceStats = {
   sampledAt: string;
 };
 
+type RuntimeHealth = {
+  appId?: string;
+  deploymentId?: string | null;
+  containerName?: string | null;
+  status: string;
+  checkedUrl?: string | null;
+  httpStatus?: number | null;
+  latencyMs?: number | null;
+  failureCount: number;
+  successCount: number;
+  lastError?: string | null;
+  lastCheckedAt?: string | null;
+  lastHealthyAt?: string | null;
+  updatedAt?: string | null;
+};
+
+type RuntimeHealthEvent = {
+  id: string;
+  status: string;
+  httpStatus?: number | null;
+  latencyMs?: number | null;
+  error?: string | null;
+  createdAt: string;
+};
+
 type App = {
   id: string;
   name: string;
@@ -72,6 +98,7 @@ type App = {
     branch?: string | null;
     createdAt?: string | null;
   } | null;
+  health?: RuntimeHealth | null;
 };
 
 type AgentJob = {
@@ -113,16 +140,48 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const [app, setApp] = useState<App | null>(null);
   const [settings, setSettings] = useState<SettingsForm>(emptySettings);
   const [resources, setResources] = useState<ResourceStats | null>(null);
+  const [health, setHealth] = useState<RuntimeHealth | null>(null);
+  const [healthEvents, setHealthEvents] = useState<RuntimeHealthEvent[]>([]);
   const [envKeys, setEnvKeys] = useState<Array<{ key: string }>>([]);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [newEnv, setNewEnv] = useState({ key: "", value: "" });
   const [resourceMessage, setResourceMessage] = useState("Waiting for a successful deploy.");
+  const [healthMessage, setHealthMessage] = useState("Waiting for runtime health.");
   const [message, setMessage] = useState("");
-  const [busyAction, setBusyAction] = useState<"deploy" | "rollback" | "exposure" | "delete" | "settings" | "env" | "">("");
+  const [busyAction, setBusyAction] = useState<"deploy" | "rollback" | "exposure" | "delete" | "settings" | "env" | "health" | "restart" | "">("");
 
   useEffect(() => {
     refreshApp();
     api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
+  }, [id]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadHealth() {
+      try {
+        const [snapshot, events] = await Promise.all([
+          api<RuntimeHealth>(`/api/apps/${id}/health`),
+          api<RuntimeHealthEvent[]>(`/api/apps/${id}/health/events`),
+        ]);
+        if (!active) return;
+        setHealth(snapshot);
+        setHealthEvents(events);
+        setHealthMessage("");
+      } catch (error) {
+        if (!active) return;
+        setHealth(null);
+        setHealthEvents([]);
+        setHealthMessage(error instanceof Error ? error.message : "Runtime health is not available yet.");
+      }
+    }
+    loadHealth();
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") loadHealth();
+    }, 5000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [id]);
 
   useEffect(() => {
@@ -151,6 +210,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     try {
       const loaded = await api<App>(`/api/apps/${id}`);
       setApp(loaded);
+      if (loaded.health) setHealth(loaded.health);
       setSettings({
         domain: loaded.domain || "",
         health_path: loaded.healthPath || "/",
@@ -279,6 +339,34 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     }
   }
 
+  async function checkHealthNow() {
+    if (busyAction) return;
+    setBusyAction("health");
+    setHealthMessage("Requesting a fresh health check...");
+    try {
+      await api(`/api/apps/${id}/health/check-now`, { method: "POST", body: "{}" });
+      setHealthMessage("Health check requested. Waiting for the agent result...");
+    } catch (error) {
+      setHealthMessage(`Health check could not start. ${error instanceof Error ? error.message : ""}`);
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function restartContainer() {
+    if (busyAction || !confirm("Restart the current app container?")) return;
+    setBusyAction("restart");
+    setHealthMessage("Requesting container restart...");
+    try {
+      await api(`/api/apps/${id}/restart`, { method: "POST", body: "{}" });
+      setHealthMessage("Container restart requested. Waiting for the agent health result...");
+    } catch (error) {
+      setHealthMessage(`Restart could not start. ${error instanceof Error ? error.message : ""}`);
+    } finally {
+      setBusyAction("");
+    }
+  }
+
   async function deleteEnvVar(key: string) {
     if (busyAction || !confirm(`Delete ${key}?`)) return;
     setBusyAction("env");
@@ -323,13 +411,14 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
           <MetricsGrid>
             <Metric label="Deployment" value={deploymentStatus.replaceAll("_", " ")} detail={shortSha(app?.latestDeployment?.commitSha)} icon={Activity} />
+            <Metric label="Runtime health" value={health?.status || "unknown"} detail={healthMetricDetail(health)} icon={AlertTriangle} />
             <Metric label="Machine" value={app?.server?.name || "Unknown"} detail={app?.server?.status || "offline"} icon={Box} />
             <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={displayDomain(app?.domain || "") || "No domain"} icon={Globe2} />
-            <Metric label="Automation" value={app?.autoDeploy ? "auto deploy" : "manual"} detail={webhookSummary(app?.latestWebhook)} icon={GitBranch} />
           </MetricsGrid>
 
           <div className="mb-6 flex flex-wrap gap-2">
             <StatusPill status={deploymentStatus} />
+            <StatusPill status={health?.status || "unknown"} label={`health ${health?.status || "unknown"}`} />
             <StatusPill status={app?.server?.status || "offline"} label={`machine ${app?.server?.status || "offline"}`} />
             <StatusPill status={app?.publicExposure ? "open" : "closed"} label={app?.publicExposure ? "public URL" : "private app"} />
           </div>
@@ -358,6 +447,50 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_390px]">
             <div className="space-y-6">
+              <section>
+                <SectionHeader
+                  title="Runtime health"
+                  description="Recurring checks against the current running container."
+                  action={
+                    <>
+                      <button className="button-secondary" disabled={!!busyAction} onClick={checkHealthNow}>
+                        <Activity size={16} />
+                        {busyAction === "health" ? "Checking..." : "Check now"}
+                      </button>
+                      <button className="button-secondary" disabled={!!busyAction || !app?.currentDeploymentId} onClick={restartContainer}>
+                        <RotateCcw size={16} />
+                        {busyAction === "restart" ? "Restarting..." : "Restart container"}
+                      </button>
+                    </>
+                  }
+                />
+                {health ? (
+                  <Panel>
+                    <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
+                      <Metric label="Status" value={health.status} detail={health.lastError || "latest agent check"} />
+                      <Metric label="HTTP" value={health.httpStatus ? String(health.httpStatus) : "none"} detail={typeof health.latencyMs === "number" ? `${health.latencyMs} ms` : "no response"} />
+                      <Metric label="Failures" value={String(health.failureCount)} detail={health.lastCheckedAt ? `checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}` : "not checked yet"} />
+                      <Metric label="Last healthy" value={health.lastHealthyAt ? new Date(health.lastHealthyAt).toLocaleString() : "unknown"} />
+                      <Metric label="Container" value={health.containerName || "unknown"} />
+                      <Metric label="Target" value={health.checkedUrl || "waiting"} />
+                    </MetricsGrid>
+                    {healthEvents.length > 0 && (
+                      <div className="mt-4 overflow-hidden rounded-md border border-line">
+                        {healthEvents.slice(0, 5).map((event) => (
+                          <div key={event.id} className="grid gap-2 border-t border-line px-3 py-2 text-sm first:border-t-0 sm:grid-cols-[140px_110px_1fr]">
+                            <span className="text-muted">{new Date(event.createdAt).toLocaleTimeString()}</span>
+                            <StatusPill status={event.status} />
+                            <span className="min-w-0 truncate">{event.error || healthEventSummary(event)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Panel>
+                ) : (
+                  <Notice tone="neutral" description={healthMessage} />
+                )}
+              </section>
+
               <section>
                 <SectionHeader
                   title="Resource usage"
@@ -491,6 +624,20 @@ function cpuDisplay(raw: string) {
     return { value: "<0.01%", detail: `${raw} CPU` };
   }
   return { value: raw, detail: "Docker live sample" };
+}
+
+function healthMetricDetail(health?: RuntimeHealth | null) {
+  if (!health) return "waiting for agent";
+  if (health.lastError) return health.lastError;
+  if (typeof health.latencyMs === "number") return `${health.latencyMs} ms`;
+  return health.lastCheckedAt ? `checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}` : "not checked yet";
+}
+
+function healthEventSummary(event: RuntimeHealthEvent) {
+  const bits = [];
+  if (event.httpStatus) bits.push(`HTTP ${event.httpStatus}`);
+  if (typeof event.latencyMs === "number") bits.push(`${event.latencyMs} ms`);
+  return bits.length ? bits.join(" · ") : "no response data";
 }
 
 async function waitForAgentJob(jobId: string, setMessage: (message: string) => void) {

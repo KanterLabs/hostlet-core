@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use rand::RngCore;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
@@ -14,6 +15,9 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
+
+const HOSTLET_REPO: &str = "ShaneKanterman04/Hostlet";
+const LINUX_X64_ASSET: &str = "hostlet-linux-x64";
 
 #[derive(Parser)]
 #[command(name = "hostlet", version, about = "Hostlet setup and operations CLI")]
@@ -47,11 +51,31 @@ enum Commands {
         dev: bool,
     },
     Backup {
+        #[arg(long)]
+        scheduled: bool,
         output: Option<PathBuf>,
     },
     Restore {
         backup_dir: PathBuf,
     },
+    Version,
+    Status,
+    Update {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        no_backup: bool,
+        #[command(subcommand)]
+        command: Option<UpdateCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateCommand {
+    Check,
+    Rollback,
 }
 
 #[tokio::main]
@@ -64,8 +88,20 @@ async fn main() -> anyhow::Result<()> {
         Commands::Up { tunnel, dev } => compose_up(&root, tunnel, dev),
         Commands::Down { dev } => compose_down(&root, dev),
         Commands::Logs { services, dev } => compose_logs(&root, dev, &services),
-        Commands::Backup { output } => backup(&root, output),
+        Commands::Backup { scheduled, output } => backup(&root, output, scheduled),
         Commands::Restore { backup_dir } => restore(&root, &backup_dir),
+        Commands::Version => version(),
+        Commands::Status => status(&root).await,
+        Commands::Update {
+            dry_run,
+            yes,
+            no_backup,
+            command,
+        } => match command {
+            Some(UpdateCommand::Check) => update_check().await,
+            Some(UpdateCommand::Rollback) => update_rollback(&root),
+            None => update(&root, dry_run, yes, no_backup).await,
+        },
     }
 }
 
@@ -424,10 +460,19 @@ async fn doctor(root: &Path) -> anyhow::Result<()> {
     let env_path = root.join(".env");
     let env = read_env_file(&env_path).unwrap_or_default();
     let client = http_client()?;
+    println!("Hostlet {}", env!("CARGO_PKG_VERSION"));
     check("Docker", command_ok("docker", &["version"]));
     check(
         "Docker Compose",
         command_ok("docker", &["compose", "version"]),
+    );
+    check(
+        "Compose config",
+        compose_config_ok(root, false) || compose_config_ok(root, true),
+    );
+    check(
+        "Compose services",
+        compose_services_running(root, false) || compose_services_running(root, true),
     );
     check(".env exists", env_path.exists());
     for key in [
@@ -455,6 +500,7 @@ async fn doctor(root: &Path) -> anyhow::Result<()> {
             .as_ref(),
     )
     .await;
+    print_operator_status(&client, &env).await;
     if let (Some(token), Some(zone_id)) = (
         env.get("CLOUDFLARE_API_TOKEN"),
         env.get("CLOUDFLARE_ZONE_ID"),
@@ -465,6 +511,18 @@ async fn doctor(root: &Path) -> anyhow::Result<()> {
                 .await
                 .unwrap_or(false),
         );
+    }
+    check("Disk space", disk_space_ok(root));
+    check("Recent backup", latest_backup(root).is_some());
+    match latest_release(&client).await {
+        Ok(release) => check(
+            "Hostlet update",
+            !version_is_newer(
+                env!("CARGO_PKG_VERSION"),
+                release.version.trim_start_matches('v'),
+            ),
+        ),
+        Err(_) => println!("Hostlet update             unknown"),
     }
     Ok(())
 }
@@ -532,13 +590,22 @@ fn compose_logs(root: &Path, dev: bool, services: &[String]) -> anyhow::Result<(
     run_passthrough(root, "docker", &args)
 }
 
-fn backup(root: &Path, output: Option<PathBuf>) -> anyhow::Result<()> {
+fn backup(root: &Path, output: Option<PathBuf>, scheduled: bool) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let mut args = vec![root.join("scripts/backup.sh").display().to_string()];
     if let Some(output) = output {
         args.push(output.display().to_string());
     }
-    run_passthrough(root, "bash", &args)
+    let mut command = Command::new("bash");
+    command.current_dir(root).args(&args);
+    if scheduled {
+        command.env("HOSTLET_BACKUP_SCHEDULED", "true");
+    }
+    let status = command.status()?;
+    if !status.success() {
+        bail!("backup failed with {status}");
+    }
+    Ok(())
 }
 
 fn restore(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
@@ -561,6 +628,518 @@ fn restore(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
         bail!("restore failed with {status}");
     }
     Ok(())
+}
+
+fn version() -> anyhow::Result<()> {
+    println!("hostlet {}", env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+async fn status(root: &Path) -> anyhow::Result<()> {
+    ensure_repo_root(root)?;
+    let env = read_env_file(&root.join(".env")).unwrap_or_default();
+    println!("Hostlet {}", env!("CARGO_PKG_VERSION"));
+    check("Docker", command_ok("docker", &["version"]));
+    check(
+        "Docker Compose",
+        command_ok("docker", &["compose", "version"]),
+    );
+    check(
+        "Compose services",
+        compose_services_running(root, false) || compose_services_running(root, true),
+    );
+    if let Some(backup) = latest_backup(root) {
+        println!("Latest backup              {}", backup.display());
+    } else {
+        println!("Latest backup              none");
+    }
+    let client = http_client()?;
+    check_url(
+        &client,
+        "API health",
+        env.get("PUBLIC_API_URL")
+            .map(|value| format!("{}/health", value.trim_end_matches('/')))
+            .as_ref(),
+    )
+    .await;
+    print_operator_status(&client, &env).await;
+    match latest_release(&client).await {
+        Ok(release) => {
+            let latest = release.version.trim_start_matches('v');
+            let current = env!("CARGO_PKG_VERSION");
+            check("Update available", version_is_newer(current, latest));
+        }
+        Err(_) => println!("Update available          unknown"),
+    }
+    Ok(())
+}
+
+async fn print_operator_status(client: &reqwest::Client, env: &BTreeMap<String, String>) {
+    let (Some(api_url), Some(token)) = (env.get("PUBLIC_API_URL"), env.get("LOCAL_AGENT_TOKEN"))
+    else {
+        println!("App health summary        unavailable");
+        return;
+    };
+    match client
+        .get(format!(
+            "{}/api/system/operator-status",
+            api_url.trim_end_matches('/')
+        ))
+        .header("x-hostlet-agent-token", token)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let summary: Value = resp.json().await.unwrap_or(Value::Null);
+            if let Some(health) = summary.get("health") {
+                println!("App health summary        {health}");
+            } else {
+                println!("App health summary        unavailable");
+            }
+            if let Some(servers) = summary.get("servers") {
+                println!("Server summary            {servers}");
+            }
+        }
+        _ => println!("App health summary        unavailable"),
+    }
+}
+
+async fn update_check() -> anyhow::Result<()> {
+    let client = http_client()?;
+    let release = latest_release(&client).await?;
+    print_update_check(&release);
+    Ok(())
+}
+
+async fn update(root: &Path, dry_run: bool, yes: bool, no_backup: bool) -> anyhow::Result<()> {
+    ensure_repo_root(root)?;
+    let client = http_client()?;
+    let release = latest_release(&client).await?;
+    print_update_check(&release);
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = release.version.trim_start_matches('v');
+    if let Some(minimum) = &release.minimum_supported_version {
+        if version_is_newer(minimum, current) {
+            bail!(
+                "direct update from {current} to {latest} is not supported; install at least {minimum} first"
+            );
+        }
+    }
+    if !version_is_newer(current, latest) {
+        println!("Hostlet is already up to date.");
+        return Ok(());
+    }
+    update_preflight(root, &release)?;
+    if dry_run {
+        println!("Dry run complete. No files changed.");
+        return Ok(());
+    }
+    if !yes
+        && !Confirm::new()
+            .with_prompt(format!("Update Hostlet from {current} to {latest}?"))
+            .default(false)
+            .interact()?
+    {
+        bail!("update canceled");
+    }
+    let backup_dir = if no_backup {
+        None
+    } else {
+        Some(pre_update_backup(root)?)
+    };
+    let update_state = save_update_state(root)?;
+    if root.join(".git").exists() {
+        let _ = run_passthrough(root, "git", &["pull".into(), "--ff-only".into()]);
+    }
+    let asset = release
+        .asset(LINUX_X64_ASSET)
+        .context("latest release does not include hostlet-linux-x64")?;
+    let checksum_asset = release
+        .asset(&format!("{LINUX_X64_ASSET}.sha256"))
+        .context("latest release does not include hostlet-linux-x64.sha256")?;
+    let tmp_dir = root.join(".hostlet-update");
+    fs::create_dir_all(&tmp_dir)?;
+    let tmp_binary = tmp_dir.join(LINUX_X64_ASSET);
+    download(&client, &asset.download_url, &tmp_binary).await?;
+    let expected = checksum_from_asset(&client, checksum_asset).await?;
+    let actual = sha256_file(&tmp_binary)?;
+    if actual != expected {
+        bail!("downloaded CLI checksum mismatch");
+    }
+    let current_exe = std::env::current_exe().context("could not locate current hostlet binary")?;
+    let previous = tmp_dir.join(format!("hostlet.previous.{}", timestamp_suffix()));
+    fs::copy(&current_exe, &previous).with_context(|| "failed to save previous CLI binary")?;
+    fs::copy(&tmp_binary, &current_exe).with_context(|| {
+        format!(
+            "failed to replace {}; try running the update with sudo",
+            current_exe.display()
+        )
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755))?;
+    compose_up(root, false, false)?;
+    doctor(root).await?;
+    println!("Updated Hostlet to {latest}.");
+    if let Some(backup_dir) = backup_dir {
+        println!("Pre-update backup: {}", backup_dir.display());
+    }
+    println!("Update rollback state: {}", update_state.display());
+    println!("Previous CLI saved at {}", previous.display());
+    Ok(())
+}
+
+fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
+    check("Docker", command_ok("docker", &["version"]));
+    check(
+        "Docker Compose",
+        command_ok("docker", &["compose", "version"]),
+    );
+    check(".env exists", root.join(".env").exists());
+    check(
+        "Hostlet release asset",
+        release.asset(LINUX_X64_ASSET).is_some(),
+    );
+    check(
+        "CLI checksum asset",
+        release
+            .asset(&format!("{LINUX_X64_ASSET}.sha256"))
+            .is_some(),
+    );
+    ensure_repo_root(root)?;
+    if !root.join(".env").exists() {
+        bail!("missing .env; run hostlet init first");
+    }
+    let current = env!("CARGO_PKG_VERSION");
+    if let Some(minimum) = &release.minimum_supported_version {
+        if version_is_newer(minimum, current) {
+            bail!(
+                "latest release requires Hostlet {minimum} or newer before updating from {current}"
+            );
+        }
+    }
+    if release.asset(LINUX_X64_ASSET).is_none()
+        || release
+            .asset(&format!("{LINUX_X64_ASSET}.sha256"))
+            .is_none()
+    {
+        bail!("latest release is missing required update assets");
+    }
+    Ok(())
+}
+
+fn pre_update_backup(root: &Path) -> anyhow::Result<PathBuf> {
+    let output = root
+        .join("backups")
+        .join(format!("pre-update-{}", timestamp_suffix()));
+    backup(root, Some(output.clone()), false)?;
+    if root.join(".env").exists() {
+        fs::create_dir_all(&output)?;
+        fs::copy(root.join(".env"), output.join(".env"))
+            .with_context(|| "failed to copy .env into pre-update backup")?;
+        set_secret_file_permissions(&output.join(".env"))?;
+    }
+    fs::write(
+        output.join("hostlet-version.txt"),
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    Ok(output)
+}
+
+fn save_update_state(root: &Path) -> anyhow::Result<PathBuf> {
+    let state_dir = root
+        .join(".hostlet-update")
+        .join(format!("state-{}", timestamp_suffix()));
+    fs::create_dir_all(&state_dir)?;
+    for relative in ["infra/docker-compose.yml", "infra/docker-compose.prod.yml"] {
+        let source = root.join(relative);
+        if source.exists() {
+            let target = state_dir.join(relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &target)
+                .with_context(|| format!("failed to save {}", source.display()))?;
+        }
+    }
+    let git_rev = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    fs::write(state_dir.join("git-revision.txt"), git_rev)?;
+    fs::write(
+        state_dir.join("hostlet-version.txt"),
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    Ok(state_dir)
+}
+
+fn update_rollback(root: &Path) -> anyhow::Result<()> {
+    ensure_repo_root(root)?;
+    let update_dir = root.join(".hostlet-update");
+    let mut previous = fs::read_dir(&update_dir)
+        .with_context(|| format!("no update state found in {}", update_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("hostlet.previous."))
+        })
+        .collect::<Vec<_>>();
+    previous.sort();
+    let Some(previous_binary) = previous.pop() else {
+        bail!("no previous CLI binary found");
+    };
+    let current_exe = std::env::current_exe().context("could not locate current hostlet binary")?;
+    fs::copy(&previous_binary, &current_exe).with_context(|| {
+        format!(
+            "failed to restore {}; try running rollback with sudo",
+            current_exe.display()
+        )
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755))?;
+    if let Some(state_dir) = latest_update_state(&update_dir) {
+        restore_update_state(root, &state_dir)?;
+        println!("Restored Compose state from {}", state_dir.display());
+    }
+    compose_up(root, false, false)?;
+    println!(
+        "Restored previous Hostlet CLI from {}",
+        previous_binary.display()
+    );
+    println!("Database rollback is not automatic; use the pre-update backup if needed.");
+    Ok(())
+}
+
+fn latest_update_state(update_dir: &Path) -> Option<PathBuf> {
+    let mut states = fs::read_dir(update_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("state-"))
+        })
+        .collect::<Vec<_>>();
+    states.sort();
+    states.pop()
+}
+
+fn restore_update_state(root: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    for relative in ["infra/docker-compose.yml", "infra/docker-compose.prod.yml"] {
+        let source = state_dir.join(relative);
+        if source.exists() {
+            let target = root.join(relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &target)
+                .with_context(|| format!("failed to restore {}", target.display()))?;
+        }
+    }
+    Ok(())
+}
+
+struct ReleaseInfo {
+    version: String,
+    notes_url: String,
+    released_at: Option<String>,
+    minimum_supported_version: Option<String>,
+    compose_migrations: bool,
+    database_migrations: bool,
+    assets: Vec<ReleaseAsset>,
+}
+
+struct ReleaseAsset {
+    name: String,
+    download_url: String,
+}
+
+impl ReleaseInfo {
+    fn asset(&self, name: &str) -> Option<&ReleaseAsset> {
+        self.assets.iter().find(|asset| asset.name == name)
+    }
+}
+
+async fn latest_release(client: &reqwest::Client) -> anyhow::Result<ReleaseInfo> {
+    let value: Value = client
+        .get(format!(
+            "https://api.github.com/repos/{HOSTLET_REPO}/releases/latest"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let version = value
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .context("release did not include tag_name")?
+        .to_string();
+    let notes_url = value
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://github.com/ShaneKanterman04/Hostlet/releases/latest")
+        .to_string();
+    let assets = value
+        .get("assets")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|asset| {
+            Some(ReleaseAsset {
+                name: asset.get("name")?.as_str()?.to_string(),
+                download_url: asset.get("browser_download_url")?.as_str()?.to_string(),
+            })
+        })
+        .collect();
+    let mut release = ReleaseInfo {
+        version,
+        notes_url,
+        released_at: value
+            .get("published_at")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        minimum_supported_version: None,
+        compose_migrations: false,
+        database_migrations: false,
+        assets,
+    };
+    if let Some(manifest_url) = release
+        .asset("hostlet-release.json")
+        .map(|asset| asset.download_url.clone())
+    {
+        apply_release_manifest(client, &mut release, &manifest_url).await?;
+    }
+    Ok(release)
+}
+
+async fn apply_release_manifest(
+    client: &reqwest::Client,
+    release: &mut ReleaseInfo,
+    manifest_url: &str,
+) -> anyhow::Result<()> {
+    let value: Value = client
+        .get(manifest_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if let Some(version) = value.get("version").and_then(|v| v.as_str()) {
+        release.version = version.trim_start_matches('v').to_string();
+    }
+    if let Some(released_at) = value.get("released_at").and_then(|v| v.as_str()) {
+        release.released_at = Some(released_at.to_string());
+    }
+    release.minimum_supported_version = value
+        .get("minimum_supported_version")
+        .and_then(|v| v.as_str())
+        .map(|value| value.trim_start_matches('v').to_string());
+    release.compose_migrations = value
+        .get("compose_migrations")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(release.compose_migrations);
+    release.database_migrations = value
+        .get("database_migrations")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(release.database_migrations);
+    if let Some(notes_url) = value.get("notes_url").and_then(|v| v.as_str()) {
+        release.notes_url = notes_url.to_string();
+    }
+    Ok(())
+}
+
+fn print_update_check(release: &ReleaseInfo) {
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = release.version.trim_start_matches('v');
+    println!("Current version: {current}");
+    println!("Latest version:  {latest}");
+    if let Some(minimum) = &release.minimum_supported_version {
+        println!("Minimum version: {minimum}");
+    }
+    if release.compose_migrations || release.database_migrations {
+        println!(
+            "Migrations:      compose={} database={}",
+            release.compose_migrations, release.database_migrations
+        );
+    }
+    println!(
+        "Checksum signing: {}",
+        if release.asset("hostlet-linux-x64.sha256.asc").is_some() {
+            "available"
+        } else {
+            "unsigned checksum only"
+        }
+    );
+    println!("Release notes:   {}", release.notes_url);
+    println!(
+        "Update:          {}",
+        if version_is_newer(current, latest) {
+            "available"
+        } else {
+            "not available"
+        }
+    );
+}
+
+fn version_is_newer(current: &str, latest: &str) -> bool {
+    version_parts(latest) > version_parts(current)
+}
+
+fn version_parts(value: &str) -> (u64, u64, u64) {
+    let mut parts = value
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+async fn download(client: &reqwest::Client, url: &str, path: &Path) -> anyhow::Result<()> {
+    let bytes = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    fs::write(path, &bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+async fn checksum_from_asset(
+    client: &reqwest::Client,
+    asset: &ReleaseAsset,
+) -> anyhow::Result<String> {
+    let text = client
+        .get(&asset.download_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    text.split_whitespace()
+        .next()
+        .map(str::to_string)
+        .context("checksum asset was empty")
+}
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn compose_args(dev: bool) -> Vec<String> {
@@ -603,6 +1182,67 @@ fn command_ok(bin: &str, args: &[&str]) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn compose_config_ok(root: &Path, dev: bool) -> bool {
+    let mut args = compose_args(dev);
+    args.push("config".into());
+    Command::new("docker")
+        .current_dir(root)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn compose_services_running(root: &Path, dev: bool) -> bool {
+    let mut args = compose_args(dev);
+    args.extend([
+        "ps".into(),
+        "--status".into(),
+        "running".into(),
+        "-q".into(),
+    ]);
+    Command::new("docker")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+fn disk_space_ok(root: &Path) -> bool {
+    Command::new("df")
+        .arg("-Pk")
+        .arg(root)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if !output.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8(output.stdout).ok()?;
+            let line = stdout.lines().nth(1)?;
+            let available_kb = line.split_whitespace().nth(3)?.parse::<u64>().ok()?;
+            Some(available_kb > 1024 * 1024)
+        })
+        .unwrap_or(false)
+}
+
+fn latest_backup(root: &Path) -> Option<PathBuf> {
+    let backup_dir = root.join("backups");
+    let mut entries = fs::read_dir(backup_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(modified, _)| *modified);
+    entries.pop().map(|(_, path)| path)
 }
 
 fn check(label: &str, ok: bool) {
@@ -788,5 +1428,13 @@ mod tests {
     fn generated_encryption_key_is_base64_32_bytes() {
         let secret = base64_secret(32);
         assert_eq!(STANDARD.decode(secret).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn version_comparison_handles_patch_versions() {
+        assert!(version_is_newer("0.2.0", "0.2.1"));
+        assert!(version_is_newer("0.1.9", "0.2.0"));
+        assert!(!version_is_newer("0.2.0", "0.2.0"));
+        assert!(!version_is_newer("0.2.1", "0.2.0"));
     }
 }

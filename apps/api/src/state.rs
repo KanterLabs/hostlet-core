@@ -31,6 +31,7 @@ pub struct AppState {
     pub session_secret: String,
     pub setup_token: Option<String>,
     pub allowed_github_logins: Option<HashSet<String>>,
+    pub update_checks_enabled: bool,
     pub agents: Arc<RwLock<HashMap<Uuid, AgentConnection>>>,
     pub rate_limiter: Arc<RateLimiter>,
     pub logs: broadcast::Sender<LogEvent>,
@@ -112,6 +113,13 @@ impl AppState {
             session_secret: secret_from_env("SESSION_SECRET", allow_insecure_dev_defaults)?,
             setup_token,
             allowed_github_logins,
+            update_checks_enabled: !matches!(
+                std::env::var("HOSTLET_UPDATE_CHECKS")
+                    .unwrap_or_else(|_| "true".into())
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "0" | "false" | "no" | "off"
+            ),
             agents: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Arc::new(RateLimiter::default()),
             logs,

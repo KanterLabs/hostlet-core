@@ -10,7 +10,7 @@ export default function AddServer() {
           <PageHeader
             eyebrow="Remote agents"
             title="VPS support is deferred"
-            description="Hostlet 0.1.0 deploys apps on the same machine that runs the UI and API."
+            description="Hostlet 0.2.0 deploys apps on the same machine that runs the UI and API."
             actions={<Link className="button-secondary" href="/servers"><HardDrive size={16} />Back to machine</Link>}
           />
 

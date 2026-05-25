@@ -17,6 +17,7 @@ type App = {
   autoDeploy?: boolean | null;
   server?: { name: string; status: string; kind: string } | null;
   latestDeployment?: { id: string; status?: string | null; failure?: string | null; finishedAt?: string | null; startedAt?: string | null } | null;
+  health?: { status: string; lastCheckedAt?: string | null } | null;
 };
 
 type Server = { id: string; name: string; kind: string; status: string; lastSeenAt?: string | null };
@@ -27,20 +28,35 @@ export default function Dashboard() {
   const [message, setMessage] = useState("Loading Hostlet...");
 
   useEffect(() => {
-    Promise.all([
-      api<App[]>("/api/apps"),
-      api<Server[]>("/api/servers"),
-    ])
-      .then(([appRows, serverRows]) => {
+    let active = true;
+    async function loadDashboard() {
+      try {
+        const [appRows, serverRows] = await Promise.all([
+          api<App[]>("/api/apps"),
+          api<Server[]>("/api/servers"),
+        ]);
+        if (!active) return;
         setApps(appRows);
         setServers(serverRows);
         setMessage("");
-      })
-      .catch((err) => setMessage(err instanceof Error ? err.message : "Could not load Hostlet."));
+      } catch (err) {
+        if (!active) return;
+        setMessage(err instanceof Error ? err.message : "Could not load Hostlet.");
+      }
+    }
+    loadDashboard();
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") loadDashboard();
+    }, 10000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, []);
 
   const activeDeploys = apps.filter((app) => isActive(app.latestDeployment?.status)).length;
-  const healthyApps = apps.filter((app) => app.latestDeployment?.status === "success").length;
+  const healthyApps = apps.filter((app) => app.health?.status === "healthy").length;
+  const unhealthyApps = apps.filter((app) => app.health?.status === "unhealthy").length;
   const publicApps = apps.filter((app) => app.publicExposure).length;
   const onlineServers = servers.filter((server) => server.status === "online").length;
   const recentApps = useMemo(() => apps.slice(0, 5), [apps]);
@@ -59,6 +75,7 @@ export default function Dashboard() {
           <MetricsGrid>
             <Metric label="Apps" value={String(apps.length)} detail={`${healthyApps} healthy`} icon={Box} />
             <Metric label="Active deploys" value={String(activeDeploys)} detail="builds, checks, routing" icon={Rocket} />
+            <Metric label="Unhealthy apps" value={String(unhealthyApps)} detail="runtime monitor" icon={ShieldCheck} />
             <Metric label="Public apps" value={String(publicApps)} detail="Cloudflare DNS open" icon={ShieldCheck} />
             <Metric label="Machines online" value={`${onlineServers}/${servers.length || 1}`} detail="agent heartbeat" icon={HardDrive} />
           </MetricsGrid>
@@ -74,6 +91,7 @@ export default function Dashboard() {
                         <div className="flex items-center gap-2">
                           <div className="truncate font-medium">{app.name}</div>
                           <StatusPill status={app.latestDeployment?.status || "not deployed"} />
+                          <StatusPill status={app.health?.status || "unknown"} label={`health ${app.health?.status || "unknown"}`} />
                         </div>
                         <p className="muted mt-1 truncate">{app.repoFullName} · {app.branch}</p>
                       </div>
@@ -105,7 +123,7 @@ export default function Dashboard() {
               <Panel>
                 <SectionHeader icon={GitBranch} title="Release state" />
                 <DataList className="mt-4">
-                  <DataRow label="Version" value="0.1.0" />
+                  <DataRow label="Version" value="0.2.0" />
                   <DataRow label="Runtime" value="Docker + Caddy" />
                   <DataRow label="Default access" value="Private apps" />
                   <DataRow label="CI target" value="self-hosted Linux X64" />

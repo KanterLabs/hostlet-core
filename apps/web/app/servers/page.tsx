@@ -12,13 +12,21 @@ export default function Servers() {
   const [message, setMessage] = useState("Loading machines...");
 
   useEffect(() => {
+    loadServers();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadServers();
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  function loadServers() {
     api<ServerRow[]>("/api/servers")
       .then((rows) => {
         setServers(rows);
         setMessage(rows.length ? "" : "No machines yet.");
       })
       .catch((error) => setMessage(`Could not load machines. ${error instanceof Error ? error.message : "Sign in again."}`));
-  }, []);
+  }
 
   const online = servers.filter((server) => server.status === "online").length;
   const local = servers.filter((server) => server.kind === "local").length;
@@ -28,7 +36,7 @@ export default function Servers() {
           <PageHeader
             eyebrow="Machines"
             title="This machine"
-            description="Hostlet 0.1.0 deploys apps onto the same machine that runs this control plane."
+            description="Hostlet 0.2.0 deploys apps onto the same machine that runs this control plane."
           />
 
           <MetricsGrid columns="md:grid-cols-3">

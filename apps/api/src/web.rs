@@ -1,4 +1,4 @@
-use crate::{auth::current_user_id, deploy, github, state::AppState};
+use crate::{auth::current_user_id, crypto::verify_token, deploy, github, state::AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -74,6 +74,87 @@ pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 }
 
+pub async fn audit_events(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let rows = sqlx::query(
+        r#"
+        SELECT e.id,
+               e.actor_type,
+               e.actor_id,
+               e.event_type,
+               e.app_id,
+               e.deployment_id,
+               e.job_id,
+               e.metadata_json,
+               e.created_at
+        FROM audit_events e
+        WHERE e.app_id IS NULL
+           OR EXISTS (
+                SELECT 1 FROM apps a
+                WHERE a.id=e.app_id AND a.user_id=$1
+           )
+        ORDER BY e.created_at DESC
+        LIMIT 200
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await;
+    match rows {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "id": row.get::<Uuid, _>("id"),
+                        "actorType": row.get::<String, _>("actor_type"),
+                        "actorId": row.get::<Option<String>, _>("actor_id"),
+                        "eventType": row.get::<String, _>("event_type"),
+                        "appId": row.get::<Option<Uuid>, _>("app_id"),
+                        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
+                        "jobId": row.get::<Option<Uuid>, _>("job_id"),
+                        "metadata": row.get::<serde_json::Value, _>("metadata_json"),
+                        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to list audit events");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+struct AuditEventInput<'a> {
+    actor_type: &'a str,
+    actor_id: Option<String>,
+    event_type: &'a str,
+    app_id: Option<Uuid>,
+    deployment_id: Option<Uuid>,
+    job_id: Option<Uuid>,
+    metadata: serde_json::Value,
+}
+
+async fn record_audit_event(state: &AppState, event: AuditEventInput<'_>) {
+    let _ = sqlx::query(
+        "INSERT INTO audit_events
+           (actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    )
+    .bind(event.actor_type)
+    .bind(event.actor_id)
+    .bind(event.event_type)
+    .bind(event.app_id)
+    .bind(event.deployment_id)
+    .bind(event.job_id)
+    .bind(event.metadata)
+    .execute(&state.db)
+    .await;
+}
+
 pub async fn create_server() -> impl IntoResponse {
     (
         StatusCode::GONE,
@@ -132,7 +213,16 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           latest_webhook.commit_sha AS latest_webhook_commit_sha,
           latest_webhook.branch AS latest_webhook_branch,
           latest_webhook.deployment_id AS latest_webhook_deployment_id,
-          latest_webhook.created_at AS latest_webhook_created_at
+          latest_webhook.created_at AS latest_webhook_created_at,
+          hs.status AS health_status,
+          hs.http_status AS health_http_status,
+          hs.latency_ms AS health_latency_ms,
+          hs.failure_count AS health_failure_count,
+          hs.success_count AS health_success_count,
+          hs.last_error AS health_last_error,
+          hs.last_checked_at AS health_last_checked_at,
+          hs.last_healthy_at AS health_last_healthy_at,
+          hs.updated_at AS health_updated_at
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN LATERAL (
@@ -150,6 +240,7 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           ORDER BY created_at DESC
           LIMIT 1
         ) latest_webhook ON true
+        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
         WHERE a.user_id=$1
         ORDER BY a.created_at DESC
         "#,
@@ -209,7 +300,16 @@ pub async fn get_app(
           latest_webhook.commit_sha AS latest_webhook_commit_sha,
           latest_webhook.branch AS latest_webhook_branch,
           latest_webhook.deployment_id AS latest_webhook_deployment_id,
-          latest_webhook.created_at AS latest_webhook_created_at
+          latest_webhook.created_at AS latest_webhook_created_at,
+          hs.status AS health_status,
+          hs.http_status AS health_http_status,
+          hs.latency_ms AS health_latency_ms,
+          hs.failure_count AS health_failure_count,
+          hs.success_count AS health_success_count,
+          hs.last_error AS health_last_error,
+          hs.last_checked_at AS health_last_checked_at,
+          hs.last_healthy_at AS health_last_healthy_at,
+          hs.updated_at AS health_updated_at
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN LATERAL (
@@ -227,6 +327,7 @@ pub async fn get_app(
           ORDER BY created_at DESC
           LIMIT 1
         ) latest_webhook ON true
+        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
         WHERE a.id=$1 AND a.user_id=$2
         "#,
     )
@@ -238,6 +339,433 @@ pub async fn get_app(
         Ok(Some(row)) => Json(app_json(row)).into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+pub async fn app_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let row = sqlx::query(
+        r#"
+        SELECT a.id,
+               hs.deployment_id,
+               hs.container_name,
+               COALESCE(hs.status, 'unknown') AS status,
+               hs.checked_url,
+               hs.http_status,
+               hs.latency_ms,
+               COALESCE(hs.failure_count, 0) AS failure_count,
+               COALESCE(hs.success_count, 0) AS success_count,
+               hs.last_error,
+               hs.last_checked_at,
+               hs.last_healthy_at,
+               hs.updated_at
+        FROM apps a
+        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        WHERE a.id=$1 AND a.user_id=$2
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await;
+    match row {
+        Ok(Some(row)) => Json(health_json(row)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub async fn app_health_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let rows = sqlx::query(
+        r#"
+        SELECT e.id,
+               e.deployment_id,
+               e.container_name,
+               e.status,
+               e.checked_url,
+               e.http_status,
+               e.latency_ms,
+               e.error,
+               e.created_at
+        FROM app_health_events e
+        JOIN apps a ON a.id = e.app_id
+        WHERE e.app_id=$1 AND a.user_id=$2
+        ORDER BY e.created_at DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await;
+    match rows {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "id": row.get::<Uuid, _>("id"),
+                        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
+                        "containerName": row.get::<Option<String>, _>("container_name"),
+                        "status": row.get::<String, _>("status"),
+                        "checkedUrl": row.get::<Option<String>, _>("checked_url"),
+                        "httpStatus": row.get::<Option<i32>, _>("http_status"),
+                        "latencyMs": row.get::<Option<i32>, _>("latency_ms"),
+                        "error": row.get::<Option<String>, _>("error"),
+                        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub async fn check_app_health_now(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let row = sqlx::query(
+        r#"
+        SELECT a.server_id,
+               a.health_path,
+               d.id AS deployment_id,
+               d.container_name,
+               d.published_port
+        FROM apps a
+        LEFT JOIN deployments d ON d.id = a.current_deployment_id
+        WHERE a.id=$1 AND a.user_id=$2
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(Some(row)) = row else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(deployment_id) = row.get::<Option<Uuid>, _>("deployment_id") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "app does not have a current deployment",
+        )
+            .into_response();
+    };
+    let Some(container_name) = row.get::<Option<String>, _>("container_name") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "app does not have a current container",
+        )
+            .into_response();
+    };
+    let Some(published_port) = row.get::<Option<i32>, _>("published_port") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "app does not have a published runtime port",
+        )
+            .into_response();
+    };
+    let payload = serde_json::json!({
+        "type": "health_check",
+        "app_id": id,
+        "deployment_id": deployment_id,
+        "container_name": container_name,
+        "published_port": published_port,
+        "health_path": row.get::<String, _>("health_path"),
+    });
+    enqueue_interactive_agent_job(
+        &state,
+        row.get::<Uuid, _>("server_id"),
+        id,
+        Some(deployment_id),
+        "health_check",
+        payload,
+    )
+    .await
+}
+
+pub async fn restart_app_container(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let row = sqlx::query(
+        r#"
+        SELECT a.server_id,
+               a.health_path,
+               d.id AS deployment_id,
+               d.container_name,
+               d.published_port
+        FROM apps a
+        LEFT JOIN deployments d ON d.id = a.current_deployment_id
+        WHERE a.id=$1 AND a.user_id=$2
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(Some(row)) = row else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(deployment_id) = row.get::<Option<Uuid>, _>("deployment_id") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "app does not have a current deployment",
+        )
+            .into_response();
+    };
+    let Some(container_name) = row.get::<Option<String>, _>("container_name") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "app does not have a current container",
+        )
+            .into_response();
+    };
+    let Some(published_port) = row.get::<Option<i32>, _>("published_port") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "app does not have a published runtime port",
+        )
+            .into_response();
+    };
+    let payload = serde_json::json!({
+        "type": "restart_container",
+        "app_id": id,
+        "deployment_id": deployment_id,
+        "container_name": container_name,
+        "published_port": published_port,
+        "health_path": row.get::<String, _>("health_path"),
+    });
+    enqueue_interactive_agent_job(
+        &state,
+        row.get::<Uuid, _>("server_id"),
+        id,
+        Some(deployment_id),
+        "restart_container",
+        payload,
+    )
+    .await
+}
+
+async fn enqueue_interactive_agent_job(
+    state: &AppState,
+    server_id: Uuid,
+    app_id: Uuid,
+    deployment_id: Option<Uuid>,
+    job_type: &str,
+    payload: serde_json::Value,
+) -> axum::response::Response {
+    match deploy::enqueue_agent_job(
+        state,
+        server_id,
+        Some(app_id),
+        deployment_id,
+        job_type,
+        payload,
+        20,
+    )
+    .await
+    {
+        Ok(job_id) => {
+            record_audit_event(
+                state,
+                AuditEventInput {
+                    actor_type: "owner",
+                    actor_id: None,
+                    event_type: &format!("{job_type}_requested"),
+                    app_id: Some(app_id),
+                    deployment_id,
+                    job_id: Some(job_id),
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"jobId": job_id})),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, app_id = %app_id, job_type, "failed to enqueue agent job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn health_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let rows = sqlx::query(
+        r#"
+        SELECT COALESCE(hs.status, 'unknown') AS status, count(*) AS count
+        FROM apps a
+        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        WHERE a.user_id=$1
+        GROUP BY COALESCE(hs.status, 'unknown')
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await;
+    match rows {
+        Ok(rows) => Json(health_counts_json(rows)).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn system_health_counts(state: &AppState) -> serde_json::Value {
+    let rows = sqlx::query(
+        r#"
+        SELECT COALESCE(hs.status, 'unknown') AS status, count(*) AS count
+        FROM apps a
+        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        GROUP BY COALESCE(hs.status, 'unknown')
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await;
+    health_counts_json(rows.unwrap_or_default())
+}
+
+fn health_counts_json(rows: Vec<sqlx::postgres::PgRow>) -> serde_json::Value {
+    let mut counts = serde_json::json!({
+        "healthy": 0,
+        "degraded": 0,
+        "unhealthy": 0,
+        "unknown": 0
+    });
+    for row in rows {
+        let status: String = row.get("status");
+        if let Some(value) = counts.get_mut(&status) {
+            *value = serde_json::json!(row.get::<i64, _>("count"));
+        }
+    }
+    counts
+}
+
+pub async fn system_version(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(_user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let update = cached_update_check(&state).await;
+    Json(serde_json::json!({
+        "currentVersion": env!("CARGO_PKG_VERSION"),
+        "updateChecksEnabled": state.update_checks_enabled,
+        "update": update,
+    }))
+    .into_response()
+}
+
+pub async fn system_update_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(_user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.update_checks_enabled {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Hostlet update checks are disabled by HOSTLET_UPDATE_CHECKS=false",
+        )
+            .into_response();
+    }
+    match refresh_update_check(&state).await {
+        Ok(value) => Json(value).into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
+pub async fn operator_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !operator_token_valid(&state, &headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let health = system_health_counts(&state).await;
+    let servers = sqlx::query("SELECT status,count(*) AS count FROM servers GROUP BY status")
+        .fetch_all(&state.db)
+        .await;
+    let mut server_counts = serde_json::json!({});
+    if let Ok(rows) = servers {
+        for row in rows {
+            let status: String = row.get("status");
+            server_counts[status] = serde_json::json!(row.get::<i64, _>("count"));
+        }
+    }
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "health": health,
+        "servers": server_counts,
+    }))
+    .into_response()
+}
+
+async fn operator_token_valid(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(token) = headers
+        .get("x-hostlet-agent-token")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let row = sqlx::query(
+        "SELECT agent_token_hash FROM servers WHERE kind='local' ORDER BY created_at ASC LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(Some(row)) = row else {
+        return false;
+    };
+    let expected: Option<String> = row.get("agent_token_hash");
+    expected
+        .as_deref()
+        .is_some_and(|hash| verify_token(token, hash))
+}
+
+pub async fn refresh_update_check_if_stale(state: &AppState) -> anyhow::Result<()> {
+    let stale = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        "SELECT updated_at FROM settings WHERE key='system_update_check'",
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .flatten()
+    .map(|updated_at| {
+        chrono::Utc::now().signed_duration_since(updated_at) > chrono::Duration::hours(24)
+    })
+    .unwrap_or(true);
+    if stale {
+        let _ = refresh_update_check(state).await?;
+    }
+    Ok(())
 }
 
 pub async fn app_resources(
@@ -933,6 +1461,166 @@ pub async fn agent_job_status(
     }
 }
 
+pub async fn list_agent_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let rows = sqlx::query(
+        r#"
+        SELECT j.id,j.job_type,j.app_id,j.deployment_id,j.status,j.failure_summary,
+               j.attempt,j.max_attempts,j.claimed_by,j.created_at,j.updated_at,j.finished_at
+        FROM agent_jobs j
+        JOIN servers s ON s.id = j.server_id
+        WHERE s.user_id=$1 OR s.kind='local'
+        ORDER BY j.created_at DESC
+        LIMIT 200
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await;
+    match rows {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "id": row.get::<Uuid, _>("id"),
+                        "type": row.get::<String, _>("job_type"),
+                        "appId": row.get::<Option<Uuid>, _>("app_id"),
+                        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
+                        "status": row.get::<String, _>("status"),
+                        "failure": row.get::<Option<String>, _>("failure_summary"),
+                        "attempt": row.get::<i32, _>("attempt"),
+                        "maxAttempts": row.get::<i32, _>("max_attempts"),
+                        "claimedBy": row.get::<Option<String>, _>("claimed_by"),
+                        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                        "updatedAt": row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+                        "finishedAt": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at"),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to list agent jobs");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn retry_agent_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let result = sqlx::query(
+        r#"
+        UPDATE agent_jobs j
+        SET status='queued',
+            failure_summary=NULL,
+            last_error=NULL,
+            claimed_by=NULL,
+            claimed_at=NULL,
+            lease_expires_at=NULL,
+            finished_at=NULL,
+            updated_at=now()
+        FROM servers s
+        WHERE j.id=$1
+          AND s.id=j.server_id
+          AND (s.user_id=$2 OR s.kind='local')
+          AND j.status IN ('failed','expired','cancelled')
+          AND COALESCE(j.payload_json, '{}'::jsonb) <> '{}'::jsonb
+        RETURNING j.app_id,j.deployment_id
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await;
+    match result {
+        Ok(Some(row)) => {
+            record_audit_event(
+                &state,
+                AuditEventInput {
+                    actor_type: "owner",
+                    actor_id: None,
+                    event_type: "agent_job_retried",
+                    app_id: row.get::<Option<Uuid>, _>("app_id"),
+                    deployment_id: row.get::<Option<Uuid>, _>("deployment_id"),
+                    job_id: Some(id),
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+            StatusCode::ACCEPTED.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, job_id = %id, "failed to retry agent job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn cancel_agent_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let result = sqlx::query(
+        r#"
+        UPDATE agent_jobs j
+        SET status='cancelled',
+            failure_summary='Cancelled by owner before the agent started work.',
+            last_error='Cancelled by owner before the agent started work.',
+            finished_at=now(),
+            updated_at=now()
+        FROM servers s
+        WHERE j.id=$1
+          AND s.id=j.server_id
+          AND (s.user_id=$2 OR s.kind='local')
+          AND j.status='queued'
+        RETURNING j.app_id,j.deployment_id
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await;
+    match result {
+        Ok(Some(row)) => {
+            record_audit_event(
+                &state,
+                AuditEventInput {
+                    actor_type: "owner",
+                    actor_id: None,
+                    event_type: "agent_job_cancelled",
+                    app_id: row.get::<Option<Uuid>, _>("app_id"),
+                    deployment_id: row.get::<Option<Uuid>, _>("deployment_id"),
+                    job_id: Some(id),
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, job_id = %id, "failed to cancel agent job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 pub async fn delete_app(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1001,42 +1689,44 @@ pub async fn delete_app(
     images.sort();
     images.dedup();
     let server_id = app.get::<Uuid, _>("server_id");
-    let job_id = match sqlx::query(
-        "INSERT INTO agent_jobs (server_id,app_id,job_type,status) VALUES ($1,$2,'delete_app','queued') RETURNING id",
-    )
-    .bind(server_id)
-    .bind(id)
-    .fetch_one(&state.db)
-    .await
-    {
-        Ok(row) => row.get::<Uuid, _>("id"),
-        Err(err) => {
-            tracing::warn!(error = %err, app_id = %id, "failed to create delete app agent job");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
     let payload = serde_json::json!({
         "type": "delete_app",
-        "job_id": job_id,
         "app_id": id,
         "route_key": format!("app-{id}"),
         "domain": domain,
         "containers": containers.clone(),
         "images": images,
     });
-    let _ = sqlx::query("UPDATE agent_jobs SET status='running', updated_at=now() WHERE id=$1")
-        .bind(job_id)
-        .execute(&state.db)
-        .await;
-    if let Err(err) = deploy::send_agent_job(&state, server_id, payload).await {
-        mark_agent_job_failed(&state, job_id, &err.to_string()).await;
-        tracing::warn!(error = %err, app_id = %id, "failed to request app teardown from agent");
-        return (
-            StatusCode::BAD_GATEWAY,
-            "failed to request app teardown from the server agent",
-        )
-            .into_response();
-    }
+    let job_id = match deploy::enqueue_agent_job(
+        &state,
+        server_id,
+        Some(id),
+        None,
+        "delete_app",
+        payload,
+        5,
+    )
+    .await
+    {
+        Ok(job_id) => job_id,
+        Err(err) => {
+            tracing::warn!(error = %err, app_id = %id, "failed to enqueue app teardown job");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    record_audit_event(
+        &state,
+        AuditEventInput {
+            actor_type: "owner",
+            actor_id: None,
+            event_type: "delete_app_requested",
+            app_id: Some(id),
+            deployment_id: None,
+            job_id: Some(job_id),
+            metadata: serde_json::json!({}),
+        },
+    )
+    .await;
     let finalize_state = state.clone();
     tokio::spawn(async move {
         finalize_delete_app(
@@ -1281,7 +1971,36 @@ fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
             "branch": r.try_get::<Option<String>,_>("latest_webhook_branch").unwrap_or(None),
             "deploymentId": r.try_get::<Option<Uuid>,_>("latest_webhook_deployment_id").unwrap_or(None),
             "createdAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_webhook_created_at").unwrap_or(None)
+        })),
+        "health": r.try_get::<Option<String>,_>("health_status").unwrap_or(None).map(|status| serde_json::json!({
+            "status": status,
+            "httpStatus": r.try_get::<Option<i32>,_>("health_http_status").unwrap_or(None),
+            "latencyMs": r.try_get::<Option<i32>,_>("health_latency_ms").unwrap_or(None),
+            "failureCount": r.try_get::<Option<i32>,_>("health_failure_count").unwrap_or(None).unwrap_or(0),
+            "successCount": r.try_get::<Option<i32>,_>("health_success_count").unwrap_or(None).unwrap_or(0),
+            "lastError": r.try_get::<Option<String>,_>("health_last_error").unwrap_or(None),
+            "lastCheckedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_last_checked_at").unwrap_or(None),
+            "lastHealthyAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_last_healthy_at").unwrap_or(None),
+            "updatedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_updated_at").unwrap_or(None)
         }))
+    })
+}
+
+fn health_json(row: sqlx::postgres::PgRow) -> serde_json::Value {
+    serde_json::json!({
+        "appId": row.get::<Uuid, _>("id"),
+        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
+        "containerName": row.get::<Option<String>, _>("container_name"),
+        "status": row.get::<String, _>("status"),
+        "checkedUrl": row.get::<Option<String>, _>("checked_url"),
+        "httpStatus": row.get::<Option<i32>, _>("http_status"),
+        "latencyMs": row.get::<Option<i32>, _>("latency_ms"),
+        "failureCount": row.get::<i32, _>("failure_count"),
+        "successCount": row.get::<i32, _>("success_count"),
+        "lastError": row.get::<Option<String>, _>("last_error"),
+        "lastCheckedAt": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_checked_at"),
+        "lastHealthyAt": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_healthy_at"),
+        "updatedAt": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at"),
     })
 }
 
@@ -1750,6 +2469,162 @@ fn reserved_public_domain_label(label: &str) -> bool {
             | "status"
             | "support"
             | "www"
+    )
+}
+
+struct UpdateCheck {
+    latest_version: String,
+    release_notes_url: String,
+    released_at: Option<String>,
+    minimum_supported_version: Option<String>,
+    compose_migrations: bool,
+    database_migrations: bool,
+}
+
+async fn fetch_latest_release(state: &AppState) -> anyhow::Result<UpdateCheck> {
+    let value: serde_json::Value = state
+        .http
+        .get("https://api.github.com/repos/ShaneKanterman04/Hostlet/releases/latest")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let latest_version = value
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0")
+        .trim_start_matches('v')
+        .to_string();
+    let release_notes_url = value
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://github.com/ShaneKanterman04/Hostlet/releases/latest")
+        .to_string();
+    let mut update = UpdateCheck {
+        latest_version,
+        release_notes_url,
+        released_at: value
+            .get("published_at")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        minimum_supported_version: None,
+        compose_migrations: false,
+        database_migrations: false,
+    };
+    if let Some(manifest_url) = value
+        .get("assets")
+        .and_then(|v| v.as_array())
+        .and_then(|assets| {
+            assets.iter().find_map(|asset| {
+                let name = asset.get("name")?.as_str()?;
+                (name == "hostlet-release.json")
+                    .then(|| {
+                        asset
+                            .get("browser_download_url")?
+                            .as_str()
+                            .map(str::to_string)
+                    })
+                    .flatten()
+            })
+        })
+    {
+        apply_update_manifest(state, &mut update, &manifest_url).await?;
+    }
+    Ok(update)
+}
+
+async fn apply_update_manifest(
+    state: &AppState,
+    update: &mut UpdateCheck,
+    manifest_url: &str,
+) -> anyhow::Result<()> {
+    let value: serde_json::Value = state
+        .http
+        .get(manifest_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if let Some(version) = value.get("version").and_then(|v| v.as_str()) {
+        update.latest_version = version.trim_start_matches('v').to_string();
+    }
+    update.released_at = value
+        .get("released_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| update.released_at.clone());
+    update.minimum_supported_version = value
+        .get("minimum_supported_version")
+        .and_then(|v| v.as_str())
+        .map(|value| value.trim_start_matches('v').to_string());
+    update.compose_migrations = value
+        .get("compose_migrations")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(update.compose_migrations);
+    update.database_migrations = value
+        .get("database_migrations")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(update.database_migrations);
+    if let Some(notes_url) = value.get("notes_url").and_then(|v| v.as_str()) {
+        update.release_notes_url = notes_url.to_string();
+    }
+    Ok(())
+}
+
+async fn cached_update_check(state: &AppState) -> Option<serde_json::Value> {
+    let row = sqlx::query("SELECT value,updated_at FROM settings WHERE key='system_update_check'")
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()?;
+    let value: String = row.get("value");
+    let mut json = serde_json::from_str::<serde_json::Value>(&value).ok()?;
+    if let serde_json::Value::Object(ref mut object) = json {
+        object.insert(
+            "checkedAt".into(),
+            serde_json::json!(row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at")),
+        );
+    }
+    Some(json)
+}
+
+async fn refresh_update_check(state: &AppState) -> anyhow::Result<serde_json::Value> {
+    let update = fetch_latest_release(state).await?;
+    let value = serde_json::json!({
+        "latestVersion": update.latest_version,
+        "releaseNotesUrl": update.release_notes_url,
+        "releasedAt": update.released_at,
+        "minimumSupportedVersion": update.minimum_supported_version,
+        "composeMigrations": update.compose_migrations,
+        "databaseMigrations": update.database_migrations,
+        "updateAvailable": version_is_newer(env!("CARGO_PKG_VERSION"), &update.latest_version),
+        "unsupportedDirectUpdate": update.minimum_supported_version.as_ref().is_some_and(|minimum| version_is_newer(minimum, env!("CARGO_PKG_VERSION"))),
+    });
+    let _ = sqlx::query(
+        "INSERT INTO settings (key,value,updated_at) VALUES ('system_update_check',$1,now())
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
+    )
+    .bind(value.to_string())
+    .execute(&state.db)
+    .await;
+    Ok(value)
+}
+
+fn version_is_newer(current: &str, latest: &str) -> bool {
+    version_parts(latest) > version_parts(current)
+}
+
+fn version_parts(value: &str) -> (u64, u64, u64) {
+    let mut parts = value
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
     )
 }
 
