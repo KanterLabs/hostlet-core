@@ -24,6 +24,16 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: cargo build --release -p hostlet
       - run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            for manifest in apps/cli/Cargo.toml apps/api/Cargo.toml apps/agent/Cargo.toml; do
+              grep -q "^version = \"${VERSION}\"$" "$manifest" || {
+                echo "$manifest version does not match tag ${GITHUB_REF_NAME}" >&2
+                exit 1
+              }
+            done
+          fi
+      - run: |
           mkdir -p dist
           cp target/release/hostlet dist/hostlet-linux-x64
           chmod +x dist/hostlet-linux-x64

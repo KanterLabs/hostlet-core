@@ -598,27 +598,79 @@ async fn deploy_compose(
     domain: &str,
     fallback_health_path: &str,
 ) -> anyhow::Result<()> {
-    let manifest_path = p
-        .get("hostlet_config_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("hostlet.yml");
-    validate_relative_file_path(manifest_path)?;
-    let manifest_file = project_dir.join(manifest_path);
-    let manifest_text = tokio::fs::read_to_string(&manifest_file)
-        .await
-        .with_context(|| format!("compose runtime requires {manifest_path}"))?;
-    let manifest: HostletManifest =
-        serde_yaml::from_str(&manifest_text).context("hostlet manifest is not valid YAML")?;
-    if manifest.runtime != "compose" {
-        bail!("hostlet manifest runtime must be compose");
-    }
-    validate_service_name(&manifest.compose.web_service)?;
-    let compose_file_name = manifest.compose.file.as_deref().unwrap_or("compose.yaml");
-    validate_relative_file_path(compose_file_name)?;
-    let compose_file = project_dir.join(compose_file_name);
-    if !tokio::fs::try_exists(&compose_file).await? {
-        bail!("compose file {compose_file_name} does not exist");
-    }
+    let generated_compose = p
+        .pointer("/runtime_config/generatedCompose")
+        .and_then(|v| v.as_object());
+    let build_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
+    let (manifest_path, manifest, compose_file_name, compose_file) =
+        if let Some(generated) = generated_compose {
+            let compose_file_name = generated
+                .get("composeFile")
+                .and_then(|v| v.as_str())
+                .unwrap_or("compose.generated.hostlet.yml");
+            validate_relative_file_path(compose_file_name)?;
+            let web_service = generated
+                .get("webService")
+                .and_then(|v| v.as_str())
+                .unwrap_or("web")
+                .to_string();
+            validate_service_name(&web_service)?;
+            let compose_text = generated
+                .get("compose")
+                .and_then(|v| v.as_str())
+                .context("generated Compose runtime is missing compose YAML")?;
+            tokio::fs::create_dir_all(&build_dir).await?;
+            let compose_file = build_dir.join(compose_file_name);
+            tokio::fs::write(&compose_file, compose_text).await?;
+            let manifest = HostletManifest {
+                runtime: "compose".into(),
+                compose: HostletComposeManifest {
+                    file: Some(compose_file_name.to_string()),
+                    web_service,
+                    port: generated
+                        .get("port")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| u16::try_from(v).ok()),
+                    health_path: generated
+                        .get("healthPath")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                },
+            };
+            (
+                "generated",
+                manifest,
+                compose_file_name.to_string(),
+                compose_file,
+            )
+        } else {
+            let manifest_path = p
+                .get("hostlet_config_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("hostlet.yml");
+            validate_relative_file_path(manifest_path)?;
+            let manifest_file = project_dir.join(manifest_path);
+            let manifest_text = tokio::fs::read_to_string(&manifest_file)
+                .await
+                .with_context(|| format!("compose runtime requires {manifest_path}"))?;
+            let manifest: HostletManifest = serde_yaml::from_str(&manifest_text)
+                .context("hostlet manifest is not valid YAML")?;
+            if manifest.runtime != "compose" {
+                bail!("hostlet manifest runtime must be compose");
+            }
+            validate_service_name(&manifest.compose.web_service)?;
+            let compose_file_name = manifest
+                .compose
+                .file
+                .clone()
+                .unwrap_or_else(|| "compose.yaml".into());
+            validate_relative_file_path(&compose_file_name)?;
+            let compose_file = project_dir.join(&compose_file_name);
+            if !tokio::fs::try_exists(&compose_file).await? {
+                bail!("compose file {compose_file_name} does not exist");
+            }
+            (manifest_path, manifest, compose_file_name, compose_file)
+        };
     let compose_text = tokio::fs::read_to_string(&compose_file).await?;
     validate_compose_subset(&compose_text, &manifest.compose.web_service)?;
     let port = manifest.compose.port.unwrap_or(fallback_port as u16);
@@ -630,11 +682,7 @@ async fn deploy_compose(
         .unwrap_or(fallback_health_path);
     validate_health_path(health_path)?;
     let project = compose_project_name(app_id);
-    let override_file = cfg
-        .workdir
-        .join("builds")
-        .join(deployment_id.to_string())
-        .join("compose.hostlet.yml");
+    let override_file = build_dir.join("compose.hostlet.yml");
     if let Some(parent) = override_file.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }

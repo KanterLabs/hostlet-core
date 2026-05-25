@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me", get(auth::me))
         .route("/api/github/status", get(github::status))
         .route("/api/github/repos", get(github::repos))
+        .route("/api/github/repo-inspect", post(github::repo_inspect))
         .route("/api/cloudflare/status", get(web::cloudflare_status))
         .route("/api/system/version", get(web::system_version))
         .route("/api/system/backups/latest", get(web::backup_metadata))

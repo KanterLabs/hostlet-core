@@ -1,0 +1,2 @@
+ALTER TABLE apps
+  ADD COLUMN IF NOT EXISTS runtime_config JSONB NOT NULL DEFAULT '{}'::jsonb;

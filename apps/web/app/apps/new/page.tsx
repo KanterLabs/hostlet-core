@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Box, CheckCircle2, Cpu, GitBranch, HardDrive, Lock, Plus, Search, Server } from "lucide-react";
+import { AlertTriangle, Box, CheckCircle2, Cpu, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
@@ -13,6 +13,23 @@ type ServerRow = { id: string; name: string; kind: string; status: string };
 type CloudflareStatus = {
   baseDomain?: string | null;
   defaultDomainPattern?: string | null;
+};
+type InspectEnv = { key: string; required?: boolean; value?: string; source?: string };
+type RepoInspection = {
+  repoFullName: string;
+  defaultBranch: string;
+  branch: string;
+  appName: string;
+  deployable: boolean;
+  runtimeKind: string;
+  rootDirectory: string;
+  containerPort: number;
+  healthPath: string;
+  hostletConfigPath: string;
+  runtimeConfig: Record<string, unknown>;
+  env: InspectEnv[];
+  warnings: string[];
+  summary: string;
 };
 
 export default function CreateApp() {
@@ -35,7 +52,11 @@ export default function CreateApp() {
     cpu_limit: 1,
     public_exposure: false,
     auto_deploy: false,
+    runtime_config: {} as Record<string, unknown>,
   });
+  const [inspection, setInspection] = useState<RepoInspection | null>(null);
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+  const [inspecting, setInspecting] = useState(false);
   const [repoLink, setRepoLink] = useState("");
   const [repos, setRepos] = useState<Repo[]>([]);
   const [repoSearch, setRepoSearch] = useState("");
@@ -82,6 +103,8 @@ export default function CreateApp() {
       repo_full_name: repo,
       name: current.name || repo.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
     }));
+    setInspection(null);
+    setEnvValues({});
   }
 
   function selectRepo(repo: Repo) {
@@ -92,6 +115,38 @@ export default function CreateApp() {
       branch: repo.default_branch || current.branch,
       name: current.name || repo.full_name.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
     }));
+    setInspection(null);
+    setEnvValues({});
+  }
+
+  async function inspectRepo() {
+    if (!form.repo_full_name || inspecting) return;
+    setInspecting(true);
+    setMessage("Inspecting repository...");
+    try {
+      const result = await api<RepoInspection>("/api/github/repo-inspect", {
+        method: "POST",
+        body: JSON.stringify({ repo_full_name: form.repo_full_name, branch: form.branch }),
+      });
+      setInspection(result);
+      setEnvValues(Object.fromEntries((result.env || []).map((item) => [item.key, item.value || ""])));
+      setForm((current) => ({
+        ...current,
+        name: current.name || result.appName,
+        branch: result.branch || current.branch,
+        runtime_kind: result.runtimeKind || current.runtime_kind,
+        root_directory: result.rootDirectory || current.root_directory,
+        container_port: result.containerPort || current.container_port,
+        health_path: result.healthPath || current.health_path,
+        hostlet_config_path: result.hostletConfigPath || current.hostlet_config_path,
+        runtime_config: result.runtimeConfig || {},
+      }));
+      setMessage(result.deployable ? "Review the inferred runtime, then create and deploy." : "Hostlet could not infer a deployable runtime.");
+    } catch (error) {
+      setMessage(`Inspect failed. ${error instanceof Error ? error.message : "Check the public GitHub URL."}`);
+    } finally {
+      setInspecting(false);
+    }
   }
 
   async function submit() {
@@ -99,12 +154,13 @@ export default function CreateApp() {
     setCreating(true);
     setMessage("Creating app...");
     try {
-      const res = await api<{ id: string }>("/api/apps", {
+      const env = inspection ? (inspection.env || []).filter((item) => envValues[item.key]).map((item) => ({ key: item.key, value: envValues[item.key] })) : [];
+      const res = await api<{ id: string; deploymentId?: string | null }>("/api/apps", {
         method: "POST",
-        body: JSON.stringify({ ...form, server_id: form.server_id || null, env: [] }),
+        body: JSON.stringify({ ...form, server_id: form.server_id || null, env, deploy_after_create: !!inspection?.deployable }),
       });
-      setMessage("App created. Opening deploy screen...");
-      router.push(`/apps/${res.id}`);
+      setMessage(inspection?.deployable ? "App created. Opening deployment logs..." : "App created. Opening deploy screen...");
+      router.push(res.deploymentId ? `/deployments/${res.deploymentId}` : `/apps/${res.id}`);
     } catch (error) {
       setMessage(`Create failed. ${error instanceof Error ? error.message : "Check the repo, server, port, and domain."}`);
       setCreating(false);
@@ -118,7 +174,8 @@ export default function CreateApp() {
     return `${slugAppName(source)}.${cloudflare.baseDomain}`;
   }, [cloudflare?.baseDomain, form.name, form.repo_full_name]);
   const routePreview = form.domain.trim() || generatedDomain || "Hostlet will generate one";
-  const canCreate = !!form.repo_full_name && !!form.name && !!form.branch && !!form.server_id;
+  const requiredEnvMissing = inspection?.env?.some((item) => item.required && !envValues[item.key]?.trim()) || false;
+  const canCreate = !!form.repo_full_name && !!form.name && !!form.branch && !!form.server_id && !requiredEnvMissing && inspection?.deployable !== false;
 
   return (
     <AppShell>
@@ -168,6 +225,38 @@ export default function CreateApp() {
                   <Field label="GitHub repo link" value={repoLink} onChange={updateRepoLink} placeholder="https://github.com/owner/repo" />
                   {repoLink && !form.repo_full_name && <p className="mt-2 text-sm text-red-700">Paste a GitHub URL, SSH URL, or owner/repo.</p>}
                 </div>
+                <button className="button-secondary mt-4" type="button" disabled={!form.repo_full_name || inspecting} onClick={inspectRepo}>
+                  <WandSparkles size={16} />
+                  {inspecting ? "Inspecting..." : "Inspect repo"}
+                </button>
+                {inspection && (
+                  <div className="mt-4 rounded-md border border-line bg-surface-alt p-4">
+                    <div className="flex items-center gap-2 text-sm font-medium text-ink">
+                      {inspection.deployable ? <CheckCircle2 size={16} className="text-action" /> : <AlertTriangle size={16} className="text-red-700" />}
+                      {inspection.summary}
+                    </div>
+                    {inspection.warnings.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        {inspection.warnings.map((warning) => (
+                          <p key={warning} className="text-sm text-muted">{warning}</p>
+                        ))}
+                      </div>
+                    )}
+                    {inspection.env.length > 0 && (
+                      <div className="mt-4 grid gap-3">
+                        {inspection.env.map((item) => (
+                          <Field
+                            key={item.key}
+                            label={`${item.key}${item.required ? " required" : ""}`}
+                            value={envValues[item.key] || ""}
+                            onChange={(value) => setEnvValues((current) => ({ ...current, [item.key]: value }))}
+                            placeholder={item.source || "Environment value"}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </Panel>
 
               <Panel>
@@ -241,7 +330,7 @@ export default function CreateApp() {
                 </DataList>
                 <button className="mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
                   <Plus size={16} />
-                  {creating ? "Creating..." : "Create app"}
+                  {creating ? "Creating..." : inspection?.deployable ? "Create and deploy" : "Create app"}
                 </button>
                 {message && <p className="mt-3 rounded-md border border-line bg-surface-alt p-3 text-sm text-muted">{message}</p>}
               </Panel>

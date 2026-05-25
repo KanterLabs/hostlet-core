@@ -142,7 +142,7 @@ pub async fn create_and_send_deploy(
     commit_sha: &str,
 ) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
-    let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
+    let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
         .bind(app_id).bind(user_id).fetch_one(&state.db).await?;
     let server_id: Uuid = app.get("server_id");
     let runtime_kind = app.get::<String, _>("runtime_kind");
@@ -167,7 +167,7 @@ pub async fn create_and_send_deploy(
                 .decrypt(row.get::<String, _>("value_ciphertext").as_str())?),
         );
     }
-    let github_token = github_access_token(state, user_id).await?;
+    let github_token = github_access_token(state, user_id).await.ok();
     let payload = json!({
         "type": "deploy", "deployment_id": deployment_id, "app_id": app_id,
         "route_key": route_key(app_id),
@@ -177,6 +177,7 @@ pub async fn create_and_send_deploy(
         "domain": app.get::<String,_>("domain"), "env": env,
         "runtime_kind": runtime_kind,
         "hostlet_config_path": app.get::<String,_>("hostlet_config_path"),
+        "runtime_config": app.get::<serde_json::Value,_>("runtime_config"),
         "root_directory": app.get::<String,_>("root_directory"),
         "install_command": app.get::<Option<String>,_>("install_command"),
         "build_command": app.get::<Option<String>,_>("build_command"),

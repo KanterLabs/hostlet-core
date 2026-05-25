@@ -21,6 +21,7 @@ pub struct CreateApp {
     domain: String,
     runtime_kind: Option<String>,
     hostlet_config_path: Option<String>,
+    runtime_config: Option<serde_json::Value>,
     root_directory: Option<String>,
     install_command: Option<String>,
     build_command: Option<String>,
@@ -29,6 +30,7 @@ pub struct CreateApp {
     cpu_limit: Option<f64>,
     public_exposure: Option<bool>,
     auto_deploy: Option<bool>,
+    deploy_after_create: Option<bool>,
     env: Vec<EnvVar>,
 }
 
@@ -43,6 +45,7 @@ pub struct UpdateApp {
     domain: Option<String>,
     runtime_kind: Option<String>,
     hostlet_config_path: Option<String>,
+    runtime_config: Option<serde_json::Value>,
     health_path: Option<String>,
     root_directory: Option<String>,
     install_command: Option<Option<String>>,
@@ -561,6 +564,7 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           a.root_directory,
           a.runtime_kind,
           a.hostlet_config_path,
+          a.runtime_config,
           a.install_command,
           a.build_command,
           a.start_command,
@@ -650,6 +654,7 @@ pub async fn get_app(
           a.root_directory,
           a.runtime_kind,
           a.hostlet_config_path,
+          a.runtime_config,
           a.install_command,
           a.build_command,
           a.start_command,
@@ -1308,6 +1313,10 @@ pub async fn create_app(
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
+    let runtime_config = body.runtime_config.unwrap_or_else(|| serde_json::json!({}));
+    if let Err(message) = clean_runtime_config(&runtime_config) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
     let server_id = match body.server_id {
         Some(id) => id,
         None => Uuid::parse_str(
@@ -1400,9 +1409,9 @@ pub async fn create_app(
             return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
         }
     }
-    let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id")
+    let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id")
         .bind(user_id).bind(server_id).bind(app_name).bind(repo_full_name).bind(branch).bind(body.container_port).bind(health_path).bind(&domain)
-        .bind(runtime_kind).bind(hostlet_config_path).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
+        .bind(runtime_kind).bind(hostlet_config_path).bind(runtime_config).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
         .bind(body.memory_limit_mb).bind(body.cpu_limit).bind(false).bind(auto_deploy)
         .fetch_one(&mut *tx).await;
     let Ok(row) = row else {
@@ -1482,7 +1491,15 @@ pub async fn create_app(
         )
         .await;
     }
-    Json(serde_json::json!({"id": app_id})).into_response()
+    let deployment_id = if body.deploy_after_create.unwrap_or(false) {
+        match deploy::create_and_send_deploy(&state, user_id, app_id, "HEAD").await {
+            Ok(id) => Some(id),
+            Err(err) => return (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        }
+    } else {
+        None
+    };
+    Json(serde_json::json!({"id": app_id, "deploymentId": deployment_id})).into_response()
 }
 
 pub async fn update_app(
@@ -1578,6 +1595,15 @@ pub async fn update_app(
             Ok(value) => value,
             Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
         }),
+        None => None,
+    };
+    let runtime_config = match body.runtime_config {
+        Some(value) => {
+            if let Err(message) = clean_runtime_config(&value) {
+                return (StatusCode::BAD_REQUEST, message).into_response();
+            }
+            Some(value)
+        }
         None => None,
     };
     let install_command = match body.install_command {
@@ -1708,6 +1734,13 @@ pub async fn update_app(
         if let Some(hostlet_config_path) = hostlet_config_path {
             sqlx::query("UPDATE apps SET hostlet_config_path=$1, updated_at=now() WHERE id=$2")
                 .bind(hostlet_config_path)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(runtime_config) = runtime_config {
+            sqlx::query("UPDATE apps SET runtime_config=$1, updated_at=now() WHERE id=$2")
+                .bind(runtime_config)
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
@@ -2496,6 +2529,7 @@ fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
         "branch": r.get::<String,_>("branch"), "domain": r.get::<String,_>("domain"), "currentDeploymentId": r.get::<Option<Uuid>,_>("current_deployment_id"),
         "runtimeKind": r.try_get::<String,_>("runtime_kind").unwrap_or_else(|_| "single".into()),
         "hostletConfigPath": r.try_get::<String,_>("hostlet_config_path").unwrap_or_else(|_| "hostlet.yml".into()),
+        "runtimeConfig": r.try_get::<serde_json::Value,_>("runtime_config").unwrap_or_else(|_| serde_json::json!({})),
         "rootDirectory": r.try_get::<String,_>("root_directory").unwrap_or_else(|_| ".".into()),
         "installCommand": r.try_get::<Option<String>,_>("install_command").unwrap_or(None),
         "buildCommand": r.try_get::<Option<String>,_>("build_command").unwrap_or(None),
@@ -2627,6 +2661,16 @@ fn clean_hostlet_config_path(value: Option<&str>) -> Result<String, &'static str
     } else {
         Err("Hostlet config path must be a relative .yml or .yaml file")
     }
+}
+
+fn clean_runtime_config(value: &serde_json::Value) -> Result<(), &'static str> {
+    if !value.is_object() {
+        return Err("runtime config must be an object");
+    }
+    if value.to_string().len() > 32_000 {
+        return Err("runtime config is too large");
+    }
+    Ok(())
 }
 
 fn app_slug(value: &str) -> String {

@@ -9,9 +9,17 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
+
+#[derive(Deserialize)]
+pub struct RepoInspectRequest {
+    repo_url: Option<String>,
+    repo_full_name: Option<String>,
+    branch: Option<String>,
+}
 
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let oauth_configured = !state.github_client_id.trim().is_empty();
@@ -138,6 +146,284 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
         },
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
+}
+
+pub async fn repo_inspect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RepoInspectRequest>,
+) -> impl IntoResponse {
+    let Some(_user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let repo = body
+        .repo_full_name
+        .as_deref()
+        .or(body.repo_url.as_deref())
+        .and_then(parse_github_repo);
+    let Some(repo) = repo else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "repo must be a GitHub owner/repo or URL",
+        )
+            .into_response();
+    };
+    match inspect_public_repo(&state, &repo, body.branch.as_deref()).await {
+        Ok(value) => Json(value).into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
+async fn inspect_public_repo(
+    state: &AppState,
+    repo: &str,
+    requested_branch: Option<&str>,
+) -> anyhow::Result<Value> {
+    let repo_meta: Value = state
+        .http
+        .get(format!("https://api.github.com/repos/{repo}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let default_branch = repo_meta
+        .get("default_branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main");
+    let branch = requested_branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_branch);
+    if repo.eq_ignore_ascii_case("go-gitea/gitea") {
+        return Ok(gitea_inspection(repo, branch, default_branch));
+    }
+
+    if let Some(contents) = github_file_text(state, repo, branch, "Dockerfile").await? {
+        let inference = infer_dockerfile(&contents);
+        return Ok(json!({
+            "repoFullName": repo,
+            "defaultBranch": default_branch,
+            "branch": branch,
+            "appName": repo.split('/').nth(1).unwrap_or("app"),
+            "deployable": true,
+            "runtimeKind": "single",
+            "rootDirectory": ".",
+            "containerPort": inference.port.unwrap_or(3000),
+            "healthPath": "/",
+            "hostletConfigPath": "hostlet.yml",
+            "runtimeConfig": {},
+            "env": inference.env,
+            "warnings": inference.warnings,
+            "summary": "Dockerfile detected. Hostlet inferred a single-container runtime.",
+            "autoDeployAvailable": false
+        }));
+    }
+
+    if github_file_text(state, repo, branch, "package.json")
+        .await?
+        .is_some()
+    {
+        return Ok(json!({
+            "repoFullName": repo,
+            "defaultBranch": default_branch,
+            "branch": branch,
+            "appName": repo.split('/').nth(1).unwrap_or("app"),
+            "deployable": true,
+            "runtimeKind": "single",
+            "rootDirectory": ".",
+            "containerPort": 3000,
+            "healthPath": "/",
+            "hostletConfigPath": "hostlet.yml",
+            "runtimeConfig": {},
+            "env": [],
+            "warnings": ["Node app detected. Hostlet will infer install/build/start commands during deployment; set custom commands if the preview is incomplete."],
+            "summary": "package.json detected. Hostlet will use generated Node runtime support.",
+            "autoDeployAvailable": false
+        }));
+    }
+
+    Ok(json!({
+        "repoFullName": repo,
+        "defaultBranch": default_branch,
+        "branch": branch,
+        "appName": repo.split('/').nth(1).unwrap_or("app"),
+        "deployable": false,
+        "runtimeKind": "single",
+        "rootDirectory": ".",
+        "containerPort": 3000,
+        "healthPath": "/",
+        "hostletConfigPath": "hostlet.yml",
+        "runtimeConfig": {},
+        "env": [],
+        "warnings": ["No root Dockerfile or package.json was found. Add a Dockerfile, package.json, or Hostlet Compose manifest before deploying."],
+        "summary": "Hostlet could not infer a runnable app shape.",
+        "autoDeployAvailable": false
+    }))
+}
+
+async fn github_file_text(
+    state: &AppState,
+    repo: &str,
+    branch: &str,
+    path: &str,
+) -> anyhow::Result<Option<String>> {
+    let url = format!(
+        "https://api.github.com/repos/{repo}/contents/{path}?ref={}",
+        url::form_urlencoded::byte_serialize(branch.as_bytes()).collect::<String>()
+    );
+    let response = state.http.get(url).send().await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let value: Value = response.error_for_status()?.json().await?;
+    let Some(download_url) = value.get("download_url").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        state
+            .http
+            .get(download_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?,
+    ))
+}
+
+struct DockerfileInference {
+    port: Option<i32>,
+    env: Vec<Value>,
+    warnings: Vec<String>,
+}
+
+fn infer_dockerfile(contents: &str) -> DockerfileInference {
+    let mut ports = Vec::new();
+    let mut env = Vec::new();
+    let mut warnings = vec![
+        "Public Dockerfiles run arbitrary build steps on this machine. Review the upstream project before deploying.".to_string(),
+    ];
+    for line in contents.lines().map(str::trim) {
+        let upper = line.to_ascii_uppercase();
+        if upper.starts_with("EXPOSE ") {
+            for token in line[7..].split_whitespace() {
+                let port = token
+                    .split('/')
+                    .next()
+                    .and_then(|part| part.parse::<i32>().ok());
+                if let Some(port) = port {
+                    ports.push(port);
+                }
+            }
+        } else if upper.starts_with("ENV ") {
+            for item in line[4..].split_whitespace() {
+                let key = item.split('=').next().unwrap_or("").trim();
+                if valid_env_prompt_key(key) {
+                    env.push(json!({"key": key, "required": false, "value": "", "source": "Dockerfile ENV"}));
+                }
+            }
+        } else if upper.starts_with("ARG ") {
+            let key = line[4..].split('=').next().unwrap_or("").trim();
+            if valid_env_prompt_key(key) {
+                warnings.push(format!("Dockerfile declares build arg {key}; Hostlet does not prompt for build args yet."));
+            }
+        } else if upper.starts_with("VOLUME ") {
+            warnings.push("Dockerfile declares volumes. Hostlet provides /data automatically; verify the app persists data where expected.".into());
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    let preferred = [3000, 8080, 8000, 80, 5000, 4000]
+        .into_iter()
+        .find(|port| ports.contains(port))
+        .or_else(|| ports.iter().copied().find(|port| *port != 22));
+    if ports.len() > 1 {
+        warnings.push(format!(
+            "Dockerfile exposes multiple ports ({ports:?}); Hostlet selected {}.",
+            preferred.unwrap_or(3000)
+        ));
+    }
+    DockerfileInference {
+        port: preferred,
+        env,
+        warnings,
+    }
+}
+
+fn gitea_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
+    json!({
+        "repoFullName": repo,
+        "defaultBranch": default_branch,
+        "branch": branch,
+        "appName": "gitea",
+        "deployable": true,
+        "runtimeKind": "compose",
+        "rootDirectory": ".",
+        "containerPort": 3000,
+        "healthPath": "/",
+        "hostletConfigPath": "hostlet.yml",
+        "runtimeConfig": {
+            "generatedCompose": {
+                "composeFile": "compose.generated.hostlet.yml",
+                "webService": "server",
+                "port": 3000,
+                "healthPath": "/",
+                "compose": "services:\n  server:\n    image: docker.gitea.com/gitea:latest-rootless\n    restart: unless-stopped\n    environment:\n      GITEA__server__DOMAIN: localhost\n      GITEA__server__HTTP_PORT: \"3000\"\n      GITEA__database__DB_TYPE: sqlite3\n    volumes:\n      - gitea-data:/var/lib/gitea\n      - gitea-config:/etc/gitea\nvolumes:\n  gitea-data:\n  gitea-config:\n"
+            }
+        },
+        "env": [],
+        "warnings": ["Gitea SSH Git access is not exposed in Hostlet 0.3.9; use HTTPS Git through the web route.", "The generated Gitea default uses SQLite and named Docker volumes for the simplest self-hosted setup."],
+        "summary": "Gitea detected. Hostlet will use the official rootless image with SQLite and persistent named volumes.",
+        "autoDeployAvailable": false
+    })
+}
+
+fn valid_env_prompt_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+}
+
+fn parse_github_repo(input: &str) -> Option<String> {
+    let trimmed = input.trim().trim_end_matches(".git");
+    if let Some(caps) = trimmed
+        .strip_prefix("git@github.com:")
+        .and_then(|value| parse_owner_repo(value))
+    {
+        return Some(caps);
+    }
+    if let Ok(url) = url::Url::parse(trimmed) {
+        if url.host_str()? != "github.com" {
+            return None;
+        }
+        return parse_owner_repo(url.path().trim_start_matches('/'));
+    }
+    parse_owner_repo(trimmed)
+}
+
+fn parse_owner_repo(value: &str) -> Option<String> {
+    let mut parts = value.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some() || !valid_repo_part(owner) || !valid_repo_part(repo) {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn valid_repo_part(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !value.starts_with('.')
+        && !value.ends_with('.')
 }
 
 pub async fn ensure_repo_webhook(
@@ -431,7 +717,7 @@ fn valid_commit_sha(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_commit_sha;
+    use super::{gitea_inspection, infer_dockerfile, parse_github_repo, valid_commit_sha};
 
     #[test]
     fn rejects_branch_delete_zero_sha() {
@@ -443,5 +729,58 @@ mod tests {
     #[test]
     fn accepts_normal_commit_sha() {
         assert!(valid_commit_sha("0123456789abcdef0123456789abcdef01234567"));
+    }
+
+    #[test]
+    fn parses_github_repo_inputs() {
+        assert_eq!(
+            parse_github_repo("https://github.com/go-gitea/gitea"),
+            Some("go-gitea/gitea".into())
+        );
+        assert_eq!(
+            parse_github_repo("git@github.com:owner/repo.git"),
+            Some("owner/repo".into())
+        );
+        assert_eq!(parse_github_repo("owner/repo"), Some("owner/repo".into()));
+        assert_eq!(parse_github_repo("https://example.com/owner/repo"), None);
+    }
+
+    #[test]
+    fn dockerfile_inference_prefers_web_port_and_prompts_env() {
+        let inference = infer_dockerfile(
+            r#"
+FROM alpine
+ENV APP_SECRET=
+ARG BUILD_TOKEN
+EXPOSE 22 3000/tcp
+VOLUME ["/data"]
+"#,
+        );
+        assert_eq!(inference.port, Some(3000));
+        assert!(inference.env.iter().any(|item| item["key"] == "APP_SECRET"));
+        assert!(inference
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("multiple ports")));
+        assert!(inference
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("BUILD_TOKEN")));
+    }
+
+    #[test]
+    fn gitea_inspection_returns_generated_compose() {
+        let value = gitea_inspection("go-gitea/gitea", "main", "main");
+        assert_eq!(value["deployable"], true);
+        assert_eq!(value["runtimeKind"], "compose");
+        assert_eq!(
+            value.pointer("/runtimeConfig/generatedCompose/webService"),
+            Some(&serde_json::json!("server"))
+        );
+        assert!(value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("SSH Git access")));
     }
 }
