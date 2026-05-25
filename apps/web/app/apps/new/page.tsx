@@ -25,6 +25,8 @@ export default function CreateApp() {
     container_port: 3000,
     health_path: "/",
     domain: "",
+    runtime_kind: "single",
+    hostlet_config_path: "hostlet.yml",
     root_directory: ".",
     install_command: "",
     build_command: "",
@@ -199,6 +201,11 @@ export default function CreateApp() {
                   <Field label="Root directory" value={form.root_directory} onChange={(value) => setForm({ ...form, root_directory: value })} placeholder="." />
                   <Field label="Container port" type="number" value={String(form.container_port)} onChange={(value) => setForm({ ...form, container_port: Number(value) })} />
                   <Field label="Health path" value={form.health_path} onChange={(value) => setForm({ ...form, health_path: value })} />
+                  <SelectField label="Runtime" value={form.runtime_kind} onChange={(value) => setForm({ ...form, runtime_kind: value })}>
+                    <option value="single">Dockerfile or Node</option>
+                    <option value="compose">Docker Compose</option>
+                  </SelectField>
+                  {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setForm({ ...form, hostlet_config_path: value })} placeholder="hostlet.yml" />}
                   <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })}>
                     <option value={256}>256 MB</option>
                     <option value={512}>512 MB</option>
@@ -229,7 +236,7 @@ export default function CreateApp() {
                   <SummaryItem label="Repo" value={form.repo_full_name || "Choose a repo"} />
                   <SummaryItem label="Machine" value={selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
                   <SummaryItem label="Route" value={routePreview} />
-                  <SummaryItem label="Runtime" value={`:${form.container_port}${form.health_path}`} />
+                  <SummaryItem label="Runtime" value={`${form.runtime_kind === "compose" ? "Compose" : "Single"} · :${form.container_port}${form.health_path}`} />
                   <SummaryItem label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
                 </DataList>
                 <button className="mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>

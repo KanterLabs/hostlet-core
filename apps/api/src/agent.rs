@@ -411,7 +411,7 @@ async fn handle_agent_message(state: &AppState, server_id: Uuid, msg: serde_json
                 if !valid_deployment_status(status) {
                     return;
                 }
-                let updated = sqlx::query("UPDATE deployments SET status=$1, image_tag=COALESCE($2,image_tag), container_name=COALESCE($3,container_name), published_port=COALESCE($4,published_port), failure_summary=$5, finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END WHERE id=$6 AND server_id=$7")
+                let updated = sqlx::query("UPDATE deployments SET status=$1, image_tag=COALESCE($2,image_tag), container_name=COALESCE($3,container_name), published_port=COALESCE($4,published_port), failure_summary=$5, compose_project=COALESCE($6,compose_project), runtime_metadata=CASE WHEN $7::jsonb IS NULL THEN runtime_metadata ELSE $7::jsonb END, finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END WHERE id=$8 AND server_id=$9")
                     .bind(status)
                     .bind(msg.get("image_tag").and_then(|v| v.as_str()))
                     .bind(msg.get("container_name").and_then(|v| v.as_str()))
@@ -419,6 +419,8 @@ async fn handle_agent_message(state: &AppState, server_id: Uuid, msg: serde_json
                         (1..=65_535).contains(&v).then_some(v as i32)
                     }))
                     .bind(msg.get("failure").and_then(|v| v.as_str()))
+                    .bind(msg.get("compose_project").and_then(|v| v.as_str()))
+                    .bind(msg.get("runtime_metadata").cloned())
                     .bind(id)
                     .bind(server_id)
                     .execute(&state.db).await

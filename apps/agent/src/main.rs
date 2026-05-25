@@ -2,6 +2,7 @@ use anyhow::{bail, Context};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::{
@@ -406,6 +407,21 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     }
     let image = format!("hostlet/{app_name}:{deployment_id}");
     let project_dir = safe_project_dir(&checkout, root_directory).await?;
+    if p.get("runtime_kind").and_then(|v| v.as_str()) == Some("compose") {
+        return deploy_compose(
+            cfg,
+            p.clone(),
+            deployment_id,
+            app_id,
+            &app_name,
+            &route_key,
+            &project_dir,
+            port,
+            domain,
+            health_path,
+        )
+        .await;
+    }
     let build = prepare_build(&cfg, deployment_id, &project_dir, port, &p).await?;
     run_log(
         &cfg,
@@ -556,6 +572,213 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct HostletManifest {
+    runtime: String,
+    compose: HostletComposeManifest,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostletComposeManifest {
+    file: Option<String>,
+    web_service: String,
+    port: Option<u16>,
+    health_path: Option<String>,
+}
+
+async fn deploy_compose(
+    cfg: Config,
+    p: Value,
+    deployment_id: Uuid,
+    app_id: Uuid,
+    app_name: &str,
+    route_key: &str,
+    project_dir: &Path,
+    fallback_port: i64,
+    domain: &str,
+    fallback_health_path: &str,
+) -> anyhow::Result<()> {
+    let manifest_path = p
+        .get("hostlet_config_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hostlet.yml");
+    validate_relative_file_path(manifest_path)?;
+    let manifest_file = project_dir.join(manifest_path);
+    let manifest_text = tokio::fs::read_to_string(&manifest_file)
+        .await
+        .with_context(|| format!("compose runtime requires {manifest_path}"))?;
+    let manifest: HostletManifest =
+        serde_yaml::from_str(&manifest_text).context("hostlet manifest is not valid YAML")?;
+    if manifest.runtime != "compose" {
+        bail!("hostlet manifest runtime must be compose");
+    }
+    validate_service_name(&manifest.compose.web_service)?;
+    let compose_file_name = manifest.compose.file.as_deref().unwrap_or("compose.yaml");
+    validate_relative_file_path(compose_file_name)?;
+    let compose_file = project_dir.join(compose_file_name);
+    if !tokio::fs::try_exists(&compose_file).await? {
+        bail!("compose file {compose_file_name} does not exist");
+    }
+    let compose_text = tokio::fs::read_to_string(&compose_file).await?;
+    validate_compose_subset(&compose_text, &manifest.compose.web_service)?;
+    let port = manifest.compose.port.unwrap_or(fallback_port as u16);
+    validate_port(port as i64)?;
+    let health_path = manifest
+        .compose
+        .health_path
+        .as_deref()
+        .unwrap_or(fallback_health_path);
+    validate_health_path(health_path)?;
+    let project = compose_project_name(app_id);
+    let override_file = cfg
+        .workdir
+        .join("builds")
+        .join(deployment_id.to_string())
+        .join("compose.hostlet.yml");
+    if let Some(parent) = override_file.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(
+        &override_file,
+        compose_override_yaml(
+            &manifest.compose.web_service,
+            port,
+            app_id,
+            deployment_id,
+            &p,
+        ),
+    )
+    .await?;
+    log(
+        &cfg,
+        deployment_id,
+        "stdout",
+        &format!(
+            "Detected Hostlet Compose app. Project {project}, web service {}.",
+            manifest.compose.web_service
+        ),
+    )
+    .await;
+    run_log_in_dir(
+        &cfg,
+        deployment_id,
+        project_dir,
+        "docker",
+        &[
+            "compose",
+            "-p",
+            &project,
+            "-f",
+            compose_file.to_str().unwrap(),
+            "-f",
+            override_file.to_str().unwrap(),
+            "config",
+        ],
+    )
+    .await?;
+    run_log_in_dir(
+        &cfg,
+        deployment_id,
+        project_dir,
+        "docker",
+        &[
+            "compose",
+            "-p",
+            &project,
+            "-f",
+            compose_file.to_str().unwrap(),
+            "-f",
+            override_file.to_str().unwrap(),
+            "up",
+            "-d",
+            "--build",
+            "--remove-orphans",
+        ],
+    )
+    .await?;
+    status(&cfg, deployment_id, "starting", None).await;
+    let container = compose_service_container(
+        project_dir,
+        &project,
+        &compose_file,
+        &override_file,
+        &manifest.compose.web_service,
+    )
+    .await?;
+    let internal_port = docker_published_port(&container, port).await?;
+    status(&cfg, deployment_id, "health_checking", None).await;
+    if let Err(err) = wait_health(&cfg, deployment_id, &container, internal_port, health_path).await
+    {
+        let _ = run_log_in_dir(
+            &cfg,
+            deployment_id,
+            project_dir,
+            "docker",
+            &[
+                "compose",
+                "-p",
+                &project,
+                "-f",
+                compose_file.to_str().unwrap(),
+                "-f",
+                override_file.to_str().unwrap(),
+                "logs",
+                "--tail",
+                "120",
+            ],
+        )
+        .await;
+        status(&cfg, deployment_id, "failed", Some(&format!("Compose health check failed: {err}. The previous working route was preserved; inspect Compose service logs for details."))).await;
+        return Ok(());
+    }
+    status(&cfg, deployment_id, "routing", None).await;
+    let mut local_url = None;
+    if cfg.local_mode {
+        if let Some(router) = &cfg.local_router {
+            write_local_caddy_route(router, route_key, domain, internal_port).await?;
+            run_router_reload(&cfg, deployment_id, router).await?;
+        }
+        local_url = Some(if cfg.local_router.is_some() {
+            domain.to_string()
+        } else {
+            format!("localhost:{internal_port}")
+        });
+    } else {
+        write_caddy_route(route_key, domain, internal_port).await?;
+        run_log(
+            &cfg,
+            deployment_id,
+            "caddy",
+            &["reload", "--config", "/etc/caddy/Caddyfile"],
+        )
+        .await?;
+    }
+    status_extra(
+        &cfg,
+        deployment_id,
+        "success",
+        StatusDetails {
+            container: Some(&container),
+            local_url: local_url.as_deref(),
+            published_port: Some(internal_port),
+            compose_project: Some(&project),
+            runtime_metadata: Some(json!({
+                "runtime": "compose",
+                "composeFile": compose_file_name,
+                "hostletConfigPath": manifest_path,
+                "webService": manifest.compose.web_service,
+                "targetPort": port,
+                "healthPath": health_path,
+                "project": project,
+                "appName": app_name,
+            })),
+            ..StatusDetails::default()
+        },
+    )
+    .await;
+    Ok(())
+}
+
 async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
     let container = p["target_container"].as_str().context("target_container")?;
@@ -639,6 +862,9 @@ async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
         .and_then(|v| v.as_str())
         .map(safe_name)
         .unwrap_or_else(|| safe_name(p["app_id"].as_str().unwrap_or("app")));
+    if let Some(project) = p.get("compose_project").and_then(|v| v.as_str()) {
+        remove_compose_project_resources(project).await?;
+    }
     let containers = p
         .get("containers")
         .and_then(|v| v.as_array())
@@ -732,6 +958,51 @@ async fn run_log(
     .await;
     let mut cmd = Command::new(bin);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to start {bin}"))?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let c1 = cfg.clone();
+    let c2 = cfg.clone();
+    tokio::spawn(async move {
+        stream_lines(c1, deployment_id, "stdout", stdout).await;
+    });
+    tokio::spawn(async move {
+        stream_lines(c2, deployment_id, "stderr", stderr).await;
+    });
+    let status = match tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            bail!("{bin} timed out after 1800 seconds");
+        }
+    };
+    if !status.success() {
+        bail!("{bin} exited with {status}");
+    }
+    Ok(())
+}
+
+async fn run_log_in_dir(
+    cfg: &Config,
+    deployment_id: Uuid,
+    dir: &Path,
+    bin: &str,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    log(
+        cfg,
+        deployment_id,
+        "stdout",
+        &format!("$ {} {}", bin, command_args_for_log(args).join(" ")),
+    )
+    .await;
+    let mut cmd = Command::new(bin);
+    cmd.current_dir(dir)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to start {bin}"))?;
@@ -1374,10 +1645,12 @@ struct StatusDetails<'a> {
     container: Option<&'a str>,
     local_url: Option<&'a str>,
     published_port: Option<u16>,
+    compose_project: Option<&'a str>,
+    runtime_metadata: Option<Value>,
 }
 
 async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
-    post(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":details.failure,"image_tag":details.image,"container_name":details.container,"local_url":details.local_url,"published_port":details.published_port})).await;
+    post(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":details.failure,"image_tag":details.image,"container_name":details.container,"local_url":details.local_url,"published_port":details.published_port,"compose_project":details.compose_project,"runtime_metadata":details.runtime_metadata})).await;
 }
 
 async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
@@ -1915,6 +2188,191 @@ async fn docker_published_port(container: &str, container_port: u16) -> anyhow::
         .next()
         .context("Docker did not report a published port")
 }
+
+async fn compose_service_container(
+    dir: &Path,
+    project: &str,
+    compose_file: &Path,
+    override_file: &Path,
+    service: &str,
+) -> anyhow::Result<String> {
+    let output = command_output_in_dir(
+        dir,
+        "docker",
+        &[
+            "compose",
+            "-p",
+            project,
+            "-f",
+            compose_file.to_str().unwrap(),
+            "-f",
+            override_file.to_str().unwrap(),
+            "ps",
+            "-q",
+            service,
+        ],
+        Duration::from_secs(30),
+    )
+    .await?;
+    if !output.status.success() {
+        bail!("docker compose ps failed");
+    }
+    let id = String::from_utf8(output.stdout)?.trim().to_string();
+    if id.is_empty() {
+        bail!("compose web service did not create a container");
+    }
+    let name_output = command_output(
+        "docker",
+        &["inspect", "-f", "{{.Name}}", &id],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if !name_output.status.success() {
+        bail!("failed to inspect compose web container");
+    }
+    let name = String::from_utf8(name_output.stdout)?
+        .trim()
+        .trim_start_matches('/')
+        .to_string();
+    if !valid_container_name(&name) {
+        bail!("compose web container name is not Hostlet-managed");
+    }
+    Ok(name)
+}
+
+async fn command_output_in_dir(
+    dir: &Path,
+    bin: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> anyhow::Result<Output> {
+    let mut cmd = Command::new(bin);
+    cmd.current_dir(dir).args(args).kill_on_drop(true);
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(output) => output.with_context(|| format!("failed to start {bin}")),
+        Err(_) => bail!("{bin} timed out after {} seconds", timeout.as_secs()),
+    }
+}
+
+fn compose_project_name(app_id: Uuid) -> String {
+    format!("hostlet-app-{}", app_id.simple())
+}
+
+fn compose_override_yaml(
+    web_service: &str,
+    port: u16,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    payload: &Value,
+) -> String {
+    let mut env = vec![
+        format!("HOSTLET_APP_ID={app_id}"),
+        format!("HOSTLET_DEPLOYMENT_ID={deployment_id}"),
+        "HOSTLET_DATA_DIR=/data".to_string(),
+        "DATA_DIR=/data".to_string(),
+    ];
+    if let Some(map) = payload.get("env").and_then(|v| v.as_object()) {
+        for (key, value) in map {
+            if valid_env_key(key) {
+                let value = value.as_str().unwrap_or_default();
+                env.push(format!("{}={}", key, value.replace('\n', "\\n")));
+            }
+        }
+    }
+    let env_yaml = env
+        .iter()
+        .map(|item| format!("      - {}", serde_yaml::to_string(item).unwrap().trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
+    )
+}
+
+fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(contents).context("compose file is not valid YAML")?;
+    let services = value
+        .get("services")
+        .and_then(|v| v.as_mapping())
+        .context("compose file must define services")?;
+    if !services.contains_key(serde_yaml::Value::String(web_service.to_string())) {
+        bail!("compose file does not contain declared web service {web_service}");
+    }
+    for (name, raw_service) in services {
+        let Some(service_name) = name.as_str() else {
+            bail!("compose service names must be strings");
+        };
+        validate_service_name(service_name)?;
+        let service = raw_service
+            .as_mapping()
+            .context("compose services must be objects")?;
+        for key in [
+            "container_name",
+            "network_mode",
+            "privileged",
+            "pid",
+            "ipc",
+            "devices",
+            "ports",
+        ] {
+            if service.contains_key(serde_yaml::Value::String(key.to_string())) {
+                bail!("compose service {service_name} uses unsupported field {key}");
+            }
+        }
+        if let Some(volumes) = service
+            .get(serde_yaml::Value::String("volumes".into()))
+            .and_then(|v| v.as_sequence())
+        {
+            for volume in volumes {
+                if let Some(value) = volume.as_str() {
+                    if value.starts_with('/') || value.contains("../") {
+                        bail!("compose service {service_name} uses an unsupported host bind mount");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_file_path(value: &str) -> anyhow::Result<()> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 256
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.split('/').any(|part| part.is_empty() || part == "..")
+        || value.chars().any(|c| c.is_control() || c == '\\')
+    {
+        bail!("path must be a relative file path inside the repository");
+    }
+    Ok(())
+}
+
+fn validate_service_name(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 48
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || value.starts_with('-')
+        || value.ends_with('-')
+    {
+        bail!("compose service names must use lowercase letters, numbers, and hyphens");
+    }
+    Ok(())
+}
+
+fn valid_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+}
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -2044,6 +2502,86 @@ async fn remove_app_data_volume(app_id: Uuid) -> anyhow::Result<()> {
         &["No such volume"],
     )
     .await
+}
+
+async fn remove_compose_project_resources(project: &str) -> anyhow::Result<()> {
+    if !valid_compose_project_name(project) {
+        bail!("refusing to remove invalid compose project");
+    }
+    let containers = docker_names_by_label(
+        "ps",
+        &[
+            "-a",
+            "--filter",
+            &format!("label=com.docker.compose.project={project}"),
+        ],
+        "{{.Names}}",
+    )
+    .await?;
+    for container in containers {
+        if valid_container_name(&container) {
+            run_quiet_absent_ok("docker", &["rm", "-f", &container], &["No such container"])
+                .await?;
+        }
+    }
+    let volumes = docker_names_by_label(
+        "volume",
+        &[
+            "ls",
+            "--filter",
+            &format!("label=com.docker.compose.project={project}"),
+        ],
+        "{{.Name}}",
+    )
+    .await?;
+    for volume in volumes {
+        if valid_compose_volume_name(&volume) {
+            run_quiet_absent_ok(
+                "docker",
+                &["volume", "rm", "-f", &volume],
+                &["No such volume"],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn docker_names_by_label(
+    cmd: &str,
+    args: &[&str],
+    format: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut full = vec![cmd];
+    full.extend(args);
+    full.push("--format");
+    full.push(format);
+    let output = command_output("docker", &full, Duration::from_secs(30)).await?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn valid_compose_project_name(value: &str) -> bool {
+    value.starts_with("hostlet-app-")
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn valid_compose_volume_name(value: &str) -> bool {
+    value.starts_with("hostlet-app-")
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn validate_repo(value: &str) -> anyhow::Result<()> {
@@ -2212,5 +2750,46 @@ mod tests {
             redact(&format!("fatal: unable to access '{remote}'")),
             "fatal: unable to access 'https://[redacted]@github.com/owner/repo.git'"
         );
+    }
+
+    #[test]
+    fn compose_validation_accepts_private_services() {
+        let compose = r#"
+services:
+  web:
+    build: .
+    depends_on:
+      - redis
+  worker:
+    build: .
+    command: npm run worker
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+volumes:
+  redis-data:
+"#;
+        validate_compose_subset(compose, "web").unwrap();
+    }
+
+    #[test]
+    fn compose_validation_rejects_host_ports_and_bind_mounts() {
+        let ports = r#"
+services:
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+"#;
+        assert!(validate_compose_subset(ports, "web").is_err());
+        let bind_mount = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - /etc:/host-etc
+"#;
+        assert!(validate_compose_subset(bind_mount, "web").is_err());
     }
 }

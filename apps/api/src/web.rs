@@ -19,6 +19,8 @@ pub struct CreateApp {
     container_port: i32,
     health_path: String,
     domain: String,
+    runtime_kind: Option<String>,
+    hostlet_config_path: Option<String>,
     root_directory: Option<String>,
     install_command: Option<String>,
     build_command: Option<String>,
@@ -39,6 +41,8 @@ pub struct EnvVar {
 #[derive(Deserialize)]
 pub struct UpdateApp {
     domain: Option<String>,
+    runtime_kind: Option<String>,
+    hostlet_config_path: Option<String>,
     health_path: Option<String>,
     root_directory: Option<String>,
     install_command: Option<Option<String>>,
@@ -555,6 +559,8 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           a.domain,
           a.current_deployment_id,
           a.root_directory,
+          a.runtime_kind,
+          a.hostlet_config_path,
           a.install_command,
           a.build_command,
           a.start_command,
@@ -642,6 +648,8 @@ pub async fn get_app(
           a.domain,
           a.current_deployment_id,
           a.root_directory,
+          a.runtime_kind,
+          a.hostlet_config_path,
           a.install_command,
           a.build_command,
           a.start_command,
@@ -1292,6 +1300,14 @@ pub async fn create_app(
         )
             .into_response();
     }
+    let runtime_kind = match clean_runtime_kind(body.runtime_kind.as_deref()) {
+        Ok(value) => value,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    let hostlet_config_path = match clean_hostlet_config_path(body.hostlet_config_path.as_deref()) {
+        Ok(value) => value,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
     let server_id = match body.server_id {
         Some(id) => id,
         None => Uuid::parse_str(
@@ -1384,9 +1400,9 @@ pub async fn create_app(
             return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
         }
     }
-    let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id")
+    let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id")
         .bind(user_id).bind(server_id).bind(app_name).bind(repo_full_name).bind(branch).bind(body.container_port).bind(health_path).bind(&domain)
-        .bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
+        .bind(runtime_kind).bind(hostlet_config_path).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
         .bind(body.memory_limit_mb).bind(body.cpu_limit).bind(false).bind(auto_deploy)
         .fetch_one(&mut *tx).await;
     let Ok(row) = row else {
@@ -1550,6 +1566,20 @@ pub async fn update_app(
         }
         None => None,
     };
+    let runtime_kind = match body.runtime_kind.as_deref() {
+        Some(value) => Some(match clean_runtime_kind(Some(value)) {
+            Ok(value) => value,
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        }),
+        None => None,
+    };
+    let hostlet_config_path = match body.hostlet_config_path.as_deref() {
+        Some(value) => Some(match clean_hostlet_config_path(Some(value)) {
+            Ok(value) => value,
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        }),
+        None => None,
+    };
     let install_command = match body.install_command {
         Some(command) => Some(match command {
             Some(value) => match clean_command(Some(value)) {
@@ -1664,6 +1694,20 @@ pub async fn update_app(
         if let Some(root_directory) = root_directory {
             sqlx::query("UPDATE apps SET root_directory=$1, updated_at=now() WHERE id=$2")
                 .bind(root_directory)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(runtime_kind) = runtime_kind {
+            sqlx::query("UPDATE apps SET runtime_kind=$1, updated_at=now() WHERE id=$2")
+                .bind(runtime_kind)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(hostlet_config_path) = hostlet_config_path {
+            sqlx::query("UPDATE apps SET hostlet_config_path=$1, updated_at=now() WHERE id=$2")
+                .bind(hostlet_config_path)
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
@@ -2203,6 +2247,7 @@ pub async fn delete_app(
         "domain": domain,
         "user_id": user_id,
         "public_exposure": public_exposure,
+        "compose_project": format!("hostlet-app-{}", id.simple()),
         "containers": containers.clone(),
         "images": images,
     });
@@ -2449,6 +2494,8 @@ fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
     serde_json::json!({
         "id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("name"), "repoFullName": r.get::<String,_>("repo_full_name"),
         "branch": r.get::<String,_>("branch"), "domain": r.get::<String,_>("domain"), "currentDeploymentId": r.get::<Option<Uuid>,_>("current_deployment_id"),
+        "runtimeKind": r.try_get::<String,_>("runtime_kind").unwrap_or_else(|_| "single".into()),
+        "hostletConfigPath": r.try_get::<String,_>("hostlet_config_path").unwrap_or_else(|_| "hostlet.yml".into()),
         "rootDirectory": r.try_get::<String,_>("root_directory").unwrap_or_else(|_| ".".into()),
         "installCommand": r.try_get::<Option<String>,_>("install_command").unwrap_or(None),
         "buildCommand": r.try_get::<Option<String>,_>("build_command").unwrap_or(None),
@@ -2557,6 +2604,29 @@ fn clean_command(value: Option<String>) -> Result<Option<String>, &'static str> 
         return Err("commands cannot contain newlines, NUL bytes, or more than 500 characters");
     }
     Ok(Some(value))
+}
+
+fn clean_runtime_kind(value: Option<&str>) -> Result<String, &'static str> {
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("single");
+    match value {
+        "single" | "compose" => Ok(value.to_string()),
+        _ => Err("runtime kind must be single or compose"),
+    }
+}
+
+fn clean_hostlet_config_path(value: Option<&str>) -> Result<String, &'static str> {
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("hostlet.yml");
+    if valid_root_directory(value) && (value.ends_with(".yml") || value.ends_with(".yaml")) {
+        Ok(value.to_string())
+    } else {
+        Err("Hostlet config path must be a relative .yml or .yaml file")
+    }
 }
 
 fn app_slug(value: &str) -> String {

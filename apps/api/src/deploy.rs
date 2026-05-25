@@ -142,11 +142,12 @@ pub async fn create_and_send_deploy(
     commit_sha: &str,
 ) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
-    let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
+    let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
         .bind(app_id).bind(user_id).fetch_one(&state.db).await?;
     let server_id: Uuid = app.get("server_id");
-    let deployment_id: Uuid = match sqlx::query("INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at) VALUES ($1,$2,'queued',$3,now()) RETURNING id")
-        .bind(app_id).bind(server_id).bind(commit_sha).fetch_one(&state.db).await {
+    let runtime_kind = app.get::<String, _>("runtime_kind");
+    let deployment_id: Uuid = match sqlx::query("INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,runtime_kind) VALUES ($1,$2,'queued',$3,now(),$4) RETURNING id")
+        .bind(app_id).bind(server_id).bind(commit_sha).bind(&runtime_kind).fetch_one(&state.db).await {
             Ok(row) => row.get("id"),
             Err(err) if is_active_deploy_unique_violation(&err) => {
                 anyhow::bail!("an active deployment is already running for this app")
@@ -174,6 +175,8 @@ pub async fn create_and_send_deploy(
         "branch": app.get::<String,_>("branch"), "commit_sha": commit_sha,
         "container_port": app.get::<i32,_>("container_port"), "health_path": app.get::<String,_>("health_path"),
         "domain": app.get::<String,_>("domain"), "env": env,
+        "runtime_kind": runtime_kind,
+        "hostlet_config_path": app.get::<String,_>("hostlet_config_path"),
         "root_directory": app.get::<String,_>("root_directory"),
         "install_command": app.get::<Option<String>,_>("install_command"),
         "build_command": app.get::<Option<String>,_>("build_command"),

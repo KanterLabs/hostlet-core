@@ -1,6 +1,6 @@
 [package]
 name = "hostlet-api"
-version = "0.3.7"
+version = "0.3.8"
 edition.workspace = true
 
 [dependencies]
@@ -16,6 +16,7 @@ hmac.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true

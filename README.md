@@ -38,6 +38,7 @@
 | 🖥️ Web Dashboard (Next.js) | ✅ Ready |
 | 🦀 Rust API Control Plane | ✅ Ready |
 | 🐳 Docker-based Deployments | ✅ Ready |
+| 🧩 Docker Compose Multi-service Apps | ✅ Ready |
 | 🌐 Cloudflare Tunnel Support | ✅ Ready |
 | 🔄 Auto-redeploy on Git Push | ✅ Ready |
 | 🔐 GitHub OAuth Device Flow | ✅ Ready |
@@ -48,7 +49,15 @@
 | 🛡️ Caddy Reverse Proxy | ✅ Ready |
 | 💾 Backup & Restore Scripts | ✅ Ready |
 
-> Hostlet 0.2.0 is local-machine-only: the UI/API and deployed app containers run on the same host. Remote VPS agents are deferred.
+> Hostlet is local-machine-only: the UI/API and deployed app containers run on the same host. Remote VPS agents are deferred.
+
+## Supported App Shapes
+
+- **Dockerfile apps:** any language or framework that builds a container and serves HTTP on the configured port.
+- **Generated Node apps:** package.json projects using npm, pnpm, or yarn, including Next.js, Vite, Astro, Nuxt, Remix, SvelteKit, and generic Node.
+- **Compose apps:** one public web service plus private supporting services such as workers, Redis, Postgres, queues, or sidecars. Compose apps use a constrained `compose.yaml` plus `hostlet.yml`.
+
+Compose apps expose one public route. Named volumes persist across redeploys and rollbacks; Hostlet does not roll database or volume contents back.
 
 ## 🚀 Quick Start
 

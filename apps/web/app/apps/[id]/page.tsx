@@ -80,6 +80,8 @@ type App = {
   domain: string;
   containerPort?: number | null;
   healthPath?: string | null;
+  runtimeKind?: string | null;
+  hostletConfigPath?: string | null;
   rootDirectory?: string | null;
   installCommand?: string | null;
   buildCommand?: string | null;
@@ -110,6 +112,8 @@ type AgentJob = {
 type SettingsForm = {
   domain: string;
   health_path: string;
+  runtime_kind: string;
+  hostlet_config_path: string;
   root_directory: string;
   install_command: string;
   build_command: string;
@@ -124,6 +128,8 @@ type SettingsForm = {
 const emptySettings: SettingsForm = {
   domain: "",
   health_path: "/",
+  runtime_kind: "single",
+  hostlet_config_path: "hostlet.yml",
   root_directory: ".",
   install_command: "",
   build_command: "",
@@ -214,6 +220,8 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
       setSettings({
         domain: loaded.domain || "",
         health_path: loaded.healthPath || "/",
+        runtime_kind: loaded.runtimeKind || "single",
+        hostlet_config_path: loaded.hostletConfigPath || "hostlet.yml",
         root_directory: loaded.rootDirectory || ".",
         install_command: loaded.installCommand || "",
         build_command: loaded.buildCommand || "",
@@ -299,6 +307,8 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
         body: JSON.stringify({
           domain: settings.domain,
           health_path: settings.health_path,
+          runtime_kind: settings.runtime_kind,
+          hostlet_config_path: settings.hostlet_config_path || "hostlet.yml",
           root_directory: settings.root_directory || ".",
           install_command: settings.install_command.trim() || null,
           build_command: settings.build_command.trim() || null,
@@ -516,6 +526,11 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="Domain" value={settings.domain} onChange={(value) => setSettings({ ...settings, domain: value })} />
                   <Field label="Health path" value={settings.health_path} onChange={(value) => setSettings({ ...settings, health_path: value })} />
+                  <SelectField label="Runtime" value={settings.runtime_kind} onChange={(value) => setSettings({ ...settings, runtime_kind: value })}>
+                    <option value="single">Dockerfile or Node</option>
+                    <option value="compose">Docker Compose</option>
+                  </SelectField>
+                  {settings.runtime_kind === "compose" && <Field label="Hostlet config" value={settings.hostlet_config_path} onChange={(value) => setSettings({ ...settings, hostlet_config_path: value })} />}
                   <Field label="Root directory" value={settings.root_directory} onChange={(value) => setSettings({ ...settings, root_directory: value })} />
                   <Field label="Container port" type="number" value={settings.container_port} onChange={(value) => setSettings({ ...settings, container_port: value })} />
                   <Field label="Install command" value={settings.install_command} onChange={(value) => setSettings({ ...settings, install_command: value })} />
