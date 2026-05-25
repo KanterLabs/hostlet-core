@@ -18,6 +18,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -sf /usr/bin/unzip "$RUNNER_TEMP/bin/unzip"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: cargo build --release -p hostlet
       - run: |
           mkdir -p dist
