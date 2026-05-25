@@ -217,6 +217,7 @@ fn requires_browser_origin(method: &Method, path: &str) -> bool {
         &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
     ) && !path.starts_with("/api/agent/")
         && path != "/api/setup"
+        && path != "/api/system/operator-cleanup"
         && path != "/webhooks/github"
 }
 
