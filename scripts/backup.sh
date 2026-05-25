@@ -34,11 +34,10 @@ TXT
 
 if docker volume inspect "$AGENT_VOLUME" >/dev/null 2>&1; then
   docker run --rm \
-    --user "$(id -u):$(id -g)" \
     -v "$AGENT_VOLUME:/data:ro" \
     -v "$BACKUP_DIR:/backup" \
     alpine:3.22 \
-    tar -czf /backup/hostlet-agent-state.tar.gz -C /data .
+    sh -c "tar -czf /backup/hostlet-agent-state.tar.gz -C /data . && chown -R $(id -u):$(id -g) /backup"
 fi
 
 cat > "$BACKUP_DIR/manifest.txt" <<TXT
