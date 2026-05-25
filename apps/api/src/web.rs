@@ -7,10 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use std::{
-    collections::HashSet,
-    time::{Duration, Instant},
-};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -127,6 +124,379 @@ pub async fn audit_events(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     }
 }
+
+pub async fn backup_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(_user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let row = sqlx::query("SELECT value FROM settings WHERE key='latest_backup_metadata'")
+        .fetch_optional(&state.db)
+        .await;
+    match row {
+        Ok(Some(row)) => {
+            let value = row.get::<String, _>("value");
+            match serde_json::from_str::<serde_json::Value>(&value) {
+                Ok(value) => Json(value).into_response(),
+                Err(_) => StatusCode::NO_CONTENT.into_response(),
+            }
+        }
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load backup metadata");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn cleanup_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match cleanup_plan(&state, user_id).await {
+        Ok(plan) => Json(plan).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build cleanup preview");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn run_cleanup(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    run_cleanup_inner(&state, Some(user_id)).await
+}
+
+async fn run_cleanup_inner(state: &AppState, user_id: Option<Uuid>) -> axum::response::Response {
+    let plan = match cleanup_plan(state, user_id.unwrap_or_else(Uuid::nil)).await {
+        Ok(plan) => plan,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build cleanup plan");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let db_deleted = match apply_database_cleanup(state).await {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(error = %err, "database cleanup failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let job_id = if let Some(server_id) = plan.local_server_id {
+        match deploy::enqueue_agent_job(
+            state,
+            server_id,
+            None,
+            None,
+            "docker_cleanup",
+            serde_json::json!({
+                "type": "docker_cleanup",
+                "keep_containers": plan.keep_containers,
+                "keep_images": plan.keep_images,
+                "dry_run": false,
+            }),
+            50,
+        )
+        .await
+        {
+            Ok(job_id) => Some(job_id),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to enqueue Docker cleanup job");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    record_audit_event(
+        state,
+        AuditEventInput {
+            actor_type: user_id.map(|_| "owner").unwrap_or("cli"),
+            actor_id: user_id.map(|id| id.to_string()),
+            event_type: "cleanup_requested",
+            app_id: None,
+            deployment_id: None,
+            job_id,
+            metadata: serde_json::json!({"databaseDeleted": db_deleted}),
+        },
+    )
+    .await;
+    Json(serde_json::json!({
+        "databaseDeleted": db_deleted,
+        "dockerCleanupJobId": job_id,
+    }))
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct CleanupPlan {
+    retention: CleanupRetention,
+    database: CleanupDatabasePreview,
+    docker: CleanupDockerPreview,
+    #[serde(skip_serializing)]
+    local_server_id: Option<Uuid>,
+    #[serde(skip_serializing)]
+    keep_containers: Vec<String>,
+    #[serde(skip_serializing)]
+    keep_images: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CleanupRetention {
+    deployment_log_days: i64,
+    deployments_per_app: i64,
+    health_event_days: i64,
+    health_events_per_app: i64,
+    resource_snapshot_days: i64,
+    resource_snapshots_per_app: i64,
+    webhook_event_days: i64,
+    completed_agent_job_days: i64,
+    failed_agent_job_days: i64,
+}
+
+#[derive(Serialize)]
+struct CleanupDatabasePreview {
+    deployment_logs: i64,
+    health_events: i64,
+    resource_snapshots: i64,
+    webhook_events: i64,
+    completed_agent_jobs: i64,
+    failed_agent_jobs: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupDockerPreview {
+    keep_containers: usize,
+    keep_images: usize,
+    job_will_run: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupDatabaseDeleted {
+    deployment_logs: u64,
+    health_events: u64,
+    resource_snapshots: u64,
+    webhook_events: u64,
+    completed_agent_jobs: u64,
+    failed_agent_jobs: u64,
+}
+
+const RETENTION: CleanupRetention = CleanupRetention {
+    deployment_log_days: 30,
+    deployments_per_app: 20,
+    health_event_days: 7,
+    health_events_per_app: 500,
+    resource_snapshot_days: 7,
+    resource_snapshots_per_app: 1000,
+    webhook_event_days: 14,
+    completed_agent_job_days: 30,
+    failed_agent_job_days: 90,
+};
+
+async fn cleanup_plan(state: &AppState, _user_id: Uuid) -> anyhow::Result<CleanupPlan> {
+    let database = CleanupDatabasePreview {
+        deployment_logs: cleanup_count(state, CLEANUP_DEPLOYMENT_LOGS).await?,
+        health_events: cleanup_count(state, CLEANUP_HEALTH_EVENTS).await?,
+        resource_snapshots: cleanup_count(state, CLEANUP_RESOURCE_SNAPSHOTS).await?,
+        webhook_events: cleanup_count(state, CLEANUP_WEBHOOK_EVENTS).await?,
+        completed_agent_jobs: cleanup_count(state, CLEANUP_COMPLETED_AGENT_JOBS).await?,
+        failed_agent_jobs: cleanup_count(state, CLEANUP_FAILED_AGENT_JOBS).await?,
+    };
+    let keep_rows = sqlx::query(
+        r#"
+        WITH ranked AS (
+          SELECT d.container_name,
+                 d.image_tag,
+                 row_number() OVER (
+                   PARTITION BY d.app_id
+                   ORDER BY
+                     CASE WHEN a.current_deployment_id=d.id THEN 0 ELSE 1 END,
+                     d.finished_at DESC NULLS LAST,
+                     d.created_at DESC
+                 ) AS rn
+          FROM deployments d
+          JOIN apps a ON a.id=d.app_id
+          WHERE d.status IN ('success','rolled_back')
+        )
+        SELECT container_name,image_tag
+        FROM ranked
+        WHERE rn <= 2
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let mut keep_containers = keep_rows
+        .iter()
+        .filter_map(|row| row.get::<Option<String>, _>("container_name"))
+        .collect::<Vec<_>>();
+    keep_containers.sort();
+    keep_containers.dedup();
+    let mut keep_images = keep_rows
+        .iter()
+        .filter_map(|row| row.get::<Option<String>, _>("image_tag"))
+        .collect::<Vec<_>>();
+    keep_images.sort();
+    keep_images.dedup();
+    let local_server_id =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM servers WHERE kind='local' LIMIT 1")
+            .fetch_optional(&state.db)
+            .await?;
+    Ok(CleanupPlan {
+        retention: RETENTION,
+        database,
+        docker: CleanupDockerPreview {
+            keep_containers: keep_containers.len(),
+            keep_images: keep_images.len(),
+            job_will_run: local_server_id.is_some(),
+        },
+        local_server_id,
+        keep_containers,
+        keep_images,
+    })
+}
+
+async fn cleanup_count(state: &AppState, sql: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(sql).fetch_one(&state.db).await?)
+}
+
+async fn cleanup_delete(state: &AppState, sql: &str) -> anyhow::Result<u64> {
+    Ok(sqlx::query(sql).execute(&state.db).await?.rows_affected())
+}
+
+async fn apply_database_cleanup(state: &AppState) -> anyhow::Result<CleanupDatabaseDeleted> {
+    Ok(CleanupDatabaseDeleted {
+        deployment_logs: cleanup_delete(state, DELETE_DEPLOYMENT_LOGS).await?,
+        health_events: cleanup_delete(state, DELETE_HEALTH_EVENTS).await?,
+        resource_snapshots: cleanup_delete(state, DELETE_RESOURCE_SNAPSHOTS).await?,
+        webhook_events: cleanup_delete(state, DELETE_WEBHOOK_EVENTS).await?,
+        completed_agent_jobs: cleanup_delete(state, DELETE_COMPLETED_AGENT_JOBS).await?,
+        failed_agent_jobs: cleanup_delete(state, DELETE_FAILED_AGENT_JOBS).await?,
+    })
+}
+
+const CLEANUP_DEPLOYMENT_LOGS: &str = r#"
+SELECT count(*)::bigint
+FROM deployment_logs l
+JOIN deployments d ON d.id=l.deployment_id
+WHERE l.created_at < now() - interval '30 days'
+  AND d.id NOT IN (
+    SELECT id FROM (
+      SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
+      FROM deployments
+    ) ranked WHERE rn <= 20
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_jobs j
+    WHERE j.deployment_id=d.id AND j.status IN ('queued','claimed','running')
+  )
+"#;
+
+const DELETE_DEPLOYMENT_LOGS: &str = r#"
+DELETE FROM deployment_logs l
+USING deployments d
+WHERE d.id=l.deployment_id
+  AND l.created_at < now() - interval '30 days'
+  AND d.id NOT IN (
+    SELECT id FROM (
+      SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
+      FROM deployments
+    ) ranked WHERE rn <= 20
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_jobs j
+    WHERE j.deployment_id=d.id AND j.status IN ('queued','claimed','running')
+  )
+"#;
+
+const CLEANUP_HEALTH_EVENTS: &str = r#"
+SELECT count(*)::bigint
+FROM app_health_events e
+WHERE e.created_at < now() - interval '7 days'
+   OR e.id IN (
+      SELECT id FROM (
+        SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
+        FROM app_health_events
+      ) ranked WHERE rn > 500
+   )
+"#;
+
+const DELETE_HEALTH_EVENTS: &str = r#"
+DELETE FROM app_health_events e
+WHERE e.created_at < now() - interval '7 days'
+   OR e.id IN (
+      SELECT id FROM (
+        SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
+        FROM app_health_events
+      ) ranked WHERE rn > 500
+   )
+"#;
+
+const CLEANUP_RESOURCE_SNAPSHOTS: &str = r#"
+SELECT count(*)::bigint
+FROM app_resource_snapshots s
+WHERE s.sampled_at < now() - interval '7 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM deployments d
+    JOIN apps a ON a.current_deployment_id=d.id
+    WHERE d.container_name=s.container_name
+  )
+"#;
+
+const DELETE_RESOURCE_SNAPSHOTS: &str = r#"
+DELETE FROM app_resource_snapshots s
+WHERE s.sampled_at < now() - interval '7 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM deployments d
+    JOIN apps a ON a.current_deployment_id=d.id
+    WHERE d.container_name=s.container_name
+  )
+"#;
+
+const CLEANUP_WEBHOOK_EVENTS: &str = r#"
+SELECT count(*)::bigint
+FROM webhook_events e
+WHERE e.created_at < now() - interval '14 days'
+"#;
+
+const DELETE_WEBHOOK_EVENTS: &str = r#"
+DELETE FROM webhook_events e
+WHERE e.created_at < now() - interval '14 days'
+"#;
+
+const CLEANUP_COMPLETED_AGENT_JOBS: &str = r#"
+SELECT count(*)::bigint
+FROM agent_jobs j
+WHERE j.status IN ('success','cancelled')
+  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '30 days'
+"#;
+
+const DELETE_COMPLETED_AGENT_JOBS: &str = r#"
+DELETE FROM agent_jobs j
+WHERE j.status IN ('success','cancelled')
+  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '30 days'
+"#;
+
+const CLEANUP_FAILED_AGENT_JOBS: &str = r#"
+SELECT count(*)::bigint
+FROM agent_jobs j
+WHERE j.status IN ('failed','expired')
+  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '90 days'
+"#;
+
+const DELETE_FAILED_AGENT_JOBS: &str = r#"
+DELETE FROM agent_jobs j
+WHERE j.status IN ('failed','expired')
+  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '90 days'
+"#;
 
 struct AuditEventInput<'a> {
     actor_type: &'a str,
@@ -730,6 +1100,32 @@ pub async fn operator_status(
     .into_response()
 }
 
+pub async fn operator_cleanup_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !operator_token_valid(&state, &headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match cleanup_plan(&state, Uuid::nil()).await {
+        Ok(plan) => Json(plan).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build operator cleanup preview");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn operator_run_cleanup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !operator_token_valid(&state, &headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    run_cleanup_inner(&state, None).await
+}
+
 async fn operator_token_valid(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(token) = headers
         .get("x-hostlet-agent-token")
@@ -1037,6 +1433,39 @@ pub async fn create_app(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
+    record_audit_event(
+        &state,
+        AuditEventInput {
+            actor_type: "owner",
+            actor_id: Some(user_id.to_string()),
+            event_type: "app_created",
+            app_id: Some(app_id),
+            deployment_id: None,
+            job_id: None,
+            metadata: serde_json::json!({
+                "repo": repo_full_name,
+                "branch": branch,
+                "publicExposure": public_exposure,
+                "autoDeploy": auto_deploy,
+            }),
+        },
+    )
+    .await;
+    if public_exposure {
+        record_audit_event(
+            &state,
+            AuditEventInput {
+                actor_type: "owner",
+                actor_id: Some(user_id.to_string()),
+                event_type: "public_url_published",
+                app_id: Some(app_id),
+                deployment_id: None,
+                job_id: None,
+                metadata: serde_json::json!({"domain": domain}),
+            },
+        )
+        .await;
+    }
     Json(serde_json::json!({"id": app_id})).into_response()
 }
 
@@ -1185,6 +1614,7 @@ pub async fn update_app(
             return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
         }
     }
+    let env_replaced = body.env.is_some();
     if desired_public_exposure {
         if let Err(err) = ensure_cloudflare_app_dns(&state, id, &app_domain).await {
             tracing::warn!(
@@ -1328,6 +1758,43 @@ pub async fn update_app(
         .await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    record_audit_event(
+        &state,
+        AuditEventInput {
+            actor_type: "owner",
+            actor_id: Some(user_id.to_string()),
+            event_type: "app_updated",
+            app_id: Some(id),
+            deployment_id: None,
+            job_id: None,
+            metadata: serde_json::json!({
+                "domainChanged": domain_changed,
+                "publicExposureChanged": body.public_exposure.is_some(),
+                "autoDeployChanged": body.auto_deploy.is_some(),
+                "envReplaced": env_replaced,
+            }),
+        },
+    )
+    .await;
+    if body.public_exposure.is_some() && desired_public_exposure != old_public_exposure {
+        record_audit_event(
+            &state,
+            AuditEventInput {
+                actor_type: "owner",
+                actor_id: Some(user_id.to_string()),
+                event_type: if desired_public_exposure {
+                    "public_url_published"
+                } else {
+                    "public_url_made_private"
+                },
+                app_id: Some(id),
+                deployment_id: None,
+                job_id: None,
+                metadata: serde_json::json!({"domain": app_domain}),
+            },
+        )
+        .await;
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1384,12 +1851,27 @@ pub async fn set_app_env_var(
          ON CONFLICT (app_id,key) DO UPDATE SET value_ciphertext=EXCLUDED.value_ciphertext, updated_at=now()",
     )
     .bind(id)
-    .bind(key)
+    .bind(&key)
     .bind(enc)
     .execute(&state.db)
     .await;
     match res {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            record_audit_event(
+                &state,
+                AuditEventInput {
+                    actor_type: "owner",
+                    actor_id: Some(user_id.to_string()),
+                    event_type: "app_env_var_changed",
+                    app_id: Some(id),
+                    deployment_id: None,
+                    job_id: None,
+                    metadata: serde_json::json!({"key": key}),
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -1410,11 +1892,26 @@ pub async fn delete_app_env_var(
     }
     let res = sqlx::query("DELETE FROM app_env_vars WHERE app_id=$1 AND key=$2")
         .bind(id)
-        .bind(key)
+        .bind(&key)
         .execute(&state.db)
         .await;
     match res {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            record_audit_event(
+                &state,
+                AuditEventInput {
+                    actor_type: "owner",
+                    actor_id: Some(user_id.to_string()),
+                    event_type: "app_env_var_deleted",
+                    app_id: Some(id),
+                    deployment_id: None,
+                    job_id: None,
+                    metadata: serde_json::json!({"key": key}),
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -1441,10 +1938,20 @@ pub async fn agent_job_status(
     .await;
     match row {
         Ok(Some(row)) => {
+            let mut finalized_delete = false;
+            if row.get::<String, _>("status") == "success"
+                && row.get::<String, _>("job_type") == "delete_app"
+                && row.get::<Option<Uuid>, _>("app_id").is_some()
+            {
+                finalized_delete = finalize_delete_app_from_job(&state, id)
+                    .await
+                    .unwrap_or(false);
+            }
             let mut status = row.get::<String, _>("status");
             if status == "success"
                 && row.get::<String, _>("job_type") == "delete_app"
                 && row.get::<Option<Uuid>, _>("app_id").is_some()
+                && !finalized_delete
             {
                 status = "running".into();
             }
@@ -1694,6 +2201,8 @@ pub async fn delete_app(
         "app_id": id,
         "route_key": format!("app-{id}"),
         "domain": domain,
+        "user_id": user_id,
+        "public_exposure": public_exposure,
         "containers": containers.clone(),
         "images": images,
     });
@@ -1727,19 +2236,6 @@ pub async fn delete_app(
         },
     )
     .await;
-    let finalize_state = state.clone();
-    tokio::spawn(async move {
-        finalize_delete_app(
-            finalize_state,
-            id,
-            user_id,
-            job_id,
-            containers,
-            domain,
-            public_exposure,
-        )
-        .await;
-    });
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({"jobId": job_id})),
@@ -1747,51 +2243,103 @@ pub async fn delete_app(
         .into_response()
 }
 
-async fn finalize_delete_app(
-    state: AppState,
-    app_id: Uuid,
-    user_id: Uuid,
-    job_id: Uuid,
-    containers: Vec<String>,
-    domain: String,
-    public_exposure: bool,
-) {
-    if let Err(err) = wait_for_agent_job(&state, job_id, Duration::from_secs(120)).await {
-        tracing::warn!(error = %err, app_id = %app_id, "delete app agent job did not complete");
-        mark_agent_job_failed(&state, job_id, &err.to_string()).await;
-        return;
+async fn finalize_delete_app_from_job(state: &AppState, job_id: Uuid) -> anyhow::Result<bool> {
+    let row = sqlx::query(
+        "SELECT app_id,payload_json FROM agent_jobs WHERE id=$1 AND job_type='delete_app' AND status='success'",
+    )
+    .bind(job_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let Some(app_id) = row.get::<Option<Uuid>, _>("app_id") else {
+        return Ok(false);
+    };
+    let payload = row
+        .get::<Option<serde_json::Value>, _>("payload_json")
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut user_id = payload
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok());
+    if user_id.is_none() {
+        user_id = sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM apps WHERE id=$1")
+            .bind(app_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
     }
+    let Some(user_id) = user_id else {
+        return Ok(false);
+    };
+    let domain = payload
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let public_exposure = payload
+        .get("public_exposure")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let containers = payload
+        .get("containers")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     if public_exposure {
-        if let Err(err) = delete_cloudflare_app_dns(&state, app_id, &domain).await {
+        if let Err(err) = delete_cloudflare_app_dns(state, app_id, &domain).await {
             tracing::warn!(error = %err, domain = %domain, "failed to remove public tunnel DNS while deleting app");
-            mark_agent_job_failed(&state, job_id, &err.to_string()).await;
-            return;
+            mark_agent_job_failed(state, job_id, &err.to_string()).await;
+            return Err(err);
         }
     }
-    match delete_app_records(&state, app_id, user_id, &containers).await {
+    match delete_app_records(state, app_id, user_id, &containers).await {
         Ok(true) => {
-            mark_agent_job_success(&state, job_id).await;
+            record_audit_event(
+                state,
+                AuditEventInput {
+                    actor_type: "system",
+                    actor_id: None,
+                    event_type: "app_deleted",
+                    app_id: Some(app_id),
+                    deployment_id: None,
+                    job_id: Some(job_id),
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+            Ok(true)
         }
         Ok(false) => {
-            mark_agent_job_failed(&state, job_id, "app disappeared before deletion completed")
-                .await;
+            mark_agent_job_failed(state, job_id, "app disappeared before deletion completed").await;
+            Ok(false)
         }
         Err(err) => {
             tracing::warn!(error = %err, app_id = %app_id, "failed to delete app records after cleanup");
-            mark_agent_job_failed(&state, job_id, &err.to_string()).await;
+            mark_agent_job_failed(state, job_id, &err.to_string()).await;
+            Err(err)
         }
     }
 }
 
-async fn mark_agent_job_success(state: &AppState, job_id: Uuid) {
-    let _ = sqlx::query(
-        "UPDATE agent_jobs
-         SET status='success', failure_summary=NULL, updated_at=now(), finished_at=now()
-         WHERE id=$1",
+pub async fn reconcile_completed_delete_jobs(state: &AppState) -> anyhow::Result<u64> {
+    let rows = sqlx::query(
+        "SELECT id FROM agent_jobs WHERE job_type='delete_app' AND status='success' AND app_id IS NOT NULL",
     )
-    .bind(job_id)
-    .execute(&state.db)
-    .await;
+    .fetch_all(&state.db)
+    .await?;
+    let mut finalized = 0;
+    for row in rows {
+        if finalize_delete_app_from_job(state, row.get::<Uuid, _>("id")).await? {
+            finalized += 1;
+        }
+    }
+    Ok(finalized)
 }
 
 async fn delete_app_records(
@@ -1895,39 +2443,6 @@ async fn mark_agent_job_failed(state: &AppState, job_id: Uuid, failure: &str) {
     .bind(failure)
     .execute(&state.db)
     .await;
-}
-
-async fn wait_for_agent_job(
-    state: &AppState,
-    job_id: Uuid,
-    timeout: Duration,
-) -> anyhow::Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let row = sqlx::query("SELECT status,failure_summary FROM agent_jobs WHERE id=$1")
-            .bind(job_id)
-            .fetch_optional(&state.db)
-            .await?;
-        let Some(row) = row else {
-            anyhow::bail!("agent job disappeared before completion");
-        };
-        match row.get::<String, _>("status").as_str() {
-            "success" => return Ok(()),
-            "failed" => {
-                let failure = row
-                    .get::<Option<String>, _>("failure_summary")
-                    .unwrap_or_else(|| "agent reported cleanup failure".into());
-                anyhow::bail!("{failure}");
-            }
-            _ if Instant::now() >= deadline => {
-                anyhow::bail!(
-                    "server agent did not confirm cleanup within {} seconds",
-                    timeout.as_secs()
-                );
-            }
-            _ => tokio::time::sleep(Duration::from_millis(300)).await,
-        }
-    }
 }
 
 fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {

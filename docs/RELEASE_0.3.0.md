@@ -19,7 +19,6 @@ Hostlet 0.3.0 starts the operations-hardening track described in `PLAN_0.3.0`.
 
 ## Known Limits
 
-- Delete-app finalization still has API-side orchestration after durable agent cleanup completes.
-- Operations UI, retry/cancel controls, cleanup dry-run, Docker cleanup jobs, backup scheduling metadata, and clean-machine restore validation are still pending.
+- Cleanup is owner-triggered; no background cleanup timer is enabled by default.
 - Signed checksum verification is not yet enforced by the CLI; unsigned checksum verification remains supported.
 - Remote VPS agents remain disabled.

@@ -5,7 +5,7 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
@@ -251,6 +251,7 @@ async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
             restart_container_job(&cfg, &payload).await?;
             Ok(())
         }
+        Some("docker_cleanup") => docker_cleanup_job(&payload).await,
         _ => Ok(()),
     }
 }
@@ -674,6 +675,41 @@ async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
     run_quiet("caddy", &["reload", "--config", "/etc/caddy/Caddyfile"]).await?;
     if let Some(app_id) = app_id {
         remove_app_data_volume(app_id).await?;
+    }
+    Ok(())
+}
+
+async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
+    let dry_run = p.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+    let keep_containers = string_set_from_array(p.get("keep_containers"));
+    let keep_images = string_set_from_array(p.get("keep_images"));
+
+    let containers = hostlet_containers_all().await?;
+    for container in containers {
+        if keep_containers.contains(&container) {
+            continue;
+        }
+        if !valid_container_name(&container) {
+            bail!("refusing to clean invalid managed container name");
+        }
+        if !dry_run {
+            run_quiet_absent_ok("docker", &["rm", "-f", &container], &["No such container"])
+                .await?;
+        }
+    }
+
+    let images = hostlet_images().await?;
+    for image in images {
+        if keep_images.contains(&image) {
+            continue;
+        }
+        if !valid_hostlet_image(&image) {
+            bail!("refusing to clean invalid managed image name");
+        }
+        if !dry_run {
+            run_quiet_absent_ok("docker", &["image", "rm", "-f", &image], &["No such image"])
+                .await?;
+        }
     }
     Ok(())
 }
@@ -1677,6 +1713,66 @@ async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
         .filter(|name| valid_container_name(name))
         .map(str::to_string)
         .collect())
+}
+
+async fn hostlet_containers_all() -> anyhow::Result<Vec<String>> {
+    let output = command_output(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            "name=^/hostlet-",
+            "--format",
+            "{{.Names}}",
+        ],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|name| valid_container_name(name))
+        .map(str::to_string)
+        .collect())
+}
+
+async fn hostlet_images() -> anyhow::Result<Vec<String>> {
+    let output = command_output(
+        "docker",
+        &[
+            "images",
+            "hostlet/*",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|name| valid_hostlet_image(name))
+        .map(str::to_string)
+        .collect())
+}
+
+fn string_set_from_array(value: Option<&Value>) -> HashSet<String> {
+    value
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 async fn command_output(bin: &str, args: &[&str], timeout: Duration) -> anyhow::Result<Output> {

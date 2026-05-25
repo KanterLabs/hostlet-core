@@ -183,6 +183,15 @@ pub async fn create_and_send_deploy(
         "github_token": github_token
     });
     send_job(state, server_id, deployment_id, payload).await?;
+    record_audit_event(
+        state,
+        "deployment_requested",
+        user_id,
+        app_id,
+        Some(deployment_id),
+        None,
+    )
+    .await;
     Ok(deployment_id)
 }
 
@@ -217,6 +226,15 @@ async fn create_and_send_rollback(
         .bind(app_id).bind(current).bind(prev.get::<Uuid,_>("id")).execute(&state.db).await?;
     let payload = json!({"type":"rollback","deployment_id": rollback_id, "app_id": app_id, "route_key": route_key(app_id), "target_deployment_id": prev.get::<Uuid,_>("id"), "target_container": prev.get::<Option<String>,_>("container_name"), "domain": app.get::<String,_>("domain"), "container_port": app.get::<i32,_>("container_port"), "published_port": published_port});
     send_job(state, server_id, rollback_id, payload).await?;
+    record_audit_event(
+        state,
+        "rollback_requested",
+        user_id,
+        app_id,
+        Some(rollback_id),
+        None,
+    )
+    .await;
     Ok(rollback_id)
 }
 
@@ -235,7 +253,7 @@ async fn send_job(
         .get("app_id")
         .and_then(|value| value.as_str())
         .and_then(|value| Uuid::parse_str(value).ok());
-    enqueue_agent_job(
+    let job_id = enqueue_agent_job(
         state,
         server_id,
         app_id,
@@ -245,11 +263,44 @@ async fn send_job(
         10,
     )
     .await?;
+    if let Some(app_id) = app_id {
+        record_audit_event(
+            state,
+            &format!("{job_type}_job_queued"),
+            Uuid::nil(),
+            app_id,
+            Some(deployment_id),
+            Some(job_id),
+        )
+        .await;
+    }
     sqlx::query("UPDATE deployments SET status='running' WHERE id=$1")
         .bind(deployment_id)
         .execute(&state.db)
         .await?;
     Ok(())
+}
+
+async fn record_audit_event(
+    state: &AppState,
+    event_type: &str,
+    actor_id: Uuid,
+    app_id: Uuid,
+    deployment_id: Option<Uuid>,
+    job_id: Option<Uuid>,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO audit_events
+           (actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
+         VALUES ('owner',$1,$2,$3,$4,$5,'{}'::jsonb)",
+    )
+    .bind(actor_id.to_string())
+    .bind(event_type)
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(job_id)
+    .execute(&state.db)
+    .await;
 }
 
 pub async fn enqueue_agent_job(

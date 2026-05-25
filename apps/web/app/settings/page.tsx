@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import { Cloud, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck } from "lucide-react";
+import { Cloud, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, DataList, DataRow, IconFrame, PageHeader, Panel, StatusPill } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
@@ -40,11 +40,47 @@ type UpdatePayload = {
   checkedAt?: string;
 };
 
+type AgentJob = {
+  id: string;
+  type: string;
+  status: string;
+  failure?: string | null;
+  attempt: number;
+  maxAttempts: number;
+  createdAt: string;
+  finishedAt?: string | null;
+};
+
+type AuditEvent = {
+  id: string;
+  eventType: string;
+  actorType: string;
+  appId?: string | null;
+  jobId?: string | null;
+  createdAt: string;
+};
+
+type CleanupPlan = {
+  database: Record<string, number>;
+  docker: { keepContainers: number; keepImages: number; jobWillRun: boolean };
+};
+
+type BackupMetadata = {
+  created_at?: string;
+  path?: string;
+  scheduled?: string;
+};
+
 export default function Settings() {
   const [github, setGithub] = useState<StatusPayload | null>(null);
   const [cloudflare, setCloudflare] = useState<StatusPayload | null>(null);
   const [version, setVersion] = useState<VersionPayload | null>(null);
+  const [jobs, setJobs] = useState<AgentJob[]>([]);
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [cleanup, setCleanup] = useState<CleanupPlan | null>(null);
+  const [backup, setBackup] = useState<BackupMetadata | null>(null);
   const [updateMessage, setUpdateMessage] = useState("");
+  const [operationsMessage, setOperationsMessage] = useState("");
 
   useEffect(() => {
     refresh();
@@ -60,6 +96,10 @@ export default function Settings() {
     api<StatusPayload>("/api/github/status").then(setGithub).catch((error) => setGithub({ message: error instanceof Error ? error.message : "Could not load GitHub status." }));
     api<StatusPayload>("/api/cloudflare/status").then(setCloudflare).catch((error) => setCloudflare({ message: error instanceof Error ? error.message : "Could not load Cloudflare status." }));
     api<VersionPayload>("/api/system/version").then(setVersion).catch(() => setVersion(null));
+    api<AgentJob[]>("/api/agent-jobs").then(setJobs).catch(() => setJobs([]));
+    api<AuditEvent[]>("/api/audit-events").then(setAudit).catch(() => setAudit([]));
+    api<CleanupPlan>("/api/system/cleanup").then(setCleanup).catch(() => setCleanup(null));
+    api<BackupMetadata | undefined>("/api/system/backups/latest").then((value) => setBackup(value || null)).catch(() => setBackup(null));
   }
 
   async function checkForUpdates() {
@@ -71,6 +111,27 @@ export default function Settings() {
     } catch (error) {
       setUpdateMessage(error instanceof Error ? error.message : "Could not check for updates.");
     }
+  }
+
+  async function runCleanup() {
+    setOperationsMessage("Cleanup requested...");
+    try {
+      await api("/api/system/cleanup", { method: "POST", body: "{}" });
+      setOperationsMessage("Cleanup started. Docker cleanup will appear as an agent job.");
+      refresh();
+    } catch (error) {
+      setOperationsMessage(error instanceof Error ? error.message : "Cleanup failed.");
+    }
+  }
+
+  async function retryJob(id: string) {
+    await api(`/api/agent-jobs/${id}/retry`, { method: "POST", body: "{}" });
+    refresh();
+  }
+
+  async function cancelJob(id: string) {
+    await api(`/api/agent-jobs/${id}/cancel`, { method: "POST", body: "{}" });
+    refresh();
   }
 
   return (
@@ -131,6 +192,7 @@ export default function Settings() {
               <DataRow label="Migrations" value={updateMigrationSummary(version?.update)} />
               <DataRow label="Last checked" value={version?.update?.checkedAt ? new Date(version.update.checkedAt).toLocaleString() : "not checked"} />
               <DataRow label="Update command" value="hostlet update" />
+              <DataRow label="Latest backup" value={backup?.created_at ? `${formatBackupDate(backup.created_at)}${backup.scheduled === "true" ? " (scheduled)" : ""}` : "not recorded"} />
             </DataList>
             <div className="mt-4 flex flex-wrap gap-2">
               <button className="button-secondary" onClick={checkForUpdates} disabled={version?.updateChecksEnabled === false}>
@@ -153,8 +215,73 @@ export default function Settings() {
             <Info icon={KeyRound} title="Secrets" value="Encrypted app env vars" />
             <Info icon={Link2} title="App exposure" value="Private by default, public under base domain" />
           </section>
+
+          <Panel className="mt-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <IconFrame icon={Trash2} />
+                <div>
+                  <h2 className="font-semibold">Cleanup and operations</h2>
+                  <p className="muted mt-1">Preview retention counts, start cleanup, and recover recent durable jobs.</p>
+                </div>
+              </div>
+              <button className="button-secondary" onClick={runCleanup}><Trash2 size={16} />Run cleanup</button>
+            </div>
+            <DataList className="mt-5">
+              <DataRow label="Database cleanup" value={cleanup ? cleanupSummary(cleanup.database) : "loading"} />
+              <DataRow label="Docker keep set" value={cleanup ? `${cleanup.docker.keepContainers} containers, ${cleanup.docker.keepImages} images` : "loading"} />
+              <DataRow label="Docker cleanup job" value={cleanup?.docker.jobWillRun ? "available" : "not available"} />
+            </DataList>
+            {operationsMessage && <p className="muted mt-3">{operationsMessage}</p>}
+
+            <div className="mt-6 grid gap-4 lg:grid-cols-2">
+              <div>
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">Recent jobs</h3>
+                <div className="mt-3 grid gap-2">
+                  {jobs.slice(0, 8).map((job) => (
+                    <div key={job.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium">{job.type}</div>
+                        <div className="muted text-sm">{new Date(job.createdAt).toLocaleString()} · attempt {job.attempt}/{job.maxAttempts}</div>
+                        {job.failure && <div className="text-sm text-red-700">{job.failure}</div>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <StatusPill status={job.status} />
+                        {["failed", "expired", "cancelled"].includes(job.status) && <button className="button-secondary compact" onClick={() => retryJob(job.id)}>Retry</button>}
+                        {job.status === "queued" && <button className="button-secondary compact" onClick={() => cancelJob(job.id)}>Cancel</button>}
+                      </div>
+                    </div>
+                  ))}
+                  {!jobs.length && <p className="muted">No agent jobs yet.</p>}
+                </div>
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">Audit trail</h3>
+                <div className="mt-3 grid gap-2">
+                  {audit.slice(0, 8).map((event) => (
+                    <div key={event.id} className="border-b border-line pb-2">
+                      <div className="font-medium">{event.eventType}</div>
+                      <div className="muted text-sm">{event.actorType} · {new Date(event.createdAt).toLocaleString()}</div>
+                    </div>
+                  ))}
+                  {!audit.length && <p className="muted">No audit events yet.</p>}
+                </div>
+              </div>
+            </div>
+          </Panel>
     </AppShell>
   );
+}
+
+function cleanupSummary(values: Record<string, number>) {
+  const total = Object.values(values).reduce((sum, value) => sum + value, 0);
+  return total ? `${total} old records` : "nothing eligible";
+}
+
+function formatBackupDate(value: string) {
+  const isoLike = value.replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, "$1-$2-$3T$4:$5:$6Z");
+  const date = new Date(isoLike);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
 function updateMigrationSummary(update?: UpdatePayload | null) {

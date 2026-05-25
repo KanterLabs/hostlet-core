@@ -43,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
     if recovered_jobs > 0 {
         tracing::warn!(recovered_jobs, "reconciled stale agent jobs");
     }
+    let finalized_deletes = web::reconcile_completed_delete_jobs(&state).await?;
+    if finalized_deletes > 0 {
+        tracing::warn!(finalized_deletes, "finalized completed delete jobs");
+    }
     if state.update_checks_enabled {
         let update_state = state.clone();
         tokio::spawn(async move {
@@ -83,8 +87,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/github/repos", get(github::repos))
         .route("/api/cloudflare/status", get(web::cloudflare_status))
         .route("/api/system/version", get(web::system_version))
+        .route("/api/system/backups/latest", get(web::backup_metadata))
         .route("/api/system/update-check", post(web::system_update_check))
         .route("/api/system/operator-status", get(web::operator_status))
+        .route(
+            "/api/system/operator-cleanup",
+            get(web::operator_cleanup_preview).post(web::operator_run_cleanup),
+        )
+        .route(
+            "/api/system/cleanup",
+            get(web::cleanup_preview).post(web::run_cleanup),
+        )
         .route("/api/audit-events", get(web::audit_events))
         .route(
             "/api/servers",

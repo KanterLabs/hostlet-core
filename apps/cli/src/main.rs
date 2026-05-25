@@ -60,6 +60,12 @@ enum Commands {
     },
     Version,
     Status,
+    Cleanup {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
     Update {
         #[arg(long)]
         dry_run: bool,
@@ -92,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Restore { backup_dir } => restore(&root, &backup_dir),
         Commands::Version => version(),
         Commands::Status => status(&root).await,
+        Commands::Cleanup { dry_run, yes } => cleanup(&root, dry_run, yes).await,
         Commands::Update {
             dry_run,
             yes,
@@ -605,11 +612,49 @@ fn backup(root: &Path, output: Option<PathBuf>, scheduled: bool) -> anyhow::Resu
     if !status.success() {
         bail!("backup failed with {status}");
     }
+    record_latest_backup_metadata(root).ok();
+    Ok(())
+}
+
+fn record_latest_backup_metadata(root: &Path) -> anyhow::Result<()> {
+    let metadata_path = root.join("backups/latest.json");
+    if !metadata_path.is_file() {
+        return Ok(());
+    }
+    let metadata = fs::read_to_string(metadata_path)?;
+    let sql = format!(
+        "INSERT INTO settings (key,value,updated_at) VALUES ('latest_backup_metadata','{}',now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now();",
+        metadata.replace('\'', "''")
+    );
+    let env = read_env_file(&root.join(".env")).unwrap_or_default();
+    let user = env
+        .get("POSTGRES_USER")
+        .cloned()
+        .unwrap_or_else(|| "hostlet".into());
+    let db = env
+        .get("POSTGRES_DB")
+        .cloned()
+        .unwrap_or_else(|| "hostlet".into());
+    let mut args = compose_args(false);
+    args.extend([
+        "exec".into(),
+        "-T".into(),
+        "postgres".into(),
+        "psql".into(),
+        "-U".into(),
+        user,
+        "-d".into(),
+        db,
+        "-c".into(),
+        sql,
+    ]);
+    let _ = Command::new("docker").current_dir(root).args(args).status();
     Ok(())
 }
 
 fn restore(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
+    restore_preflight(root, backup_dir)?;
     if !Confirm::new()
         .with_prompt("Restore replaces the current Hostlet database. Continue?")
         .default(false)
@@ -626,6 +671,28 @@ fn restore(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
         .status()?;
     if !status.success() {
         bail!("restore failed with {status}");
+    }
+    Ok(())
+}
+
+fn restore_preflight(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
+    if !backup_dir.is_dir() {
+        bail!("backup directory does not exist: {}", backup_dir.display());
+    }
+    if !backup_dir.join("postgres.sql").is_file() {
+        bail!("backup is missing postgres.sql");
+    }
+    if !root.join(".env").is_file() {
+        bail!("restore requires .env with the original Hostlet secrets");
+    }
+    if !command_ok("docker", &["version"]) {
+        bail!("Docker is not available");
+    }
+    if !command_ok("docker", &["compose", "version"]) {
+        bail!("Docker Compose is not available");
+    }
+    if !disk_space_ok(root) {
+        bail!("less than 1 GiB free; refusing restore");
     }
     Ok(())
 }
@@ -650,6 +717,9 @@ async fn status(root: &Path) -> anyhow::Result<()> {
     );
     if let Some(backup) = latest_backup(root) {
         println!("Latest backup              {}", backup.display());
+        if let Some(age) = latest_backup_age(root) {
+            println!("Latest backup age          {age}");
+        }
     } else {
         println!("Latest backup              none");
     }
@@ -672,6 +742,59 @@ async fn status(root: &Path) -> anyhow::Result<()> {
         Err(_) => println!("Update available          unknown"),
     }
     Ok(())
+}
+
+async fn cleanup(root: &Path, dry_run: bool, yes: bool) -> anyhow::Result<()> {
+    ensure_repo_root(root)?;
+    let env = read_env_file(&root.join(".env")).unwrap_or_default();
+    let (api_url, token) = operator_api_and_token(&env)?;
+    let client = http_client()?;
+    let preview: Value = client
+        .get(format!("{}/api/system/operator-cleanup", api_url))
+        .header("x-hostlet-agent-token", &token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&preview)?);
+    if dry_run {
+        return Ok(());
+    }
+    if !yes
+        && !Confirm::new()
+            .with_prompt("Run cleanup now?")
+            .default(false)
+            .interact()?
+    {
+        bail!("cleanup canceled");
+    }
+    let result: Value = client
+        .post(format!("{}/api/system/operator-cleanup", api_url))
+        .header("x-hostlet-agent-token", &token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn operator_api_and_token(env: &BTreeMap<String, String>) -> anyhow::Result<(String, String)> {
+    let api_url = env
+        .get("PUBLIC_API_URL")
+        .cloned()
+        .or_else(|| env.get("HOSTLET_API_URL").cloned())
+        .unwrap_or_else(|| "http://127.0.0.1:8080".into())
+        .trim_end_matches('/')
+        .to_string();
+    let token = env
+        .get("LOCAL_AGENT_TOKEN")
+        .cloned()
+        .context("LOCAL_AGENT_TOKEN is required for operator cleanup")?;
+    Ok((api_url, token))
 }
 
 async fn print_operator_status(client: &reqwest::Client, env: &BTreeMap<String, String>) {
@@ -1243,6 +1366,24 @@ fn latest_backup(root: &Path) -> Option<PathBuf> {
         .collect::<Vec<_>>();
     entries.sort_by_key(|(modified, _)| *modified);
     entries.pop().map(|(_, path)| path)
+}
+
+fn latest_backup_age(root: &Path) -> Option<String> {
+    let backup = latest_backup(root)?;
+    let modified = backup.metadata().ok()?.modified().ok()?;
+    let elapsed = modified.elapsed().ok()?;
+    Some(format_duration(elapsed))
+}
+
+fn format_duration(duration: Duration) -> String {
+    let hours = duration.as_secs() / 3600;
+    if hours >= 48 {
+        format!("{} days", hours / 24)
+    } else if hours >= 1 {
+        format!("{hours} hours")
+    } else {
+        format!("{} minutes", duration.as_secs() / 60)
+    }
 }
 
 fn check(label: &str, ok: bool) {

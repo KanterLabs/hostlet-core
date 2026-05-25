@@ -49,4 +49,16 @@ agent_volume=$AGENT_VOLUME
 scheduled=$SCHEDULED
 TXT
 
+cat > "$BACKUP_ROOT/latest.json" <<TXT
+{
+  "created_at": "$STAMP",
+  "path": "$BACKUP_DIR",
+  "compose_file": "$COMPOSE_FILE",
+  "postgres_db": "$POSTGRES_DB",
+  "postgres_user": "$POSTGRES_USER",
+  "agent_volume": "$AGENT_VOLUME",
+  "scheduled": "$SCHEDULED"
+}
+TXT
+
 echo "Backup written to $BACKUP_DIR"
