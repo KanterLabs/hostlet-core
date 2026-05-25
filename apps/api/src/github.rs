@@ -393,7 +393,7 @@ fn parse_github_repo(input: &str) -> Option<String> {
     let trimmed = input.trim().trim_end_matches(".git");
     if let Some(caps) = trimmed
         .strip_prefix("git@github.com:")
-        .and_then(|value| parse_owner_repo(value))
+        .and_then(parse_owner_repo)
     {
         return Some(caps);
     }

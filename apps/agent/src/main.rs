@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         local_router: local_router_config()?,
     };
     tokio::fs::create_dir_all(&cfg.workdir).await?;
+    log_docker_tooling().await;
     loop {
         if let Err(err) = connect_loop(cfg.clone()).await {
             tracing::warn!("agent disconnected: {err}");
@@ -586,6 +587,7 @@ struct HostletComposeManifest {
     health_path: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deploy_compose(
     cfg: Config,
     p: Value,
@@ -598,6 +600,7 @@ async fn deploy_compose(
     domain: &str,
     fallback_health_path: &str,
 ) -> anyhow::Result<()> {
+    ensure_docker_compose().await?;
     let generated_compose = p
         .pointer("/runtime_config/generatedCompose")
         .and_then(|v| v.as_object());
@@ -2135,6 +2138,53 @@ async fn command_output(bin: &str, args: &[&str], timeout: Duration) -> anyhow::
         Ok(output) => output.with_context(|| format!("failed to start {bin}")),
         Err(_) => bail!("{bin} timed out after {} seconds", timeout.as_secs()),
     }
+}
+
+async fn log_docker_tooling() {
+    match command_output("docker", &["version"], Duration::from_secs(10)).await {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            tracing::info!(docker = %version.lines().next().unwrap_or("available"), "Docker CLI available");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(error = %stderr.trim(), "Docker CLI check failed");
+        }
+        Err(err) => tracing::warn!(error = %err, "Docker CLI is not available"),
+    }
+    match command_output("docker", &["compose", "version"], Duration::from_secs(10)).await {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            tracing::info!(compose = %version.trim(), "Docker Compose v2 available");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                error = %stderr.trim(),
+                "Docker Compose v2 is missing; Compose apps require the docker-compose CLI plugin"
+            );
+        }
+        Err(err) => tracing::warn!(
+            error = %err,
+            "Docker Compose v2 is missing; Compose apps require the docker-compose CLI plugin"
+        ),
+    }
+}
+
+async fn ensure_docker_compose() -> anyhow::Result<()> {
+    let output = command_output("docker", &["compose", "version"], Duration::from_secs(10)).await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    bail!(
+        "Docker Compose v2 is required for Compose apps; install or mount the docker-compose CLI plugin. {}",
+        combined.trim()
+    );
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
