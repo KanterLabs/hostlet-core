@@ -689,6 +689,9 @@ async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
         if keep_containers.contains(&container) {
             continue;
         }
+        if docker_compose_managed_container(&container).await? {
+            continue;
+        }
         if !valid_container_name(&container) {
             bail!("refusing to clean invalid managed container name");
         }
@@ -1763,6 +1766,35 @@ async fn hostlet_images() -> anyhow::Result<Vec<String>> {
         .filter(|name| valid_hostlet_image(name))
         .map(str::to_string)
         .collect())
+}
+
+async fn docker_compose_managed_container(container: &str) -> anyhow::Result<bool> {
+    if !valid_container_name(container) {
+        bail!("refusing to inspect invalid managed container name");
+    }
+    let output = command_output(
+        "docker",
+        &[
+            "inspect",
+            "--format",
+            "{{ index .Config.Labels \"com.docker.compose.project\" }}",
+            container,
+        ],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if !output.status.success() {
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if combined.contains("No such object") {
+            return Ok(true);
+        }
+        bail!("docker exited with {}: {}", output.status, combined.trim());
+    }
+    Ok(!String::from_utf8(output.stdout)?.trim().is_empty())
 }
 
 fn string_set_from_array(value: Option<&Value>) -> HashSet<String> {
