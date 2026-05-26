@@ -1,5 +1,5 @@
 use crate::{
-    crypto::{constant_time_eq, random_token, sign, verify_signature},
+    crypto::{constant_time_eq, hash_token, random_token, sign, verify_signature},
     state::{AppState, HostletMode},
 };
 use argon2::{
@@ -7,9 +7,9 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -20,8 +20,11 @@ use sqlx::Row;
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "hostlet_session";
+const CLOUD_SESSION_COOKIE: &str = "hostlet_cloud_session";
+const OAUTH_STATE_COOKIE: &str = "hostlet_oauth_state";
 const UNLOCK_COOKIE: &str = "hostlet_unlock";
 const SESSION_TTL_DAYS: i64 = 14;
+const CLOUD_SESSION_TTL_DAYS: i64 = 30;
 const UNLOCK_TTL_HOURS: i64 = 12;
 const CONTROL_PLANE_PASSWORD_KEY: &str = "control_plane_password_hash";
 const DEVICE_FLOW_KEY_PREFIX: &str = "github_device_flow:";
@@ -48,6 +51,7 @@ struct GitHubUser {
     login: String,
     name: Option<String>,
     avatar_url: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,10 +67,31 @@ struct AuthorizedGitHubUser {
     login: String,
 }
 
+#[derive(Deserialize)]
+pub struct OAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GitHubInstallCallbackQuery {
+    installation_id: Option<i64>,
+    setup_action: Option<String>,
+}
+
 pub async fn github_device_start(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if state.mode == HostletMode::Cloud {
+        return (
+            StatusCode::FORBIDDEN,
+            "GitHub Device Flow is only available in self-hosted mode",
+        )
+            .into_response();
+    }
     if state.github_client_id.trim().is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -194,6 +219,13 @@ pub async fn github_device_poll(
     State(state): State<AppState>,
     Json(body): Json<DevicePollBody>,
 ) -> impl IntoResponse {
+    if state.mode == HostletMode::Cloud {
+        return (
+            StatusCode::FORBIDDEN,
+            "GitHub Device Flow is only available in self-hosted mode",
+        )
+            .into_response();
+    }
     let flow_id = body.flow_id.trim();
     if flow_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "flow_id is required").into_response();
@@ -344,6 +376,169 @@ pub async fn github_device_poll(
     }
 }
 
+pub async fn github_oauth_start(State(state): State<AppState>) -> impl IntoResponse {
+    if state.mode != HostletMode::Cloud {
+        return (
+            StatusCode::FORBIDDEN,
+            "GitHub OAuth login is only available in cloud mode",
+        )
+            .into_response();
+    }
+    let Some(client_id) = state.github_app_client_id.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App OAuth is not configured",
+        )
+            .into_response();
+    };
+    let nonce = random_token(32);
+    let redirect_uri = format!(
+        "{}/auth/github/oauth/callback",
+        state.public_api_url.trim_end_matches('/')
+    );
+    let url = format!(
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user%20user:email&state={}",
+        url_encode(client_id),
+        url_encode(&redirect_uri),
+        url_encode(&nonce)
+    );
+    let cookie = build_cookie(
+        OAUTH_STATE_COOKIE,
+        &signed_value(&state.session_secret, &nonce, Duration::minutes(15)),
+        Some(Duration::minutes(15)),
+        cookie_secure(&state.public_api_url),
+        "/",
+    );
+    with_cookies(Redirect::temporary(&url).into_response(), [cookie])
+}
+
+pub async fn github_oauth_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OAuthCallbackQuery>,
+) -> impl IntoResponse {
+    if state.mode != HostletMode::Cloud {
+        return Redirect::temporary("/login").into_response();
+    }
+    if let Some(error) = query.error.as_deref() {
+        let description = query.error_description.as_deref().unwrap_or(error);
+        return Redirect::temporary(&format!(
+            "/login?error={}",
+            url_encode(&format!("GitHub OAuth failed: {description}"))
+        ))
+        .into_response();
+    }
+    let Some(code) = query.code.as_deref().filter(|value| !value.is_empty()) else {
+        return Redirect::temporary("/login?error=missing%20oauth%20code").into_response();
+    };
+    let Some(state_param) = query.state.as_deref().filter(|value| !value.is_empty()) else {
+        return Redirect::temporary("/login?error=missing%20oauth%20state").into_response();
+    };
+    let Some(cookie_state) = cookie_value(&headers, OAUTH_STATE_COOKIE)
+        .and_then(|value| verify_signed_value(&state.session_secret, value))
+    else {
+        return Redirect::temporary("/login?error=expired%20oauth%20state").into_response();
+    };
+    if !constant_time_eq(cookie_state.as_bytes(), state_param.as_bytes()) {
+        return Redirect::temporary("/login?error=invalid%20oauth%20state").into_response();
+    }
+
+    let token = match exchange_github_oauth_code(&state, code).await {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::warn!(error = %err, "GitHub OAuth token exchange failed");
+            return Redirect::temporary("/login?error=github%20token%20exchange%20failed")
+                .into_response();
+        }
+    };
+    let gh_user = match github_user_from_token(&state, &token.access_token).await {
+        Ok(user) => user,
+        Err(err) => {
+            tracing::warn!(error = %err, "GitHub OAuth user lookup failed");
+            return Redirect::temporary("/login?error=github%20user%20lookup%20failed")
+                .into_response();
+        }
+    };
+    match create_cloud_login_session(&state, &gh_user, &token).await {
+        Ok((user_id, cloud_session_token)) => {
+            let secure = cookie_secure(&state.public_api_url);
+            let session = build_cookie(
+                SESSION_COOKIE,
+                &signed_value(
+                    &state.session_secret,
+                    &user_id.to_string(),
+                    Duration::days(SESSION_TTL_DAYS),
+                ),
+                Some(Duration::days(SESSION_TTL_DAYS)),
+                secure,
+                "/",
+            );
+            let cloud_session = build_cookie(
+                CLOUD_SESSION_COOKIE,
+                &cloud_session_token,
+                Some(Duration::days(CLOUD_SESSION_TTL_DAYS)),
+                secure,
+                "/",
+            );
+            let expired_state = expire_cookie(OAUTH_STATE_COOKIE, secure, "/");
+            with_cookies(
+                Redirect::temporary("/").into_response(),
+                [session, cloud_session, expired_state],
+            )
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to create cloud login session");
+            Redirect::temporary("/login?error=cloud%20session%20failed").into_response()
+        }
+    }
+}
+
+pub async fn cloud_github_install_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if state.mode != HostletMode::Cloud {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(_cloud_user_id) = current_cloud_user_id(&headers, &state).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(slug) = state.github_app_slug.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GITHUB_APP_SLUG is required for GitHub App installation",
+        )
+            .into_response();
+    };
+    Redirect::temporary(&format!(
+        "https://github.com/apps/{}/installations/new",
+        url_encode(slug)
+    ))
+    .into_response()
+}
+
+pub async fn cloud_github_install_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GitHubInstallCallbackQuery>,
+) -> impl IntoResponse {
+    if state.mode != HostletMode::Cloud {
+        return Redirect::temporary("/").into_response();
+    }
+    let Some(cloud_user_id) = current_cloud_user_id(&headers, &state).await else {
+        return Redirect::temporary("/login").into_response();
+    };
+    let Some(installation_id) = query.installation_id else {
+        return Redirect::temporary("/?error=missing%20installation").into_response();
+    };
+    if let Err(err) = upsert_cloud_installation(&state, cloud_user_id, installation_id).await {
+        tracing::warn!(error = %err, installation_id, "failed to store GitHub App installation");
+        return Redirect::temporary("/?error=installation%20save%20failed").into_response();
+    }
+    let _ = query.setup_action;
+    Redirect::temporary("/apps/new").into_response()
+}
+
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -358,12 +553,80 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
     }
 }
 
+pub async fn session_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if state.mode == HostletMode::Cloud {
+        let Some(cloud_user_id) = current_cloud_user_id(&headers, &state).await else {
+            return Json(serde_json::json!({
+                "mode": state.mode.as_str(),
+                "authenticated": false,
+                "user": null,
+                "cloud": {
+                    "billingActive": false,
+                    "githubInstalled": false,
+                    "nextStep": "login"
+                }
+            }))
+            .into_response();
+        };
+        let user = sqlx::query(
+            "SELECT id, login, name, email, avatar_url FROM cloud_users WHERE id=$1 AND status='active'",
+        )
+        .bind(cloud_user_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        let billing_active = cloud_billing_active_for_cloud_user(&state, cloud_user_id)
+            .await
+            .unwrap_or(false);
+        let github_installed = cloud_github_installed(&state, cloud_user_id)
+            .await
+            .unwrap_or(false);
+        let next_step = if !github_installed {
+            "install_github"
+        } else if !billing_active {
+            "billing"
+        } else {
+            "ready"
+        };
+        return Json(serde_json::json!({
+            "mode": state.mode.as_str(),
+            "authenticated": true,
+            "user": user.map(|row| serde_json::json!({
+                "id": row.get::<Uuid, _>("id"),
+                "login": row.get::<String, _>("login"),
+                "name": row.get::<Option<String>, _>("name"),
+                "email": row.get::<Option<String>, _>("email"),
+                "avatarUrl": row.get::<Option<String>, _>("avatar_url")
+            })),
+            "cloud": {
+                "billingActive": billing_active,
+                "githubInstalled": github_installed,
+                "nextStep": next_step
+            }
+        }))
+        .into_response();
+    }
+    let authenticated = current_user_id(&headers, &state).is_some();
+    Json(serde_json::json!({
+        "mode": state.mode.as_str(),
+        "authenticated": authenticated,
+        "user": null,
+        "cloud": null
+    }))
+    .into_response()
+}
+
 pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
     let secure = cookie_secure(&state.public_api_url);
     with_cookies(
         StatusCode::NO_CONTENT.into_response(),
         [
             expire_cookie(SESSION_COOKIE, secure, "/"),
+            expire_cookie(CLOUD_SESSION_COOKIE, secure, "/"),
             expire_cookie(UNLOCK_COOKIE, secure, "/"),
         ],
     )
@@ -531,6 +794,255 @@ async fn store_github_access_token(
     })
 }
 
+async fn exchange_github_oauth_code(state: &AppState, code: &str) -> anyhow::Result<GitHubToken> {
+    let client_id = state
+        .github_app_client_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("GITHUB_APP_CLIENT_ID is missing"))?;
+    let client_secret = state
+        .github_app_client_secret
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("GITHUB_APP_CLIENT_SECRET is missing"))?;
+    let redirect_uri = format!(
+        "{}/auth/github/oauth/callback",
+        state.public_api_url.trim_end_matches('/')
+    );
+    let payload = state
+        .http
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("code", code),
+            ("redirect_uri", redirect_uri.as_str()),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    if let Some(error) = payload.get("error").and_then(|value| value.as_str()) {
+        let description = payload
+            .get("error_description")
+            .and_then(|value| value.as_str())
+            .unwrap_or(error);
+        anyhow::bail!("{description}");
+    }
+    let access_token = payload
+        .get("access_token")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("GitHub did not return an access token"))?;
+    Ok(GitHubToken {
+        access_token: access_token.to_string(),
+        scope: payload
+            .get("scope")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    })
+}
+
+async fn github_user_from_token(
+    state: &AppState,
+    access_token: &str,
+) -> anyhow::Result<GitHubUser> {
+    state
+        .http
+        .get("https://api.github.com/user")
+        .bearer_auth(access_token)
+        .header("User-Agent", "Hostlet")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(Into::into)
+}
+
+async fn create_cloud_login_session(
+    state: &AppState,
+    gh_user: &GitHubUser,
+    token: &GitHubToken,
+) -> anyhow::Result<(Uuid, String)> {
+    let mut tx = state.db.begin().await?;
+    let app_user_row = sqlx::query(
+        "INSERT INTO users (github_id, login, name, avatar_url)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (github_id) DO UPDATE SET
+           login=EXCLUDED.login,
+           name=EXCLUDED.name,
+           avatar_url=EXCLUDED.avatar_url
+         RETURNING id",
+    )
+    .bind(gh_user.id)
+    .bind(&gh_user.login)
+    .bind(&gh_user.name)
+    .bind(&gh_user.avatar_url)
+    .fetch_one(&mut *tx)
+    .await?;
+    let app_user_id: Uuid = app_user_row.get("id");
+
+    let cloud_user_row = sqlx::query(
+        "INSERT INTO cloud_users (github_id, login, name, email, avatar_url, status)
+         VALUES ($1,$2,$3,$4,$5,'active')
+         ON CONFLICT (github_id) DO UPDATE SET
+           login=EXCLUDED.login,
+           name=EXCLUDED.name,
+           email=EXCLUDED.email,
+           avatar_url=EXCLUDED.avatar_url,
+           updated_at=now()
+         RETURNING id",
+    )
+    .bind(gh_user.id)
+    .bind(&gh_user.login)
+    .bind(&gh_user.name)
+    .bind(&gh_user.email)
+    .bind(&gh_user.avatar_url)
+    .fetch_one(&mut *tx)
+    .await?;
+    let cloud_user_id: Uuid = cloud_user_row.get("id");
+
+    let encrypted = state.crypto.encrypt(&token.access_token)?;
+    sqlx::query(
+        "INSERT INTO github_accounts (user_id, github_id, access_token_ciphertext, scopes)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (user_id, github_id)
+         DO UPDATE SET access_token_ciphertext=EXCLUDED.access_token_ciphertext,
+                       scopes=EXCLUDED.scopes,
+                       updated_at=now()",
+    )
+    .bind(app_user_id)
+    .bind(gh_user.id)
+    .bind(encrypted)
+    .bind(token.scope.clone().unwrap_or_default())
+    .execute(&mut *tx)
+    .await?;
+
+    let cloud_session_token = random_token(48);
+    sqlx::query(
+        "INSERT INTO cloud_sessions (cloud_user_id, token_hash, expires_at)
+         VALUES ($1,$2,now() + make_interval(days => $3))",
+    )
+    .bind(cloud_user_id)
+    .bind(hash_token(&cloud_session_token))
+    .bind(CLOUD_SESSION_TTL_DAYS as i32)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok((app_user_id, cloud_session_token))
+}
+
+pub async fn current_cloud_user_id(headers: &HeaderMap, state: &AppState) -> Option<Uuid> {
+    if state.mode != HostletMode::Cloud {
+        return None;
+    }
+    let token = cookie_value(headers, CLOUD_SESSION_COOKIE)?;
+    let token_hash = hash_token(token);
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT cloud_user_id
+         FROM cloud_sessions
+         WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(token_hash)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+}
+
+pub async fn cloud_compute_allowed_for_user(
+    state: &AppState,
+    app_user_id: Uuid,
+) -> anyhow::Result<()> {
+    if state.mode != HostletMode::Cloud {
+        return Ok(());
+    }
+    let row = sqlx::query(
+        "SELECT cu.id
+         FROM cloud_users cu
+         JOIN users u ON u.github_id=cu.github_id
+         WHERE u.id=$1 AND cu.status='active'",
+    )
+    .bind(app_user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(row) = row else {
+        anyhow::bail!("Hostlet Cloud account is required");
+    };
+    let cloud_user_id: Uuid = row.get("id");
+    if !cloud_github_installed(state, cloud_user_id).await? {
+        anyhow::bail!("Install the Hostlet GitHub App before deploying");
+    }
+    if !cloud_billing_active_for_cloud_user(state, cloud_user_id).await? {
+        anyhow::bail!("An active Hostlet Cloud subscription is required before deploying");
+    }
+    Ok(())
+}
+
+pub async fn cloud_request_ready(headers: &HeaderMap, state: &AppState) -> anyhow::Result<Uuid> {
+    let Some(app_user_id) = current_user_id(headers, state) else {
+        anyhow::bail!("sign in required");
+    };
+    if state.mode == HostletMode::Cloud {
+        let Some(_cloud_user_id) = current_cloud_user_id(headers, state).await else {
+            anyhow::bail!("Hostlet Cloud session is required");
+        };
+        cloud_compute_allowed_for_user(state, app_user_id).await?;
+    }
+    Ok(app_user_id)
+}
+
+async fn cloud_github_installed(state: &AppState, cloud_user_id: Uuid) -> anyhow::Result<bool> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM cloud_github_installations
+         WHERE cloud_user_id=$1 AND suspended_at IS NULL",
+    )
+    .bind(cloud_user_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(count > 0)
+}
+
+async fn cloud_billing_active_for_cloud_user(
+    state: &AppState,
+    cloud_user_id: Uuid,
+) -> anyhow::Result<bool> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM cloud_subscriptions
+         WHERE cloud_user_id=$1
+           AND status IN ('active','trialing')
+           AND (current_period_end IS NULL OR current_period_end > now())",
+    )
+    .bind(cloud_user_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(count > 0)
+}
+
+async fn upsert_cloud_installation(
+    state: &AppState,
+    cloud_user_id: Uuid,
+    installation_id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO cloud_github_installations
+           (cloud_user_id, installation_id, account_login, account_type, permissions_json, repository_selection)
+         VALUES ($1,$2,'pending','unknown','{}'::jsonb,'selected')
+         ON CONFLICT (installation_id) DO UPDATE SET
+           cloud_user_id=EXCLUDED.cloud_user_id,
+           updated_at=now(),
+           suspended_at=NULL",
+    )
+    .bind(cloud_user_id)
+    .bind(installation_id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
 fn signed_value(secret: &str, value: &str, ttl: Duration) -> String {
     let expires_at = (Utc::now() + ttl).timestamp();
     let payload = URL_SAFE_NO_PAD.encode(value.as_bytes());
@@ -622,6 +1134,11 @@ fn request_web_origin(headers: &HeaderMap) -> Option<String> {
                 .and_then(|value| value.to_str().ok())
                 .and_then(crate::state::normalize_origin)
         })
+}
+
+fn url_encode(value: &str) -> String {
+    use url::form_urlencoded::byte_serialize;
+    byte_serialize(value.as_bytes()).collect()
 }
 
 async fn unlock_response(state: &AppState) -> axum::response::Response {

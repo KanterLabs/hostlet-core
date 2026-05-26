@@ -1,4 +1,7 @@
-use crate::{auth::current_user_id, state::AppState};
+use crate::{
+    auth::{cloud_compute_allowed_for_user, current_user_id},
+    state::AppState,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -30,6 +33,9 @@ pub async fn manual_deploy(
     let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if let Err(err) = cloud_compute_allowed_for_user(&state, user_id).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    }
     match create_and_send_deploy(&state, user_id, app_id, "HEAD").await {
         Ok(id) => Json(json!({"deploymentId": id})).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
@@ -129,6 +135,9 @@ pub async fn rollback(
     let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if let Err(err) = cloud_compute_allowed_for_user(&state, user_id).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    }
     match create_and_send_rollback(&state, user_id, app_id).await {
         Ok(id) => Json(json!({"rollbackDeploymentId": id})).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
@@ -141,6 +150,7 @@ pub async fn create_and_send_deploy(
     app_id: Uuid,
     commit_sha: &str,
 ) -> anyhow::Result<Uuid> {
+    cloud_compute_allowed_for_user(state, user_id).await?;
     ensure_no_active_deployment(state, app_id).await?;
     let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
         .bind(app_id).bind(user_id).fetch_one(&state.db).await?;

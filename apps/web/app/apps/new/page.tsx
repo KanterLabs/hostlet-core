@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Box, CheckCircle2, Cpu, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
+import { AlertTriangle, Box, CheckCircle2, Cpu, CreditCard, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
@@ -13,6 +13,14 @@ type ServerRow = { id: string; name: string; kind: string; status: string };
 type CloudflareStatus = {
   baseDomain?: string | null;
   defaultDomainPattern?: string | null;
+};
+type SessionPayload = {
+  mode: "self_hosted" | "cloud";
+  cloud?: {
+    billingActive: boolean;
+    githubInstalled: boolean;
+    nextStep: "login" | "install_github" | "billing" | "ready";
+  } | null;
 };
 type InspectEnv = { key: string; required?: boolean; value?: string; source?: string };
 type RepoInspection = {
@@ -63,6 +71,7 @@ export default function CreateApp() {
   const [repoMessage, setRepoMessage] = useState("Loading GitHub repositories...");
   const [servers, setServers] = useState<ServerRow[]>([]);
   const [cloudflare, setCloudflare] = useState<CloudflareStatus | null>(null);
+  const [session, setSession] = useState<SessionPayload | null>(null);
   const [message, setMessage] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -84,6 +93,7 @@ export default function CreateApp() {
     api<CloudflareStatus>("/api/cloudflare/status")
       .then(setCloudflare)
       .catch(() => setCloudflare(null));
+    api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
   }, []);
 
   const filteredRepos = useMemo(
@@ -167,6 +177,8 @@ export default function CreateApp() {
     }
   }
 
+  const cloud = session?.mode === "cloud";
+  const cloudReady = !cloud || session?.cloud?.nextStep === "ready";
   const selectedServer = servers.find((server) => server.id === form.server_id);
   const generatedDomain = useMemo(() => {
     if (!cloudflare?.baseDomain) return "";
@@ -175,18 +187,32 @@ export default function CreateApp() {
   }, [cloudflare?.baseDomain, form.name, form.repo_full_name]);
   const routePreview = form.domain.trim() || generatedDomain || "Hostlet will generate one";
   const requiredEnvMissing = inspection?.env?.some((item) => item.required && !envValues[item.key]?.trim()) || false;
-  const canCreate = !!form.repo_full_name && !!form.name && !!form.branch && !!form.server_id && !requiredEnvMissing && inspection?.deployable !== false;
+  const canCreate = !!form.repo_full_name && !!form.name && !!form.branch && (cloud || !!form.server_id) && !requiredEnvMissing && inspection?.deployable !== false && cloudReady;
 
   return (
     <AppShell>
           <PageHeader
             eyebrow="New application"
             title="Create app"
-            description="Choose a GitHub repo, local runtime settings, and optional automation."
+            description={cloud ? "Choose a GitHub repo and deploy it to an always-on Hostlet Cloud URL." : "Choose a GitHub repo, local runtime settings, and optional automation."}
             actions={<Link className="button-secondary" href="/apps"><Box size={16} />Back to apps</Link>}
           />
 
-          <WebhookNotice autoDeployEnabled={form.auto_deploy} className="mb-6" />
+          {!cloud && <WebhookNotice autoDeployEnabled={form.auto_deploy} className="mb-6" />}
+          {cloud && !cloudReady && (
+            <Notice
+              tone="warning"
+              className="mb-6"
+              description={session?.cloud?.githubInstalled ? "Choose a plan before creating cloud apps." : "Install the Hostlet GitHub App before creating cloud apps."}
+              action={
+                session?.cloud?.githubInstalled ? (
+                  <Link href="/" className="button"><CreditCard size={16} />Open billing setup</Link>
+                ) : (
+                  <a href="/auth/github/install/start" className="button"><GitBranch size={16} />Install GitHub App</a>
+                )
+              }
+            />
+          )}
 
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
             <div className="space-y-6">
@@ -260,28 +286,36 @@ export default function CreateApp() {
               </Panel>
 
               <Panel>
-                <SectionHeader icon={Server} title="Local target and route" />
+                <SectionHeader icon={Server} title={cloud ? "Cloud route" : "Local target and route"} />
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="App name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} placeholder="my-app" />
                   <Field label="Branch" value={form.branch} onChange={(value) => setForm({ ...form, branch: value })} placeholder="main" />
-                  <SelectField label="Deploy target" value={form.server_id} onChange={(value) => setForm({ ...form, server_id: value })}>
-                    {servers.map((server) => <option key={server.id} value={server.id}>{server.name} (local)</option>)}
-                    {servers.length === 0 && <option value="">This machine</option>}
-                  </SelectField>
-                  <div>
-                    <Field
-                      label="Domain"
-                      value={form.domain}
-                      onChange={(value) => setForm({ ...form, domain: value })}
-                      placeholder={generatedDomain || cloudflare?.defaultDomainPattern || "optional for local deploys"}
-                    />
-                    {generatedDomain && <p className="muted mt-2 text-sm">Default route: {generatedDomain}</p>}
+                  {!cloud && (
+                    <SelectField label="Deploy target" value={form.server_id} onChange={(value) => setForm({ ...form, server_id: value })}>
+                      {servers.map((server) => <option key={server.id} value={server.id}>{server.name} (local)</option>)}
+                      {servers.length === 0 && <option value="">This machine</option>}
+                    </SelectField>
+                  )}
+                  {!cloud && (
+                    <div>
+                      <Field
+                        label="Domain"
+                        value={form.domain}
+                        onChange={(value) => setForm({ ...form, domain: value })}
+                        placeholder={generatedDomain || cloudflare?.defaultDomainPattern || "optional for local deploys"}
+                      />
+                      {generatedDomain && <p className="muted mt-2 text-sm">Default route: {generatedDomain}</p>}
+                    </div>
+                  )}
+                </div>
+                {cloud ? (
+                  <Notice tone="neutral" className="mt-4" description={`Hostlet will generate a ${cloudflare?.baseDomain || "apps.hostlet.cloud"} URL and assign the managed cloud worker automatically.`} />
+                ) : (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <ToggleCard checked={form.public_exposure} onChange={(value) => setForm({ ...form, public_exposure: value })} icon={Lock} label="Publish app URL" />
+                    <ToggleCard checked={form.auto_deploy} onChange={(value) => setForm({ ...form, auto_deploy: value })} icon={GitBranch} label="Auto redeploy" />
                   </div>
-                </div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <ToggleCard checked={form.public_exposure} onChange={(value) => setForm({ ...form, public_exposure: value })} icon={Lock} label="Publish app URL" />
-                  <ToggleCard checked={form.auto_deploy} onChange={(value) => setForm({ ...form, auto_deploy: value })} icon={GitBranch} label="Auto redeploy" />
-                </div>
+                )}
               </Panel>
 
               <Panel>
@@ -292,17 +326,17 @@ export default function CreateApp() {
                   <Field label="Health path" value={form.health_path} onChange={(value) => setForm({ ...form, health_path: value })} />
                   <SelectField label="Runtime" value={form.runtime_kind} onChange={(value) => setForm({ ...form, runtime_kind: value })}>
                     <option value="single">Dockerfile or Node</option>
-                    <option value="compose">Docker Compose</option>
+                    {!cloud && <option value="compose">Docker Compose</option>}
                   </SelectField>
                   {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setForm({ ...form, hostlet_config_path: value })} placeholder="hostlet.yml" />}
-                  <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })}>
+                  <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })} disabled={cloud}>
                     <option value={256}>256 MB</option>
                     <option value={512}>512 MB</option>
                     <option value={1024}>1 GB</option>
                     <option value={2048}>2 GB</option>
                     <option value={4096}>4 GB</option>
                   </SelectField>
-                  <SelectField label="CPU limit" value={form.cpu_limit} onChange={(value) => setForm({ ...form, cpu_limit: Number(value) })}>
+                  <SelectField label="CPU limit" value={form.cpu_limit} onChange={(value) => setForm({ ...form, cpu_limit: Number(value) })} disabled={cloud}>
                     <option value={0.25}>0.25 CPU</option>
                     <option value={0.5}>0.5 CPU</option>
                     <option value={1}>1 CPU</option>
@@ -323,10 +357,10 @@ export default function CreateApp() {
                 <SectionHeader title="Create summary" />
                 <DataList className="mt-4">
                   <SummaryItem label="Repo" value={form.repo_full_name || "Choose a repo"} />
-                  <SummaryItem label="Machine" value={selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
-                  <SummaryItem label="Route" value={routePreview} />
+                  <SummaryItem label="Machine" value={cloud ? "Hostlet Cloud managed worker" : selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
+                  <SummaryItem label="Route" value={cloud ? `Generated ${cloudflare?.baseDomain || "apps.hostlet.cloud"} URL` : routePreview} />
                   <SummaryItem label="Runtime" value={`${form.runtime_kind === "compose" ? "Compose" : "Single"} · :${form.container_port}${form.health_path}`} />
-                  <SummaryItem label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
+                  <SummaryItem label="Automation" value={cloud ? "manual deploy · public Hostlet URL" : `${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
                 </DataList>
                 <button className="mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
                   <Plus size={16} />

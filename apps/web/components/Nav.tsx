@@ -2,18 +2,26 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { Box, HardDrive, Home, LogOut, Settings, ScrollText, TerminalSquare } from "lucide-react";
 import { api } from "@/lib/api";
 
 export function Nav() {
   const pathname = usePathname();
+  const [mode, setMode] = useState<"self_hosted" | "cloud">("self_hosted");
   const items = [
     { href: "/", label: "Overview", icon: Home },
     { href: "/apps", label: "Apps", icon: Box },
-    { href: "/servers", label: "Machines", icon: HardDrive },
+    ...(mode === "cloud" ? [] : [{ href: "/servers", label: "Machines", icon: HardDrive }]),
     { href: "/logs", label: "Logs", icon: ScrollText },
     { href: "/settings", label: "Settings", icon: Settings },
   ];
+
+  useEffect(() => {
+    api<{ mode: "self_hosted" | "cloud" }>("/api/session")
+      .then((session) => setMode(session.mode))
+      .catch(() => {});
+  }, []);
 
   async function logout() {
     await api("/api/logout", { method: "POST", body: "{}" }).catch(() => {});
@@ -29,7 +37,7 @@ export function Nav() {
           </span>
           <span>
             <span className="block text-lg font-semibold leading-5">Hostlet</span>
-            <span className="text-xs font-medium text-neutral-400">self-hosted deploys</span>
+            <span className="text-xs font-medium text-neutral-400">{mode === "cloud" ? "cloud deploys" : "self-hosted deploys"}</span>
           </span>
         </Link>
         <nav className="space-y-1">
@@ -51,8 +59,8 @@ export function Nav() {
           })}
         </nav>
         <div className="mt-auto rounded-lg border border-white/10 bg-white/5 p-3">
-          <div className="text-sm font-medium">Control plane</div>
-          <p className="mt-1 text-sm text-neutral-400">Local-first management for your own servers.</p>
+          <div className="text-sm font-medium">{mode === "cloud" ? "Hostlet Cloud" : "Control plane"}</div>
+          <p className="mt-1 text-sm text-neutral-400">{mode === "cloud" ? "Managed always-on deploys on Hostlet compute." : "Local-first management for your own servers."}</p>
         </div>
         <button className="mt-3 w-full justify-start border-white/10 bg-white/5 text-neutral-100 shadow-none hover:bg-white/10" onClick={logout}>
           <LogOut size={16} />
@@ -60,7 +68,7 @@ export function Nav() {
         </button>
       </aside>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-white/10 bg-rail px-2 py-2 text-white shadow-lg shadow-neutral-950/20 lg:hidden">
+      <nav className={`fixed inset-x-0 bottom-0 z-30 grid ${mode === "cloud" ? "grid-cols-4" : "grid-cols-5"} border-t border-white/10 bg-rail px-2 py-2 text-white shadow-lg shadow-neutral-950/20 lg:hidden`}>
         {items.map((item) => {
           const Icon = item.icon;
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);

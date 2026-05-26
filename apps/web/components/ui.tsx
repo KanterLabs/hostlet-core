@@ -354,17 +354,19 @@ export function SelectField({
   label,
   value,
   onChange,
+  disabled = false,
   children,
 }: {
   label: string;
   value: string | number;
   onChange: (value: string) => void;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <label className="block">
       <span>{label}</span>
-      <select className="mt-1.5" value={value} onChange={(event) => onChange(event.target.value)}>
+      <select className="mt-1.5" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
         {children}
       </select>
     </label>

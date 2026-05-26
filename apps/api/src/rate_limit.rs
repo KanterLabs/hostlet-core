@@ -101,6 +101,16 @@ fn rule_for(method: &Method, path: &str) -> Option<Rule> {
             max: 90,
             window: Duration::from_secs(60),
         }),
+        (&Method::GET, "/auth/github/oauth/start") => Some(Rule {
+            name: "github-oauth-start",
+            max: 20,
+            window: Duration::from_secs(60),
+        }),
+        (&Method::GET, "/auth/github/oauth/callback") => Some(Rule {
+            name: "github-oauth-callback",
+            max: 40,
+            window: Duration::from_secs(60),
+        }),
         (&Method::POST, "/api/agent/register") => Some(Rule {
             name: "agent-register",
             max: 20,
@@ -119,6 +129,11 @@ fn rule_for(method: &Method, path: &str) -> Option<Rule> {
         (&Method::POST, "/webhooks/github") => Some(Rule {
             name: "github-webhook",
             max: 120,
+            window: Duration::from_secs(60),
+        }),
+        (&Method::POST, "/api/cloud/billing/webhook") => Some(Rule {
+            name: "stripe-webhook",
+            max: 240,
             window: Duration::from_secs(60),
         }),
         _ => None,

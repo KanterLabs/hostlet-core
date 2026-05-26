@@ -13,11 +13,17 @@ type Status = {
   login: string | null;
   message: string;
 };
+type Session = {
+  mode: "self_hosted" | "cloud";
+  cloud?: { githubInstalled: boolean } | null;
+};
 
 export function GitHubStatus({ compact = false, showConnect = true }: { compact?: boolean; showConnect?: boolean }) {
   const [status, setStatus] = useState<Status | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
 
   useEffect(() => {
+    api<Session>("/api/session").then(setSession).catch(() => setSession(null));
     api<Status>("/api/github/status").then(setStatus).catch(() => {
       setStatus({
         oauthConfigured: false,
@@ -29,6 +35,21 @@ export function GitHubStatus({ compact = false, showConnect = true }: { compact?
       });
     });
   }, []);
+
+  if (session?.mode === "cloud") {
+    const installed = !!session.cloud?.githubInstalled;
+    return (
+      <div className={`rounded-lg border p-3 text-sm shadow-sm shadow-neutral-950/5 ${installed ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+        <div className="flex items-center gap-2 font-medium">
+          <GitBranch size={16} />
+          <span className="min-w-0 truncate">{installed ? "GitHub App installed" : "GitHub App required"}</span>
+          <span className="ml-auto shrink-0">{installed ? <CheckCircle2 size={16} /> : <CircleAlert size={16} />}</span>
+        </div>
+        {!compact && <p className="mt-2">{installed ? "Hostlet Cloud can access selected repositories." : "Install the Hostlet GitHub App to deploy repositories."}</p>}
+        {!compact && showConnect && !installed && <a className="button mt-3" href="/auth/github/install/start">Install GitHub App</a>}
+      </div>
+    );
+  }
 
   const icon = !status ? <CircleDashed size={16} /> : status.oauthConfigured && (status.tokenValid === true || !status.authenticated)
     ? <CheckCircle2 size={16} />

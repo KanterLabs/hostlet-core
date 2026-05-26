@@ -1,11 +1,19 @@
-use crate::{auth::current_user_id, crypto::verify_token, deploy, github, state::AppState};
+use crate::{
+    auth::{cloud_request_ready, current_cloud_user_id, current_user_id},
+    crypto::verify_token,
+    deploy, github,
+    state::{AppState, HostletMode},
+};
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sqlx::Row;
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -62,6 +70,11 @@ pub struct UpdateApp {
 #[derive(Deserialize)]
 pub struct EnvValue {
     value: String,
+}
+
+#[derive(Deserialize)]
+pub struct BillingPlanRequest {
+    plan: String,
 }
 
 pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -162,8 +175,12 @@ pub async fn cleanup_preview(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let user_id = match cloud_request_ready(&headers, &state).await {
+        Ok(user_id) => user_id,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
     match cleanup_plan(&state, user_id).await {
         Ok(plan) => Json(plan).into_response(),
@@ -895,6 +912,9 @@ pub async fn restart_app_container(
     let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if let Err(err) = crate::auth::cloud_compute_allowed_for_user(&state, user_id).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    }
     let row = sqlx::query(
         r#"
         SELECT a.server_id,
@@ -1055,6 +1075,246 @@ fn health_counts_json(rows: Vec<sqlx::postgres::PgRow>) -> serde_json::Value {
     counts
 }
 
+fn stripe_price_for_plan<'a>(state: &'a AppState, plan: &str) -> Option<&'a str> {
+    match plan.trim().to_ascii_lowercase().as_str() {
+        "student" => state.stripe_price_student.as_deref(),
+        "starter" => state.stripe_price_starter.as_deref(),
+        "pro" => state.stripe_price_pro.as_deref(),
+        _ => None,
+    }
+}
+
+async fn ensure_stripe_customer(
+    state: &AppState,
+    secret_key: &str,
+    cloud_user_id: Uuid,
+) -> anyhow::Result<String> {
+    if let Some(customer_id) = sqlx::query_scalar::<_, String>(
+        "SELECT stripe_customer_id FROM cloud_stripe_customers WHERE cloud_user_id=$1",
+    )
+    .bind(cloud_user_id)
+    .fetch_optional(&state.db)
+    .await?
+    {
+        return Ok(customer_id);
+    }
+    let row = sqlx::query("SELECT login, email FROM cloud_users WHERE id=$1")
+        .bind(cloud_user_id)
+        .fetch_one(&state.db)
+        .await?;
+    let login = row.get::<String, _>("login");
+    let email = row.get::<Option<String>, _>("email");
+    let mut form = vec![
+        ("name", login.as_str()),
+        ("metadata[cloud_user_id]", ""),
+        ("metadata[github_login]", login.as_str()),
+    ];
+    let cloud_user_id_string = cloud_user_id.to_string();
+    form[1] = ("metadata[cloud_user_id]", cloud_user_id_string.as_str());
+    if let Some(email) = email.as_deref() {
+        form.push(("email", email));
+    }
+    let payload = state
+        .http
+        .post("https://api.stripe.com/v1/customers")
+        .bearer_auth(secret_key)
+        .form(&form)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    let customer_id = payload
+        .get("id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Stripe customer response was missing id"))?
+        .to_string();
+    sqlx::query(
+        "INSERT INTO cloud_stripe_customers (cloud_user_id, stripe_customer_id)
+         VALUES ($1,$2)
+         ON CONFLICT (cloud_user_id) DO UPDATE SET
+           stripe_customer_id=EXCLUDED.stripe_customer_id,
+           updated_at=now()",
+    )
+    .bind(cloud_user_id)
+    .bind(&customer_id)
+    .execute(&state.db)
+    .await?;
+    Ok(customer_id)
+}
+
+fn valid_stripe_signature(headers: &HeaderMap, body: &[u8], webhook_secret: &str) -> bool {
+    let Some(signature) = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let mut timestamp = None;
+    let mut signatures = Vec::new();
+    for part in signature.split(',') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        match key {
+            "t" => timestamp = Some(value),
+            "v1" => signatures.push(value),
+            _ => {}
+        }
+    }
+    let Some(timestamp) = timestamp else {
+        return false;
+    };
+    let signed_payload = [timestamp.as_bytes(), b".", body].concat();
+    let mut mac = Hmac::<Sha256>::new_from_slice(webhook_secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(&signed_payload);
+    let expected = hex_bytes(&mac.finalize().into_bytes());
+    signatures
+        .iter()
+        .any(|candidate| crate::crypto::constant_time_eq(candidate.as_bytes(), expected.as_bytes()))
+}
+
+async fn handle_checkout_completed(
+    state: &AppState,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let object = payload
+        .get("data")
+        .and_then(|value| value.get("object"))
+        .ok_or_else(|| anyhow::anyhow!("Stripe checkout event missing object"))?;
+    let cloud_user_id = stripe_cloud_user_id(object)?;
+    let customer_id = object
+        .get("customer")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if !customer_id.is_empty() {
+        sqlx::query(
+            "INSERT INTO cloud_stripe_customers (cloud_user_id, stripe_customer_id)
+             VALUES ($1,$2)
+             ON CONFLICT (cloud_user_id) DO UPDATE SET
+               stripe_customer_id=EXCLUDED.stripe_customer_id,
+               updated_at=now()",
+        )
+        .bind(cloud_user_id)
+        .bind(customer_id)
+        .execute(&state.db)
+        .await?;
+    }
+    let subscription_id = object
+        .get("subscription")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let plan = object
+        .get("metadata")
+        .and_then(|value| value.get("plan"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("starter");
+    sqlx::query(
+        "INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
+         VALUES ($1,$2,$3,'active')
+         ON CONFLICT (stripe_subscription_id) DO UPDATE SET
+           plan_code=EXCLUDED.plan_code,
+           status='active',
+           updated_at=now()",
+    )
+    .bind(cloud_user_id)
+    .bind(subscription_id)
+    .bind(plan)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+async fn handle_subscription_event(
+    state: &AppState,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let object = payload
+        .get("data")
+        .and_then(|value| value.get("object"))
+        .ok_or_else(|| anyhow::anyhow!("Stripe subscription event missing object"))?;
+    let subscription_id = object
+        .get("id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Stripe subscription missing id"))?;
+    let cloud_user_id = match stripe_cloud_user_id(object) {
+        Ok(id) => id,
+        Err(_) => {
+            let customer_id = object
+                .get("customer")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Stripe subscription missing customer"))?;
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT cloud_user_id FROM cloud_stripe_customers WHERE stripe_customer_id=$1",
+            )
+            .bind(customer_id)
+            .fetch_one(&state.db)
+            .await?
+        }
+    };
+    let status = object
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let plan = object
+        .get("metadata")
+        .and_then(|value| value.get("plan"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("starter");
+    let current_period_start = stripe_timestamp(object, "current_period_start");
+    let current_period_end = stripe_timestamp(object, "current_period_end");
+    let cancel_at_period_end = object
+        .get("cancel_at_period_end")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    sqlx::query(
+        "INSERT INTO cloud_subscriptions
+           (cloud_user_id, stripe_subscription_id, plan_code, status, current_period_start, current_period_end, cancel_at_period_end)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (stripe_subscription_id) DO UPDATE SET
+           plan_code=EXCLUDED.plan_code,
+           status=EXCLUDED.status,
+           current_period_start=EXCLUDED.current_period_start,
+           current_period_end=EXCLUDED.current_period_end,
+           cancel_at_period_end=EXCLUDED.cancel_at_period_end,
+           updated_at=now()",
+    )
+    .bind(cloud_user_id)
+    .bind(subscription_id)
+    .bind(plan)
+    .bind(status)
+    .bind(current_period_start)
+    .bind(current_period_end)
+    .bind(cancel_at_period_end)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+fn stripe_cloud_user_id(object: &serde_json::Value) -> anyhow::Result<Uuid> {
+    let value = object
+        .get("metadata")
+        .and_then(|value| value.get("cloud_user_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Stripe object missing cloud_user_id metadata"))?;
+    Ok(Uuid::parse_str(value)?)
+}
+
+fn stripe_timestamp(
+    object: &serde_json::Value,
+    key: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    object
+        .get(key)
+        .and_then(|value| value.as_i64())
+        .and_then(|timestamp| chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 pub async fn system_version(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1088,6 +1348,7 @@ pub async fn cloud_status(State(state): State<AppState>, headers: HeaderMap) -> 
         },
         "githubApp": {
             "appIdConfigured": state.github_app_id.is_some(),
+            "slugConfigured": state.github_app_slug.is_some(),
             "clientIdConfigured": state.github_app_client_id.is_some(),
             "clientSecretConfigured": state.github_app_client_secret.is_some(),
             "privateKeyConfigured": state.github_app_private_key_pem.is_some(),
@@ -1103,6 +1364,203 @@ pub async fn cloud_status(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     }))
     .into_response()
+}
+
+pub async fn cloud_billing_checkout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BillingPlanRequest>,
+) -> impl IntoResponse {
+    if state.mode != HostletMode::Cloud {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(cloud_user_id) = current_cloud_user_id(&headers, &state).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(secret_key) = state.stripe_secret_key.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Stripe secret key is not configured",
+        )
+            .into_response();
+    };
+    let Some(price_id) = stripe_price_for_plan(&state, &body.plan) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unknown plan or missing Stripe price",
+        )
+            .into_response();
+    };
+    let customer_id = match ensure_stripe_customer(&state, secret_key, cloud_user_id).await {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to prepare Stripe customer");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    let success_url = format!(
+        "{}/?billing=success",
+        state.public_web_url.trim_end_matches('/')
+    );
+    let cancel_url = format!(
+        "{}/?billing=cancelled",
+        state.public_web_url.trim_end_matches('/')
+    );
+    let res = state
+        .http
+        .post("https://api.stripe.com/v1/checkout/sessions")
+        .bearer_auth(secret_key)
+        .form(&[
+            ("mode", "subscription"),
+            ("customer", customer_id.as_str()),
+            ("line_items[0][price]", price_id),
+            ("line_items[0][quantity]", "1"),
+            ("success_url", success_url.as_str()),
+            ("cancel_url", cancel_url.as_str()),
+            ("client_reference_id", &cloud_user_id.to_string()),
+            ("metadata[cloud_user_id]", &cloud_user_id.to_string()),
+            ("metadata[plan]", body.plan.as_str()),
+            (
+                "subscription_data[metadata][cloud_user_id]",
+                &cloud_user_id.to_string(),
+            ),
+            ("subscription_data[metadata][plan]", body.plan.as_str()),
+        ])
+        .send()
+        .await;
+    match res {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(value) => Json(serde_json::json!({
+                    "url": value.get("url").and_then(|value| value.as_str())
+                }))
+                .into_response(),
+                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            },
+            Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        },
+        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
+pub async fn cloud_billing_portal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if state.mode != HostletMode::Cloud {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(cloud_user_id) = current_cloud_user_id(&headers, &state).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(secret_key) = state.stripe_secret_key.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Stripe secret key is not configured",
+        )
+            .into_response();
+    };
+    let customer_id: Option<String> = sqlx::query_scalar(
+        "SELECT stripe_customer_id FROM cloud_stripe_customers WHERE cloud_user_id=$1",
+    )
+    .bind(cloud_user_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some(customer_id) = customer_id else {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            "Stripe customer is missing",
+        )
+            .into_response();
+    };
+    let return_url = format!("{}/", state.public_web_url.trim_end_matches('/'));
+    let res = state
+        .http
+        .post("https://api.stripe.com/v1/billing_portal/sessions")
+        .bearer_auth(secret_key)
+        .form(&[
+            ("customer", customer_id.as_str()),
+            ("return_url", return_url.as_str()),
+        ])
+        .send()
+        .await;
+    match res {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(value) => Json(serde_json::json!({
+                    "url": value.get("url").and_then(|value| value.as_str())
+                }))
+                .into_response(),
+                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            },
+            Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        },
+        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
+pub async fn cloud_billing_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(webhook_secret) = state.stripe_webhook_secret.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Stripe webhook secret is not configured",
+        )
+            .into_response();
+    };
+    if !valid_stripe_signature(&headers, &body, webhook_secret) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let event_id = payload
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let event_type = payload
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let inserted = sqlx::query(
+        "INSERT INTO cloud_webhook_events (provider, provider_event_id, payload)
+         VALUES ('stripe',$1,$2)
+         ON CONFLICT (provider, provider_event_id) DO NOTHING",
+    )
+    .bind(event_id)
+    .bind(&payload)
+    .execute(&state.db)
+    .await;
+    let Ok(done) = inserted else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    if done.rows_affected() == 0 {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let result = match event_type {
+        "checkout.session.completed" => handle_checkout_completed(&state, &payload).await,
+        "customer.subscription.created"
+        | "customer.subscription.updated"
+        | "customer.subscription.deleted" => handle_subscription_event(&state, &payload).await,
+        _ => Ok(()),
+    };
+    if let Err(err) = result {
+        tracing::warn!(error = %err, event_id, event_type, "failed to process Stripe webhook");
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    let _ = sqlx::query(
+        "UPDATE cloud_webhook_events SET processed_at=now() WHERE provider='stripe' AND provider_event_id=$1",
+    )
+    .bind(event_id)
+    .execute(&state.db)
+    .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn system_update_check(
@@ -1348,6 +1806,13 @@ pub async fn create_app(
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
+    if state.mode == HostletMode::Cloud && runtime_kind == "compose" {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Docker Compose is not supported on Hostlet Cloud yet",
+        )
+            .into_response();
+    }
     let hostlet_config_path = match clean_hostlet_config_path(body.hostlet_config_path.as_deref()) {
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
@@ -1356,13 +1821,21 @@ pub async fn create_app(
     if let Err(message) = clean_runtime_config(&runtime_config) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
-    let server_id = match body.server_id {
-        Some(id) => id,
-        None => Uuid::parse_str(
+    let server_id = if state.mode == HostletMode::Cloud {
+        Uuid::parse_str(
             &std::env::var("LOCAL_SERVER_ID")
                 .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000001".into()),
         )
-        .unwrap(),
+        .unwrap()
+    } else {
+        match body.server_id {
+            Some(id) => id,
+            None => Uuid::parse_str(
+                &std::env::var("LOCAL_SERVER_ID")
+                    .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000001".into()),
+            )
+            .unwrap(),
+        }
     };
     let server = sqlx::query("SELECT id FROM servers WHERE id=$1 AND kind='local'")
         .bind(server_id)
@@ -1371,7 +1844,23 @@ pub async fn create_app(
     let Ok(Some(_)) = server else {
         return (StatusCode::BAD_REQUEST, "server is not available").into_response();
     };
-    let domain = if body.domain.trim().is_empty() {
+    let domain = if state.mode == HostletMode::Cloud {
+        match &state.base_domain {
+            Some(base_domain) => format!(
+                "{}-{}.{}",
+                app_slug(app_name),
+                crate::crypto::random_token(6).to_ascii_lowercase(),
+                base_domain
+            ),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "HOSTLET_BASE_DOMAIN is required in cloud mode",
+                )
+                    .into_response();
+            }
+        }
+    } else if body.domain.trim().is_empty() {
         match &state.base_domain {
             Some(base_domain) => format!("{}.{}", app_slug(app_name), base_domain),
             None => format!("localhost:{}", 20000 + (body.container_port as u16 % 20000)),
@@ -1393,8 +1882,12 @@ pub async fn create_app(
         )
             .into_response();
     }
-    let public_exposure = body.public_exposure.unwrap_or(false);
-    if public_exposure {
+    let public_exposure = if state.mode == HostletMode::Cloud {
+        true
+    } else {
+        body.public_exposure.unwrap_or(false)
+    };
+    if public_exposure && state.mode != HostletMode::Cloud {
         if let Err(err) = hostlet_public_cloudflare_host(&state, &domain) {
             return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
         }
@@ -1442,7 +1935,7 @@ pub async fn create_app(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let auto_deploy = body.auto_deploy.unwrap_or(false);
-    if auto_deploy {
+    if auto_deploy && state.mode != HostletMode::Cloud {
         if let Err(err) = github::ensure_repo_webhook(&state, user_id, repo_full_name).await {
             tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
             return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
@@ -1451,7 +1944,9 @@ pub async fn create_app(
     let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id")
         .bind(user_id).bind(server_id).bind(app_name).bind(repo_full_name).bind(branch).bind(body.container_port).bind(health_path).bind(&domain)
         .bind(runtime_kind).bind(hostlet_config_path).bind(runtime_config).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
-        .bind(body.memory_limit_mb).bind(body.cpu_limit).bind(false).bind(auto_deploy)
+        .bind(if state.mode == HostletMode::Cloud { Some(512) } else { body.memory_limit_mb })
+        .bind(if state.mode == HostletMode::Cloud { Some(0.5) } else { body.cpu_limit })
+        .bind(public_exposure).bind(auto_deploy)
         .fetch_one(&mut *tx).await;
     let Ok(row) = row else {
         return StatusCode::BAD_REQUEST.into_response();
@@ -1476,7 +1971,7 @@ pub async fn create_app(
     if tx.commit().await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    if public_exposure {
+    if public_exposure && state.mode != HostletMode::Cloud {
         if let Err(err) = ensure_cloudflare_app_dns(&state, app_id, &domain).await {
             tracing::warn!(error = %err, domain = %domain, "failed to open public tunnel");
             delete_created_app_row(&state, app_id).await;

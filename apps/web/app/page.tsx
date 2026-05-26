@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { Box, GitBranch, HardDrive, Plus, Rocket, ShieldCheck } from "lucide-react";
+import { Box, CreditCard, GitBranch, HardDrive, Plus, Rocket, ShieldCheck } from "lucide-react";
 import { GitHubStatus } from "@/components/GitHubStatus";
 import { api } from "@/lib/api";
 import { AppShell, DataList, DataRow, IconFrame, Metric, MetricsGrid, Notice, PageHeader, Panel, PanelHeader, SectionHeader, StatusPill } from "@/components/ui";
@@ -22,11 +22,21 @@ type App = {
 
 type Server = { id: string; name: string; kind: string; status: string; lastSeenAt?: string | null };
 type VersionPayload = { currentVersion: string };
+type SessionPayload = {
+  mode: "self_hosted" | "cloud";
+  authenticated: boolean;
+  cloud?: {
+    billingActive: boolean;
+    githubInstalled: boolean;
+    nextStep: "login" | "install_github" | "billing" | "ready";
+  } | null;
+};
 
 export default function Dashboard() {
   const [apps, setApps] = useState<App[]>([]);
   const [servers, setServers] = useState<Server[]>([]);
   const [version, setVersion] = useState<VersionPayload | null>(null);
+  const [session, setSession] = useState<SessionPayload | null>(null);
   const [message, setMessage] = useState("Loading Hostlet...");
 
   useEffect(() => {
@@ -58,6 +68,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     api<VersionPayload>("/api/system/version").then(setVersion).catch(() => setVersion(null));
+    api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
   }, []);
 
   const activeDeploys = apps.filter((app) => isActive(app.latestDeployment?.status)).length;
@@ -66,24 +77,55 @@ export default function Dashboard() {
   const publicApps = apps.filter((app) => app.publicExposure).length;
   const onlineServers = servers.filter((server) => server.status === "online").length;
   const recentApps = useMemo(() => apps.slice(0, 5), [apps]);
+  const cloud = session?.mode === "cloud";
+  const cloudReady = session?.cloud?.nextStep === "ready";
+
+  async function startCheckout(plan: "student" | "starter" | "pro") {
+    const result = await api<{ url?: string | null }>("/api/cloud/billing/checkout", {
+      method: "POST",
+      body: JSON.stringify({ plan }),
+    });
+    if (result.url) window.location.assign(result.url);
+  }
 
   return (
     <AppShell>
           <PageHeader
-            eyebrow="Control plane"
+            eyebrow={cloud ? "Hostlet Cloud" : "Control plane"}
             title="Overview"
-            description="Deploy GitHub projects onto your own machines with Docker, Caddy, live logs, rollbacks, and optional Cloudflare exposure."
+            description={cloud ? "Deploy GitHub projects to always-on Hostlet Cloud URLs." : "Deploy GitHub projects onto your own machines with Docker, Caddy, live logs, rollbacks, and optional Cloudflare exposure."}
             actions={
-              <Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>
+              <Link className="button" href="/apps/new" aria-disabled={cloud && !cloudReady}><Plus size={16} />Create app</Link>
             }
           />
+
+          {cloud && session?.cloud && session.cloud.nextStep !== "ready" && (
+            <Panel className="mb-6" padded>
+              <SectionHeader icon={ShieldCheck} title="Finish Hostlet Cloud setup" description="Cloud deploys require GitHub App access and an active subscription before compute is available." />
+              <div className="grid gap-3 md:grid-cols-3">
+                <Metric label="GitHub login" value="Connected" detail="OAuth session active" icon={GitBranch} />
+                <Metric label="GitHub App" value={session.cloud.githubInstalled ? "Installed" : "Required"} detail="Repo access for builds" icon={GitBranch} />
+                <Metric label="Billing" value={session.cloud.billingActive ? "Active" : "Required"} detail="Required before deploy" icon={CreditCard} />
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {!session.cloud.githubInstalled && <a className="button" href="/auth/github/install/start"><GitBranch size={16} />Install GitHub App</a>}
+                {session.cloud.githubInstalled && !session.cloud.billingActive && (
+                  <>
+                    <button className="button" onClick={() => startCheckout("starter")}><CreditCard size={16} />Start Starter</button>
+                    <button className="button-secondary" onClick={() => startCheckout("student")}>Student promo</button>
+                    <button className="button-secondary" onClick={() => startCheckout("pro")}>Pro</button>
+                  </>
+                )}
+              </div>
+            </Panel>
+          )}
 
           <MetricsGrid>
             <Metric label="Apps" value={String(apps.length)} detail={`${healthyApps} healthy`} icon={Box} />
             <Metric label="Active deploys" value={String(activeDeploys)} detail="builds, checks, routing" icon={Rocket} />
             <Metric label="Unhealthy apps" value={String(unhealthyApps)} detail="runtime monitor" icon={ShieldCheck} />
             <Metric label="Public apps" value={String(publicApps)} detail="Cloudflare DNS open" icon={ShieldCheck} />
-            <Metric label="Machines online" value={`${onlineServers}/${servers.length || 1}`} detail="agent heartbeat" icon={HardDrive} />
+            <Metric label={cloud ? "Cloud worker" : "Machines online"} value={cloud ? "managed" : `${onlineServers}/${servers.length || 1}`} detail={cloud ? "Hostlet compute" : "agent heartbeat"} icon={HardDrive} />
           </MetricsGrid>
 
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
@@ -131,7 +173,7 @@ export default function Dashboard() {
                 <DataList className="mt-4">
                   <DataRow label="Version" value={version?.currentVersion || "loading"} />
                   <DataRow label="Runtime" value="Docker + Caddy" />
-                  <DataRow label="Default access" value="Private apps" />
+                <DataRow label="Default access" value={cloud ? "Hostlet subdomain" : "Private apps"} />
                   <DataRow label="CI target" value="self-hosted Linux X64" />
                 </DataList>
               </Panel>

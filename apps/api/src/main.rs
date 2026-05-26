@@ -78,6 +78,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/auth/github/device/start", post(auth::github_device_start))
         .route("/auth/github/device/poll", post(auth::github_device_poll))
+        .route("/auth/github/oauth/start", get(auth::github_oauth_start))
+        .route(
+            "/auth/github/oauth/callback",
+            get(auth::github_oauth_callback),
+        )
+        .route(
+            "/auth/github/install/start",
+            get(auth::cloud_github_install_start),
+        )
+        .route(
+            "/auth/github/install/callback",
+            get(auth::cloud_github_install_callback),
+        )
+        .route("/api/session", get(auth::session_status))
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", post(auth::setup_password))
         .route("/api/unlock", post(auth::unlock))
@@ -88,6 +102,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/github/repo-inspect", post(github::repo_inspect))
         .route("/api/cloudflare/status", get(web::cloudflare_status))
         .route("/api/cloud/status", get(web::cloud_status))
+        .route(
+            "/api/cloud/billing/checkout",
+            post(web::cloud_billing_checkout),
+        )
+        .route("/api/cloud/billing/portal", post(web::cloud_billing_portal))
+        .route(
+            "/api/cloud/billing/webhook",
+            post(web::cloud_billing_webhook),
+        )
         .route("/api/system/version", get(web::system_version))
         .route("/api/system/backups/latest", get(web::backup_metadata))
         .route("/api/system/update-check", post(web::system_update_check))
