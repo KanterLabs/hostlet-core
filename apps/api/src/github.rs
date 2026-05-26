@@ -172,6 +172,17 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if state.mode == crate::state::HostletMode::Cloud {
+        let missing = github_app::missing_cloud_github_app_config(&state);
+        if !missing.is_empty() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "GitHub App cloud configuration is incomplete: {}",
+                    missing.join(", ")
+                ),
+            )
+                .into_response();
+        }
         return match github_app::repositories_for_user(&state, user_id).await {
             Ok(value) => {
                 let items = value
@@ -241,6 +252,19 @@ pub async fn repo_inspect(
         )
             .into_response();
     };
+    if state.mode == crate::state::HostletMode::Cloud {
+        let missing = github_app::missing_cloud_github_app_config(&state);
+        if !missing.is_empty() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "GitHub App cloud configuration is incomplete: {}",
+                    missing.join(", ")
+                ),
+            )
+                .into_response();
+        }
+    }
     let token =
         match github_app::installation_token_for_app_user(&state, user_id, Some(&repo)).await {
             Ok(token) => token,
