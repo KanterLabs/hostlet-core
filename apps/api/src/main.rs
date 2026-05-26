@@ -245,6 +245,7 @@ fn requires_browser_origin(method: &Method, path: &str) -> bool {
         && path != "/api/setup"
         && path != "/api/system/operator-cleanup"
         && path != "/webhooks/github"
+        && path != "/api/cloud/billing/webhook"
 }
 
 fn request_origin(headers: &HeaderMap) -> Option<String> {
@@ -284,4 +285,36 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_mutations_require_origin_guard() {
+        assert!(requires_browser_origin(&Method::POST, "/api/apps"));
+        assert!(requires_browser_origin(
+            &Method::PATCH,
+            "/api/apps/00000000-0000-0000-0000-000000000001"
+        ));
+        assert!(requires_browser_origin(
+            &Method::DELETE,
+            "/api/apps/00000000-0000-0000-0000-000000000001"
+        ));
+    }
+
+    #[test]
+    fn machine_webhooks_skip_browser_origin_guard() {
+        assert!(!requires_browser_origin(&Method::POST, "/webhooks/github"));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/cloud/billing/webhook"
+        ));
+    }
+
+    #[test]
+    fn safe_methods_skip_browser_origin_guard() {
+        assert!(!requires_browser_origin(&Method::GET, "/api/apps"));
+    }
 }
