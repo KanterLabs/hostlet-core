@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(git -C "${SCRIPT_ROOT}" rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-for ignored in .env .env.prod infra/.env dist dist/hostlet-release.json; do
-  git check-ignore -q "${ignored}" || {
+for ignored in .env .env.prod infra/.env dist/ dist/hostlet-release.json; do
+  git -C "${ROOT}" check-ignore -q -- "${ignored}" || {
     echo "${ignored} is not ignored" >&2
     exit 1
   }
 done
 
-if git ls-files .env .env.prod infra/.env dist 2>/dev/null | grep -q .; then
+if git -C "${ROOT}" ls-files .env .env.prod infra/.env dist 2>/dev/null | grep -q .; then
   echo "Secret files or release artifacts are tracked" >&2
-  git ls-files .env .env.prod infra/.env dist >&2
+  git -C "${ROOT}" ls-files .env .env.prod infra/.env dist >&2
   exit 1
 fi
 
