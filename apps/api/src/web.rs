@@ -1845,20 +1845,9 @@ pub async fn create_app(
         return (StatusCode::BAD_REQUEST, "server is not available").into_response();
     };
     let domain = if state.mode == HostletMode::Cloud {
-        match &state.base_domain {
-            Some(base_domain) => format!(
-                "{}-{}.{}",
-                app_slug(app_name),
-                crate::crypto::random_token(6).to_ascii_lowercase(),
-                base_domain
-            ),
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "HOSTLET_BASE_DOMAIN is required in cloud mode",
-                )
-                    .into_response();
-            }
+        match cloud_app_domain(&state, app_name).await {
+            Ok(domain) => domain,
+            Err((status, message)) => return (status, message).into_response(),
         }
     } else if body.domain.trim().is_empty() {
         match &state.base_domain {
@@ -3014,6 +3003,42 @@ async fn app_domain_in_use(state: &AppState, domain: &str, except_app_id: Option
     }
 }
 
+async fn cloud_app_domain(
+    state: &AppState,
+    app_name: &str,
+) -> Result<String, (StatusCode, &'static str)> {
+    let Some(base_domain) = state.base_domain.as_ref() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "HOSTLET_BASE_DOMAIN is required in cloud mode",
+        ));
+    };
+    let slug = cloud_app_domain_label(app_name);
+    let clean = format!("{slug}.{base_domain}");
+    if !reserved_public_domain_label(&slug) && !app_domain_in_use(state, &clean, None).await {
+        return Ok(clean);
+    }
+    for _ in 0..10 {
+        let label = format!(
+            "{}-{}",
+            slug,
+            crate::crypto::random_token(6).to_ascii_lowercase()
+        );
+        let domain = format!("{label}.{base_domain}");
+        if !app_domain_in_use(state, &domain, None).await {
+            return Ok(domain);
+        }
+    }
+    Err((
+        StatusCode::CONFLICT,
+        "could not allocate a unique app domain",
+    ))
+}
+
+fn cloud_app_domain_label(app_name: &str) -> String {
+    app_slug(app_name)
+}
+
 async fn delete_created_app_row(state: &AppState, app_id: Uuid) {
     let _ = sqlx::query("DELETE FROM apps WHERE id=$1")
         .bind(app_id)
@@ -3635,6 +3660,32 @@ fn reserved_public_domain_label(label: &str) -> bool {
             | "support"
             | "www"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{app_slug, cloud_app_domain_label, reserved_public_domain_label};
+
+    #[test]
+    fn cloud_domain_label_prefers_clean_app_slug() {
+        assert_eq!(cloud_app_domain_label("RunComp"), "runcomp");
+        assert_eq!(
+            cloud_app_domain_label("My Class Project"),
+            "my-class-project"
+        );
+    }
+
+    #[test]
+    fn cloud_domain_label_preserves_reserved_detection_for_fallback() {
+        let label = cloud_app_domain_label("Status");
+        assert_eq!(label, "status");
+        assert!(reserved_public_domain_label(&label));
+    }
+
+    #[test]
+    fn app_slug_falls_back_for_empty_names() {
+        assert_eq!(app_slug("!!!"), "app");
+    }
 }
 
 struct UpdateCheck {

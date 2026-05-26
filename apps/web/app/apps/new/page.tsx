@@ -309,7 +309,7 @@ export default function CreateApp() {
                   )}
                 </div>
                 {cloud ? (
-                  <Notice tone="neutral" className="mt-4" description={`Hostlet will generate a ${cloudflare?.baseDomain || "apps.hostlet.cloud"} URL and assign the managed cloud worker automatically.`} />
+                  <Notice tone="neutral" className="mt-4" description={`Hostlet will use ${generatedDomain || cloudflare?.defaultDomainPattern || "a hostlet.cloud URL"} when available, then add a short suffix only if needed.`} />
                 ) : (
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <ToggleCard checked={form.public_exposure} onChange={(value) => setForm({ ...form, public_exposure: value })} icon={Lock} label="Publish app URL" />
@@ -358,7 +358,7 @@ export default function CreateApp() {
                 <DataList className="mt-4">
                   <SummaryItem label="Repo" value={form.repo_full_name || "Choose a repo"} />
                   <SummaryItem label="Machine" value={cloud ? "Hostlet Cloud managed worker" : selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
-                  <SummaryItem label="Route" value={cloud ? `Generated ${cloudflare?.baseDomain || "apps.hostlet.cloud"} URL` : routePreview} />
+                  <SummaryItem label="Route" value={cloud ? `${routePreview} if available` : routePreview} />
                   <SummaryItem label="Runtime" value={`${form.runtime_kind === "compose" ? "Compose" : "Single"} · :${form.container_port}${form.health_path}`} />
                   <SummaryItem label="Automation" value={cloud ? "manual deploy · public Hostlet URL" : `${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
                 </DataList>

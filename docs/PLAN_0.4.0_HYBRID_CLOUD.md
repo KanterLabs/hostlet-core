@@ -19,7 +19,7 @@ For the MVP, `hostlet.cloud` points to one cloud VM. That VM runs:
 - managed Hostlet agent
 - customer app containers
 
-Managed app URLs use `*.apps.hostlet.cloud`.
+Managed app URLs use `*.hostlet.cloud`.
 
 Self-hosted panels are untrusted clients when they use Hostlet Cloud. They can authenticate to `hostlet.cloud` and request cloud deploys, but they never receive managed worker tokens, Cloudflare tokens, Stripe secrets, GitHub App private keys, direct database access, or raw job-queue access.
 
@@ -40,7 +40,7 @@ Acceptance: current self-hosted app create, deploy, logs, rollback, restart, pub
   - `PUBLIC_WEB_URL=https://hostlet.cloud`
   - `PUBLIC_API_URL=https://hostlet.cloud`
   - `PUBLIC_WEBHOOK_URL=https://hostlet.cloud`
-  - `HOSTLET_BASE_DOMAIN=apps.hostlet.cloud`
+  - `HOSTLET_BASE_DOMAIN=hostlet.cloud`
 - Run web, API, Postgres, Caddy, managed agent, and customer containers on the same VM.
 - Do not add Cloud Build, Artifact Registry, Firestore, Kubernetes, or a worker fleet in 0.4.0.
 
@@ -106,10 +106,10 @@ Acceptance: unpaid users and linked self-hosted panels cannot bypass billing or 
 - In cloud mode, cloud apps are owned by `cloud_users`.
 - The cloud API assigns cloud apps to the local managed agent on the same VM.
 - Users never choose the cloud server.
-- Generate domains as `<app-slug>-<short-id>.apps.hostlet.cloud`.
+- Generate domains as `<app-slug>.hostlet.cloud`, adding `<app-slug>-<short-id>.hostlet.cloud` only for collisions or reserved labels.
 - Reuse existing deploy, logs, health, rollback, restart, and delete job flow.
 
-Acceptance: a paid cloud user can deploy a supported repo to the same VM and get a working `*.apps.hostlet.cloud` URL.
+Acceptance: a paid cloud user can deploy a supported repo to the same VM and get a working `*.hostlet.cloud` URL.
 
 ## Phase 8: Security And Abuse Controls
 
@@ -151,7 +151,7 @@ Validate cloud mode locally:
 - mocked/test Stripe entitlement through the production entitlement code path
 - GitHub App repo access path
 - cloud app deploys to the same machine’s managed agent
-- generated `*.apps.hostlet.cloud` equivalent routes through Caddy
+- generated `*.hostlet.cloud` equivalent routes through Caddy
 - logs, health, rollback, restart, and usage work
 
 Acceptance: no push until this phase passes.

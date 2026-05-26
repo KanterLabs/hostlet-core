@@ -92,7 +92,7 @@ services:
     command: caddy run --config /etc/caddy/Caddyfile
     environment:
       HOSTLET_CONTROL_PLANE_HOST: ${HOSTLET_CONTROL_PLANE_HOST:-localhost}
-      HOSTLET_APPS_HOST: ${HOSTLET_BASE_DOMAIN:-apps.hostlet.cloud}
+      HOSTLET_APPS_HOST: ${HOSTLET_BASE_DOMAIN:-hostlet.cloud}
     volumes:
       - ${HOSTLET_CADDYFILE:-./Caddyfile.tunnel}:/etc/caddy/Caddyfile:ro
       - hostlet-agent:/var/lib/hostlet

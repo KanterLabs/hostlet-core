@@ -7,7 +7,7 @@ Hostlet 0.4.0 starts the hybrid cloud track while keeping the existing self-host
 - Adds `HOSTLET_MODE=self_hosted|cloud` as the explicit runtime mode boundary.
 - Adds cloud integration configuration plumbing for GitHub App, Stripe, and Hostlet Cloud status checks.
 - Adds cloud account, GitHub installation, Stripe subscription, entitlement, usage, and webhook event tables.
-- Adds a direct-origin Caddy config for `hostlet.cloud` and `*.apps.hostlet.cloud`.
+- Adds a direct-origin Caddy config for `hostlet.cloud` and `*.hostlet.cloud`.
 - Updates production Compose to pass cloud mode, GitHub App, and Stripe environment values.
 - Documents the single-VM Hostlet Cloud MVP plan.
 

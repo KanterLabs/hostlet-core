@@ -35,7 +35,7 @@ HOSTLET_CADDYFILE=./Caddyfile.direct docker compose -f infra/docker-compose.prod
 ## Direct-Origin Cloud Infra
 
 1. Confirm `hostlet.cloud` points through Cloudflare to the reserved VM IP.
-2. Confirm `*.apps.hostlet.cloud` points through Cloudflare to the reserved VM IP.
+2. Confirm `*.hostlet.cloud` points through Cloudflare to the reserved VM IP.
 3. Confirm GCP firewall allows ports 80 and 443 to the VM.
 4. Confirm Caddy routes `hostlet.cloud` to the web/API services and wildcard app hostnames to managed app snippets.
 

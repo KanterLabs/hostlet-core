@@ -4,7 +4,7 @@ http://{$HOSTLET_CONTROL_PLANE_HOST:hostlet.cloud} {
 	reverse_proxy 127.0.0.1:3000
 }
 
-http://*.{$HOSTLET_APPS_HOST:apps.hostlet.cloud} {
+http://*.{$HOSTLET_APPS_HOST:hostlet.cloud} {
 	route {
 		import /var/lib/hostlet/caddy/*.caddy
 		respond "not found" 404
