@@ -7,6 +7,8 @@ Planning documents:
 - [Hostlet 0.2.0 Plan](PLAN_0.2.0.md): recurring app health checks, live status refresh, update detection, easy CLI updates, and manual refresh work.
 - [Hostlet 0.3.0 Plan](PLAN_0.3.0.md): durable agent jobs, recovery, audit history, retention, backups, release hardening, and remote-agent readiness.
 - [Hostlet 0.3.0 Validation Checklist](VALIDATION_0.3.0.md): pre-tag validation for durable jobs, audit events, release artifacts, and production updates.
+- [Hostlet 0.4.0 Hybrid Cloud Plan](PLAN_0.4.0_HYBRID_CLOUD.md): single-VM Hostlet Cloud MVP, cloud account foundations, and release gates.
+- [Hostlet 0.4.0 Validation Checklist](VALIDATION_0.4.0.md): self-hosted regression and cloud foundation validation before tagging.
 
 ## Components
 

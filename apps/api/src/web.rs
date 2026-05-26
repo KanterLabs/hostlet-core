@@ -1065,8 +1065,42 @@ pub async fn system_version(
     let update = cached_update_check(&state).await;
     Json(serde_json::json!({
         "currentVersion": env!("CARGO_PKG_VERSION"),
+        "mode": state.mode.as_str(),
         "updateChecksEnabled": state.update_checks_enabled,
         "update": update,
+    }))
+    .into_response()
+}
+
+pub async fn cloud_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(_user_id) = current_user_id(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    Json(serde_json::json!({
+        "mode": state.mode.as_str(),
+        "enabled": state.mode == crate::state::HostletMode::Cloud,
+        "publicWebUrl": state.public_web_url,
+        "publicApiUrl": state.public_api_url,
+        "baseDomain": state.base_domain.as_deref(),
+        "githubOAuth": {
+            "clientIdConfigured": !state.github_client_id.trim().is_empty(),
+            "clientSecretConfigured": state.github_client_secret.is_some()
+        },
+        "githubApp": {
+            "appIdConfigured": state.github_app_id.is_some(),
+            "clientIdConfigured": state.github_app_client_id.is_some(),
+            "clientSecretConfigured": state.github_app_client_secret.is_some(),
+            "privateKeyConfigured": state.github_app_private_key_pem.is_some(),
+            "webhookSecretConfigured": state.github_app_webhook_secret.is_some()
+        },
+        "stripe": {
+            "secretKeyConfigured": state.stripe_secret_key.is_some(),
+            "publishableKeyConfigured": state.stripe_publishable_key.is_some(),
+            "webhookSecretConfigured": state.stripe_webhook_secret.is_some(),
+            "studentPriceConfigured": state.stripe_price_student.is_some(),
+            "starterPriceConfigured": state.stripe_price_starter.is_some(),
+            "proPriceConfigured": state.stripe_price_pro.is_some()
+        }
     }))
     .into_response()
 }
@@ -1111,6 +1145,7 @@ pub async fn operator_status(
     }
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "mode": state.mode.as_str(),
         "health": health,
         "servers": server_counts,
     }))

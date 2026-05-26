@@ -15,9 +15,11 @@ services:
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     environment:
+      HOSTLET_MODE: ${HOSTLET_MODE:-self_hosted}
       DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
       BIND_ADDR: 0.0.0.0:8080
       PUBLIC_API_URL: ${PUBLIC_API_URL:?Run hostlet init first}
+      PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
       PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:?Run hostlet init first}
       HOSTLET_ALLOWED_WEB_ORIGINS: ${HOSTLET_ALLOWED_WEB_ORIGINS:-}
       HOSTLET_BASE_DOMAIN: ${HOSTLET_BASE_DOMAIN:-}
@@ -36,6 +38,18 @@ services:
       LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:?Run hostlet init first}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?Run hostlet init first}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      GITHUB_APP_PRIVATE_KEY_PEM: ${GITHUB_APP_PRIVATE_KEY_PEM:-}
+      GITHUB_APP_WEBHOOK_SECRET: ${GITHUB_APP_WEBHOOK_SECRET:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_STUDENT: ${STRIPE_PRICE_STUDENT:-}
+      STRIPE_PRICE_STARTER: ${STRIPE_PRICE_STARTER:-}
+      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO:-}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -77,8 +91,9 @@ services:
     command: caddy run --config /etc/caddy/Caddyfile
     environment:
       HOSTLET_CONTROL_PLANE_HOST: ${HOSTLET_CONTROL_PLANE_HOST:-localhost}
+      HOSTLET_APPS_HOST: ${HOSTLET_BASE_DOMAIN:-apps.hostlet.cloud}
     volumes:
-      - ./Caddyfile.tunnel:/etc/caddy/Caddyfile:ro
+      - ${HOSTLET_CADDYFILE:-./Caddyfile.tunnel}:/etc/caddy/Caddyfile:ro
       - hostlet-agent:/var/lib/hostlet
 
   cloudflared:

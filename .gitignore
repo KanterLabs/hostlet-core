@@ -4,6 +4,7 @@ node_modules/
 .next/
 .env
 .env.local
+.env.prod
 *.db
 hostlet-agent
 data/

@@ -11,12 +11,53 @@ use std::{
 use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostletMode {
+    SelfHosted,
+    Cloud,
+}
+
+impl HostletMode {
+    pub fn from_env() -> anyhow::Result<Self> {
+        match std::env::var("HOSTLET_MODE")
+            .unwrap_or_else(|_| "self_hosted".into())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "self_hosted" | "self-hosted" | "local" => Ok(Self::SelfHosted),
+            "cloud" => Ok(Self::Cloud),
+            other => bail!("HOSTLET_MODE must be self_hosted or cloud, got {other}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfHosted => "self_hosted",
+            Self::Cloud => "cloud",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub crypto: Crypto,
+    pub mode: HostletMode,
     pub http: reqwest::Client,
     pub github_client_id: String,
+    pub github_client_secret: Option<String>,
+    pub github_app_id: Option<String>,
+    pub github_app_client_id: Option<String>,
+    pub github_app_client_secret: Option<String>,
+    pub github_app_private_key_pem: Option<String>,
+    pub github_app_webhook_secret: Option<String>,
+    pub stripe_secret_key: Option<String>,
+    pub stripe_publishable_key: Option<String>,
+    pub stripe_webhook_secret: Option<String>,
+    pub stripe_price_student: Option<String>,
+    pub stripe_price_starter: Option<String>,
+    pub stripe_price_pro: Option<String>,
     pub github_webhook_secret: String,
     pub public_webhook_url: String,
     pub public_api_url: String,
@@ -53,6 +94,7 @@ pub struct LogEvent {
 impl AppState {
     pub async fn from_env() -> anyhow::Result<Self> {
         let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+        let mode = HostletMode::from_env()?;
         let allow_insecure_dev_defaults = bool_env("HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS");
         let db = PgPoolOptions::new()
             .max_connections(10)
@@ -91,8 +133,21 @@ impl AppState {
         Ok(Self {
             db,
             crypto,
+            mode,
             http,
             github_client_id: std::env::var("GITHUB_CLIENT_ID").unwrap_or_default(),
+            github_client_secret: nonempty_env("GITHUB_CLIENT_SECRET"),
+            github_app_id: nonempty_env("GITHUB_APP_ID"),
+            github_app_client_id: nonempty_env("GITHUB_APP_CLIENT_ID"),
+            github_app_client_secret: nonempty_env("GITHUB_APP_CLIENT_SECRET"),
+            github_app_private_key_pem: nonempty_env("GITHUB_APP_PRIVATE_KEY_PEM"),
+            github_app_webhook_secret: nonempty_env("GITHUB_APP_WEBHOOK_SECRET"),
+            stripe_secret_key: nonempty_env("STRIPE_SECRET_KEY"),
+            stripe_publishable_key: nonempty_env("STRIPE_PUBLISHABLE_KEY"),
+            stripe_webhook_secret: nonempty_env("STRIPE_WEBHOOK_SECRET"),
+            stripe_price_student: nonempty_env("STRIPE_PRICE_STUDENT"),
+            stripe_price_starter: nonempty_env("STRIPE_PRICE_STARTER"),
+            stripe_price_pro: nonempty_env("STRIPE_PRICE_PRO"),
             github_webhook_secret: secret_from_env(
                 "GITHUB_WEBHOOK_SECRET",
                 allow_insecure_dev_defaults,
