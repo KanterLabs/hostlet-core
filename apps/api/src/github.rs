@@ -1,5 +1,5 @@
 use crate::{
-    auth::current_user_id, crypto::verify_signature, deploy::create_and_send_deploy,
+    auth::current_user_id, crypto::verify_signature, deploy::create_and_send_deploy, github_app,
     state::AppState,
 };
 use axum::{
@@ -22,19 +22,80 @@ pub struct RepoInspectRequest {
 }
 
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let oauth_configured = !state.github_client_id.trim().is_empty();
+    let cloud_missing = github_app::missing_cloud_github_app_config(&state);
+    let oauth_configured = if state.mode == crate::state::HostletMode::Cloud {
+        cloud_missing.is_empty()
+    } else {
+        !state.github_client_id.trim().is_empty()
+    };
     let webhook_configured = !state.github_webhook_secret.trim().is_empty();
 
     let Some(user_id) = current_user_id(&headers, &state) else {
         return Json(serde_json::json!({
             "oauthConfigured": oauth_configured,
             "webhookConfigured": webhook_configured,
+            "missingCloudConfig": cloud_missing,
             "authenticated": false,
             "tokenValid": null,
             "login": null,
-            "message": if oauth_configured { "GitHub Device Flow is configured. Connect GitHub to verify your account token." } else { "GitHub Device Flow is missing GITHUB_CLIENT_ID." }
+            "message": if state.mode == crate::state::HostletMode::Cloud {
+                if oauth_configured { "GitHub App OAuth is configured. Sign in with GitHub to continue." } else { "GitHub App cloud configuration is incomplete." }
+            } else if oauth_configured { "GitHub Device Flow is configured. Connect GitHub to verify your account token." } else { "GitHub Device Flow is missing GITHUB_CLIENT_ID." }
         })).into_response();
     };
+
+    if state.mode == crate::state::HostletMode::Cloud {
+        if !oauth_configured {
+            return Json(serde_json::json!({
+                "oauthConfigured": false,
+                "webhookConfigured": webhook_configured,
+                "missingCloudConfig": cloud_missing,
+                "authenticated": true,
+                "tokenValid": false,
+                "login": null,
+                "message": "GitHub App cloud configuration is incomplete."
+            }))
+            .into_response();
+        }
+        match github_app::installation_token_for_app_user(&state, user_id, None).await {
+            Ok(Some(_)) => {
+                return Json(serde_json::json!({
+                    "oauthConfigured": true,
+                    "webhookConfigured": webhook_configured,
+                    "missingCloudConfig": [],
+                    "authenticated": true,
+                    "tokenValid": true,
+                    "login": null,
+                    "message": "GitHub App installation is connected."
+                }))
+                .into_response();
+            }
+            Ok(None) => {
+                return Json(serde_json::json!({
+                    "oauthConfigured": true,
+                    "webhookConfigured": webhook_configured,
+                    "missingCloudConfig": [],
+                    "authenticated": true,
+                    "tokenValid": false,
+                    "login": null,
+                    "message": "Install the Hostlet GitHub App before importing repos."
+                }))
+                .into_response();
+            }
+            Err(err) => {
+                return Json(serde_json::json!({
+                    "oauthConfigured": true,
+                    "webhookConfigured": webhook_configured,
+                    "missingCloudConfig": [],
+                    "authenticated": true,
+                    "tokenValid": false,
+                    "login": null,
+                    "message": format!("GitHub App installation check failed: {err}")
+                }))
+                .into_response();
+            }
+        }
+    }
 
     let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1")
         .bind(user_id)
@@ -110,6 +171,18 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
     let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if state.mode == crate::state::HostletMode::Cloud {
+        return match github_app::repositories_for_user(&state, user_id).await {
+            Ok(value) => {
+                let items = value
+                    .get("repositories")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
+                Json(items).into_response()
+            }
+            Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        };
+    }
     let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1").bind(user_id).fetch_optional(&state.db).await;
     let Ok(Some(row)) = row else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -153,7 +226,7 @@ pub async fn repo_inspect(
     headers: HeaderMap,
     Json(body): Json<RepoInspectRequest>,
 ) -> impl IntoResponse {
-    let Some(_user_id) = current_user_id(&headers, &state) else {
+    let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let repo = body
@@ -168,20 +241,32 @@ pub async fn repo_inspect(
         )
             .into_response();
     };
-    match inspect_public_repo(&state, &repo, body.branch.as_deref()).await {
+    let token =
+        match github_app::installation_token_for_app_user(&state, user_id, Some(&repo)).await {
+            Ok(token) => token,
+            Err(err) => return (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        };
+    match inspect_repo(&state, &repo, body.branch.as_deref(), token.as_deref()).await {
         Ok(value) => Json(value).into_response(),
         Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
     }
 }
 
-async fn inspect_public_repo(
+async fn inspect_repo(
     state: &AppState,
     repo: &str,
     requested_branch: Option<&str>,
+    token: Option<&str>,
 ) -> anyhow::Result<Value> {
-    let repo_meta: Value = state
+    let mut repo_request = state
         .http
-        .get(format!("https://api.github.com/repos/{repo}"))
+        .get(format!("https://api.github.com/repos/{repo}"));
+    if let Some(token) = token {
+        repo_request = repo_request.bearer_auth(token);
+    }
+    let repo_meta: Value = repo_request
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "Hostlet")
         .send()
         .await?
         .error_for_status()?
@@ -199,7 +284,7 @@ async fn inspect_public_repo(
         return Ok(gitea_inspection(repo, branch, default_branch));
     }
 
-    if let Some(contents) = github_file_text(state, repo, branch, "Dockerfile").await? {
+    if let Some(contents) = github_file_text(state, repo, branch, "Dockerfile", token).await? {
         let inference = infer_dockerfile(&contents);
         return Ok(json!({
             "repoFullName": repo,
@@ -220,7 +305,7 @@ async fn inspect_public_repo(
         }));
     }
 
-    if github_file_text(state, repo, branch, "package.json")
+    if github_file_text(state, repo, branch, "package.json", token)
         .await?
         .is_some()
     {
@@ -267,12 +352,21 @@ async fn github_file_text(
     repo: &str,
     branch: &str,
     path: &str,
+    token: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let url = format!(
         "https://api.github.com/repos/{repo}/contents/{path}?ref={}",
         url::form_urlencoded::byte_serialize(branch.as_bytes()).collect::<String>()
     );
-    let response = state.http.get(url).send().await?;
+    let mut request = state
+        .http
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "Hostlet");
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
     if response.status() == StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -284,6 +378,7 @@ async fn github_file_text(
         state
             .http
             .get(download_url)
+            .header("User-Agent", "Hostlet")
             .send()
             .await?
             .error_for_status()?
@@ -531,7 +626,15 @@ pub async fn webhook(
         .get("x-hub-signature-256")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !verify_signature(&state.github_webhook_secret, &body, sig) {
+    let webhook_secret = if state.mode == crate::state::HostletMode::Cloud {
+        state
+            .github_app_webhook_secret
+            .as_deref()
+            .unwrap_or(&state.github_webhook_secret)
+    } else {
+        &state.github_webhook_secret
+    };
+    if !verify_signature(webhook_secret, &body, sig) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let event = headers

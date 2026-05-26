@@ -142,7 +142,8 @@ impl AppState {
             github_app_slug: nonempty_env("GITHUB_APP_SLUG"),
             github_app_client_id: nonempty_env("GITHUB_APP_CLIENT_ID"),
             github_app_client_secret: nonempty_env("GITHUB_APP_CLIENT_SECRET"),
-            github_app_private_key_pem: nonempty_env("GITHUB_APP_PRIVATE_KEY_PEM"),
+            github_app_private_key_pem: nonempty_env("GITHUB_APP_PRIVATE_KEY_PEM")
+                .map(normalize_multiline_env_secret),
             github_app_webhook_secret: nonempty_env("GITHUB_APP_WEBHOOK_SECRET"),
             stripe_secret_key: nonempty_env("STRIPE_SECRET_KEY"),
             stripe_publishable_key: nonempty_env("STRIPE_PUBLISHABLE_KEY"),
@@ -248,6 +249,10 @@ fn nonempty_env(key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_multiline_env_secret(value: String) -> String {
+    value.replace("\\n", "\n")
 }
 
 fn bool_env(key: &str) -> bool {

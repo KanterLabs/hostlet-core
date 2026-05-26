@@ -1,5 +1,6 @@
 use crate::{
     crypto::{constant_time_eq, hash_token, random_token, sign, verify_signature},
+    github_app,
     state::{AppState, HostletMode},
 };
 use argon2::{
@@ -1027,17 +1028,38 @@ async fn upsert_cloud_installation(
     cloud_user_id: Uuid,
     installation_id: i64,
 ) -> anyhow::Result<()> {
+    let (account_login, account_type, permissions, repository_selection) =
+        match github_app::fetch_installation_info(state, installation_id).await {
+            Ok(info) => github_app::installation_info_defaults(info),
+            Err(err) => {
+                tracing::warn!(error = %err, installation_id, "could not fetch GitHub App installation metadata");
+                (
+                    "pending".to_string(),
+                    "unknown".to_string(),
+                    serde_json::json!({}),
+                    "selected".to_string(),
+                )
+            }
+        };
     sqlx::query(
         "INSERT INTO cloud_github_installations
            (cloud_user_id, installation_id, account_login, account_type, permissions_json, repository_selection)
-         VALUES ($1,$2,'pending','unknown','{}'::jsonb,'selected')
+         VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (installation_id) DO UPDATE SET
            cloud_user_id=EXCLUDED.cloud_user_id,
+           account_login=EXCLUDED.account_login,
+           account_type=EXCLUDED.account_type,
+           permissions_json=EXCLUDED.permissions_json,
+           repository_selection=EXCLUDED.repository_selection,
            updated_at=now(),
            suspended_at=NULL",
     )
     .bind(cloud_user_id)
     .bind(installation_id)
+    .bind(account_login)
+    .bind(account_type)
+    .bind(permissions)
+    .bind(repository_selection)
     .execute(&state.db)
     .await?;
     Ok(())

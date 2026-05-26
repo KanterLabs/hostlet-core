@@ -1,5 +1,6 @@
 use crate::{
     auth::{cloud_compute_allowed_for_user, current_user_id},
+    github_app,
     state::AppState,
 };
 use axum::{
@@ -177,11 +178,15 @@ pub async fn create_and_send_deploy(
                 .decrypt(row.get::<String, _>("value_ciphertext").as_str())?),
         );
     }
-    let github_token = github_access_token(state, user_id).await.ok();
+    let repo_full_name = app.get::<String, _>("repo_full_name");
+    let github_token = github_token_for_deploy(state, user_id, &repo_full_name)
+        .await
+        .ok()
+        .flatten();
     let payload = json!({
         "type": "deploy", "deployment_id": deployment_id, "app_id": app_id,
         "route_key": route_key(app_id),
-        "app_name": app.get::<String,_>("name"), "repo": app.get::<String,_>("repo_full_name"),
+        "app_name": app.get::<String,_>("name"), "repo": repo_full_name,
         "branch": app.get::<String,_>("branch"), "commit_sha": commit_sha,
         "container_port": app.get::<i32,_>("container_port"), "health_path": app.get::<String,_>("health_path"),
         "domain": app.get::<String,_>("domain"), "env": env,
@@ -420,6 +425,18 @@ async fn github_access_token(state: &AppState, user_id: Uuid) -> anyhow::Result<
             .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
     })
     .transpose()
+}
+
+async fn github_token_for_deploy(
+    state: &AppState,
+    user_id: Uuid,
+    repo_full_name: &str,
+) -> anyhow::Result<Option<String>> {
+    if state.mode == crate::state::HostletMode::Cloud {
+        return github_app::installation_token_for_app_user(state, user_id, Some(repo_full_name))
+            .await;
+    }
+    github_access_token(state, user_id).await
 }
 
 #[cfg(test)]

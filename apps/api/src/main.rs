@@ -3,6 +3,7 @@ mod auth;
 mod crypto;
 mod deploy;
 mod github;
+mod github_app;
 mod rate_limit;
 mod state;
 mod web;
