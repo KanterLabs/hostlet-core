@@ -13,7 +13,7 @@ export default function Login() {
           <IconFrame icon={TerminalSquare} className="h-11 w-11 bg-action text-white ring-0" />
           <div>
             <h1 className="text-2xl font-semibold">Hostlet</h1>
-            <p className="muted mt-1">Sign in to manage your self-hosted deployments.</p>
+            <p className="muted mt-1">Sign in to manage your Hostlet deployments.</p>
           </div>
         </div>
         <div className="mt-5"><GitHubStatus showConnect={false} /></div>

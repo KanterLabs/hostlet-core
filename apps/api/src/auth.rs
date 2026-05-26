@@ -1,6 +1,6 @@
 use crate::{
     crypto::{constant_time_eq, random_token, sign, verify_signature},
-    state::AppState,
+    state::{AppState, HostletMode},
 };
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -74,18 +74,20 @@ pub async fn github_device_start(
         )
             .into_response();
     }
-    if control_plane_password_hash(&state)
-        .await
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        return (StatusCode::PRECONDITION_REQUIRED, "setup is required").into_response();
-    }
-    if !control_plane_unlocked(&headers, &state.session_secret)
-        && !has_existing_users(&state).await.unwrap_or(false)
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if state.mode == HostletMode::SelfHosted {
+        if control_plane_password_hash(&state)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            return (StatusCode::PRECONDITION_REQUIRED, "setup is required").into_response();
+        }
+        if !control_plane_unlocked(&headers, &state.session_secret)
+            && !has_existing_users(&state).await.unwrap_or(false)
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
     }
     let web_origin = request_web_origin(&headers)
         .filter(|origin| state.web_origin_allowed(origin))
@@ -368,12 +370,20 @@ pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn setup_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if state.mode == HostletMode::Cloud {
+        return Json(serde_json::json!({
+            "mode": state.mode.as_str(),
+            "setupRequired": false,
+            "unlocked": true
+        }));
+    }
     let setup_required = control_plane_password_hash(&state)
         .await
         .ok()
         .flatten()
         .is_none();
     Json(serde_json::json!({
+        "mode": state.mode.as_str(),
         "setupRequired": setup_required,
         "unlocked": !setup_required && control_plane_unlocked(&headers, &state.session_secret)
     }))
@@ -384,6 +394,13 @@ pub async fn setup_password(
     headers: HeaderMap,
     Json(body): Json<PasswordBody>,
 ) -> impl IntoResponse {
+    if state.mode == HostletMode::Cloud {
+        return (
+            StatusCode::FORBIDDEN,
+            "control-plane setup is only available in self-hosted mode",
+        )
+            .into_response();
+    }
     if let Some(expected) = &state.setup_token {
         let provided = headers
             .get("x-hostlet-setup-token")
@@ -425,6 +442,13 @@ pub async fn unlock(
     State(state): State<AppState>,
     Json(body): Json<PasswordBody>,
 ) -> impl IntoResponse {
+    if state.mode == HostletMode::Cloud {
+        return (
+            StatusCode::FORBIDDEN,
+            "control-plane unlock is only available in self-hosted mode",
+        )
+            .into_response();
+    }
     let Some(hash) = control_plane_password_hash(&state).await.ok().flatten() else {
         return (StatusCode::PRECONDITION_REQUIRED, "setup is required").into_response();
     };
@@ -439,9 +463,12 @@ pub async fn unlock(
 }
 
 pub fn current_user_id(headers: &HeaderMap, state: &AppState) -> Option<Uuid> {
-    control_plane_unlocked(headers, &state.session_secret)
-        .then(|| current_user_id_from_headers(headers, &state.session_secret))
-        .flatten()
+    match state.mode {
+        HostletMode::Cloud => current_user_id_from_headers(headers, &state.session_secret),
+        HostletMode::SelfHosted => control_plane_unlocked(headers, &state.session_secret)
+            .then(|| current_user_id_from_headers(headers, &state.session_secret))
+            .flatten(),
+    }
 }
 
 fn current_user_id_from_headers(headers: &HeaderMap, session_secret: &str) -> Option<Uuid> {
