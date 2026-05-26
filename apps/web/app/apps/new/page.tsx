@@ -185,9 +185,19 @@ export default function CreateApp() {
     setMessage("Creating app...");
     try {
       const env = inspection ? (inspection.env || []).filter((item) => envValues[item.key]).map((item) => ({ key: item.key, value: envValues[item.key] })) : [];
+      const payload: Record<string, unknown> = {
+        ...form,
+        server_id: form.server_id || null,
+        env,
+        deploy_after_create: !!inspection?.deployable,
+      };
+      if (cloud) {
+        delete payload.memory_limit_mb;
+        delete payload.cpu_limit;
+      }
       const res = await api<{ id: string; deploymentId?: string | null }>("/api/apps", {
         method: "POST",
-        body: JSON.stringify({ ...form, server_id: form.server_id || null, env, deploy_after_create: !!inspection?.deployable }),
+        body: JSON.stringify(payload),
       });
       setMessage(inspection?.deployable ? "App created. Opening deployment logs..." : "App created. Opening deploy screen...");
       router.push(res.deploymentId ? `/deployments/${res.deploymentId}` : `/apps/${res.id}`);
@@ -357,20 +367,26 @@ export default function CreateApp() {
                     {!cloud && <option value="compose">Docker Compose</option>}
                   </SelectField>
                   {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setForm({ ...form, hostlet_config_path: value })} placeholder="hostlet.yml" />}
-                  <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })} disabled={cloud}>
-                    <option value={256}>256 MB</option>
-                    <option value={512}>512 MB</option>
-                    <option value={1024}>1 GB</option>
-                    <option value={2048}>2 GB</option>
-                    <option value={4096}>4 GB</option>
-                  </SelectField>
-                  <SelectField label="CPU limit" value={form.cpu_limit} onChange={(value) => setForm({ ...form, cpu_limit: Number(value) })} disabled={cloud}>
-                    <option value={0.25}>0.25 CPU</option>
-                    <option value={0.5}>0.5 CPU</option>
-                    <option value={1}>1 CPU</option>
-                    <option value={2}>2 CPUs</option>
-                    <option value={4}>4 CPUs</option>
-                  </SelectField>
+                  {cloud ? (
+                    <SummaryItem label="Plan resources" value="512 MB · 0.5 CPU" />
+                  ) : (
+                    <>
+                      <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })}>
+                        <option value={256}>256 MB</option>
+                        <option value={512}>512 MB</option>
+                        <option value={1024}>1 GB</option>
+                        <option value={2048}>2 GB</option>
+                        <option value={4096}>4 GB</option>
+                      </SelectField>
+                      <SelectField label="CPU limit" value={form.cpu_limit} onChange={(value) => setForm({ ...form, cpu_limit: Number(value) })}>
+                        <option value={0.25}>0.25 CPU</option>
+                        <option value={0.5}>0.5 CPU</option>
+                        <option value={1}>1 CPU</option>
+                        <option value={2}>2 CPUs</option>
+                        <option value={4}>4 CPUs</option>
+                      </SelectField>
+                    </>
+                  )}
                 </div>
                 <div className="mt-4 grid gap-4">
                   <Field label="Install command" value={form.install_command} onChange={(value) => setForm({ ...form, install_command: value })} placeholder="auto, npm install, pnpm install" />
