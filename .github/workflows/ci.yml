@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - hostlet-0.4.0-cloud-foundation
 
 permissions:
   contents: read
@@ -53,6 +54,7 @@ jobs:
       - run: ../../scripts/ci-web-route-smoke.sh
       - run: pnpm exec playwright install chromium
       - run: pnpm responsive:qa
+      - run: ../../scripts/ci-security-artifact-smoke.sh
 
   compose:
     runs-on: [self-hosted, Linux, X64]

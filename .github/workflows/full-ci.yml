@@ -1,0 +1,100 @@
+name: Full CI
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * *"
+  push:
+    branches:
+      - main
+      - hostlet-0.4.0-cloud-foundation
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-self-hosted-api:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci-self-hosted-api-smoke.sh
+
+  full-cloud-api:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci-cloud-api-smoke.sh
+      - run: scripts/ci-cloud-api-e2e.sh
+
+  full-web-visual:
+    runs-on: [self-hosted, Linux, X64]
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm exec playwright install chromium
+      - run: pnpm responsive:qa
+      - run: ../../scripts/ci-security-artifact-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: responsive-qa-screenshots
+          path: /tmp/hostlet-responsive-qa
+
+  full-self-hosted-deploy:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci-self-hosted-deploy-e2e.sh
+
+  full-compose-and-release:
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
+      PUBLIC_API_URL: http://localhost:8080
+      PUBLIC_WEB_URL: http://localhost:3000
+      HOSTLET_SETUP_TOKEN: ci-only-not-a-secret-setup-token-01
+      HOSTLET_ALLOWED_GITHUB_LOGINS: ci-user
+      ENCRYPTION_KEY: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+      JOB_SIGNING_SECRET: ci-only-not-a-secret-job-signing-01
+      SESSION_SECRET: ci-only-not-a-secret-session-secret-01
+      LOCAL_AGENT_TOKEN: ci-only-not-a-secret-agent-token-01
+      GITHUB_WEBHOOK_SECRET: ci-only-not-a-secret-webhook-secret-01
+      CLOUDFLARE_TUNNEL_TOKEN: ci-only-not-a-secret-tunnel-token-01
+      DOCKER_GID: "998"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: docker compose -f infra/docker-compose.yml config >/dev/null
+      - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
+      - run: HOSTLET_CADDYFILE=./Caddyfile.direct docker compose -f infra/docker-compose.prod.yml config >/dev/null
+      - run: cargo test -p hostlet-agent compose -- --nocapture
+      - run: cargo test -p hostlet-api compose -- --nocapture
+      - run: cargo build --release -p hostlet
+      - run: |
+          mkdir -p dist
+          cp target/release/hostlet dist/hostlet-linux-x64
+          sha256sum dist/hostlet-linux-x64 > dist/hostlet-linux-x64.sha256
+          scripts/ci-security-artifact-smoke.sh
