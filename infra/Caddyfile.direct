@@ -5,6 +5,8 @@ http://{$HOSTLET_CONTROL_PLANE_HOST:hostlet.cloud} {
 }
 
 http://*.{$HOSTLET_APPS_HOST:apps.hostlet.cloud} {
-	import /var/lib/hostlet/caddy/*.caddy
-	respond "not found" 404
+	route {
+		import /var/lib/hostlet/caddy/*.caddy
+		respond "not found" 404
+	}
 }
