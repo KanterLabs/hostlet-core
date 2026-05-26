@@ -1,5 +1,5 @@
 use crate::{
-    auth::{cloud_compute_allowed_for_user, current_user_id},
+    auth::{cloud_compute_allowed_for_context, cloud_compute_allowed_for_user, request_context},
     github_app,
     state::AppState,
 };
@@ -31,13 +31,17 @@ pub async fn manual_deploy(
     headers: HeaderMap,
     Path(app_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_user(&state, user_id).await {
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
         return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
     }
-    match create_and_send_deploy(&state, user_id, app_id, "HEAD").await {
+    match create_and_send_deploy(&state, context.user_id, app_id, "HEAD").await {
         Ok(id) => Json(json!({"deploymentId": id})).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
@@ -48,18 +52,19 @@ pub async fn get_deployment(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let row = sqlx::query(
         "SELECT d.* FROM deployments d JOIN apps a ON a.id=d.app_id WHERE d.id=$1 AND a.user_id=$2",
     )
     .bind(id)
-    .bind(user_id)
+    .bind(context.user_id)
     .fetch_optional(&state.db)
     .await;
     match row {
-        Ok(Some(r)) => Json(json!({"id": r.get::<Uuid,_>("id"), "status": r.get::<String,_>("status"), "commitSha": r.get::<String,_>("commit_sha"), "failure": r.get::<Option<String>,_>("failure_summary")})).into_response(),
+        Ok(Some(r)) => Json(json!({"id": r.get::<Uuid,_>("id"), "appId": r.get::<Uuid,_>("app_id"), "status": r.get::<String,_>("status"), "commitSha": r.get::<String,_>("commit_sha"), "failure": r.get::<Option<String>,_>("failure_summary")})).into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -69,11 +74,12 @@ pub async fn deployment_logs(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let rows = sqlx::query("SELECT l.stream,l.line,l.created_at FROM deployment_logs l JOIN deployments d ON d.id=l.deployment_id JOIN apps a ON a.id=d.app_id WHERE l.deployment_id=$1 AND a.user_id=$2 ORDER BY l.created_at ASC LIMIT 1000")
-        .bind(id).bind(user_id).fetch_all(&state.db).await;
+        .bind(id).bind(context.user_id).fetch_all(&state.db).await;
     match rows {
         Ok(rows) => Json(rows.into_iter().map(|r| json!({"stream": r.get::<String,_>("stream"), "line": r.get::<String,_>("line")})).collect::<Vec<_>>()).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -95,14 +101,15 @@ pub async fn logs_ws(
     if !origin_ok {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let row = sqlx::query(
         "SELECT 1 FROM deployments d JOIN apps a ON a.id=d.app_id WHERE d.id=$1 AND a.user_id=$2",
     )
     .bind(deployment_id)
-    .bind(user_id)
+    .bind(context.user_id)
     .fetch_optional(&state.db)
     .await;
     let Ok(Some(_)) = row else {
@@ -133,13 +140,17 @@ pub async fn rollback(
     headers: HeaderMap,
     Path(app_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_user(&state, user_id).await {
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
         return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
     }
-    match create_and_send_rollback(&state, user_id, app_id).await {
+    match create_and_send_rollback(&state, context.user_id, app_id).await {
         Ok(id) => Json(json!({"rollbackDeploymentId": id})).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
@@ -220,7 +231,10 @@ async fn create_and_send_rollback(
     app_id: Uuid,
 ) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
-    let app = sqlx::query("SELECT server_id,current_deployment_id,domain,container_port FROM apps WHERE id=$1 AND user_id=$2").bind(app_id).bind(user_id).fetch_one(&state.db).await?;
+    let app = sqlx::query("SELECT server_id,current_deployment_id,domain,container_port,runtime_kind FROM apps WHERE id=$1 AND user_id=$2").bind(app_id).bind(user_id).fetch_one(&state.db).await?;
+    if !rollback_supported_for_runtime(&app.get::<String, _>("runtime_kind")) {
+        anyhow::bail!("Compose rollback is not supported in Hostlet 0.4.0; redeploy the target revision instead");
+    }
     let current: Option<Uuid> = app.get("current_deployment_id");
     let prev = sqlx::query("SELECT id,image_tag,container_name,published_port FROM deployments WHERE app_id=$1 AND status='success' AND ($2::uuid IS NULL OR id <> $2) ORDER BY finished_at DESC LIMIT 1")
         .bind(app_id).bind(current).fetch_optional(&state.db).await?;
@@ -448,9 +462,13 @@ fn route_key(app_id: Uuid) -> String {
     format!("app-{app_id}")
 }
 
+fn rollback_supported_for_runtime(runtime_kind: &str) -> bool {
+    runtime_kind != "compose"
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_active_deployment_status;
+    use super::{is_active_deployment_status, rollback_supported_for_runtime};
 
     #[test]
     fn rollback_requires_previous_success() {
@@ -474,5 +492,11 @@ mod tests {
         for status in ["success", "failed", "rolled_back", "canceled"] {
             assert!(!is_active_deployment_status(status));
         }
+    }
+
+    #[test]
+    fn compose_rollback_is_disabled_for_release() {
+        assert!(rollback_supported_for_runtime("single"));
+        assert!(!rollback_supported_for_runtime("compose"));
     }
 }

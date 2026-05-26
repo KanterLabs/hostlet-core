@@ -68,7 +68,7 @@ export function Nav() {
         </button>
       </aside>
 
-      <nav className={`fixed inset-x-0 bottom-0 z-30 grid ${mode === "cloud" ? "grid-cols-4" : "grid-cols-5"} border-t border-white/10 bg-rail px-2 py-2 text-white shadow-lg shadow-neutral-950/20 lg:hidden`}>
+      <nav className={`fixed inset-x-0 bottom-0 z-30 grid ${mode === "cloud" ? "grid-cols-4" : "grid-cols-5"} border-t border-white/10 bg-rail px-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 text-white shadow-lg shadow-neutral-950/20 lg:hidden`}>
         {items.map((item) => {
           const Icon = item.icon;
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);

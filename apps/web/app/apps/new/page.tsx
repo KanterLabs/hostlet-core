@@ -39,6 +39,26 @@ type RepoInspection = {
   warnings: string[];
   summary: string;
 };
+type CreateAppForm = {
+  name: string;
+  repo_full_name: string;
+  branch: string;
+  server_id: string;
+  container_port: number;
+  health_path: string;
+  domain: string;
+  runtime_kind: string;
+  hostlet_config_path: string;
+  root_directory: string;
+  install_command: string;
+  build_command: string;
+  start_command: string;
+  memory_limit_mb: number;
+  cpu_limit: number;
+  public_exposure: boolean;
+  auto_deploy: boolean;
+  runtime_config: Record<string, unknown>;
+};
 
 export default function CreateApp() {
   const router = useRouter();
@@ -187,7 +207,15 @@ export default function CreateApp() {
   }, [cloudflare?.baseDomain, form.name, form.repo_full_name]);
   const routePreview = form.domain.trim() || generatedDomain || "Hostlet will generate one";
   const requiredEnvMissing = inspection?.env?.some((item) => item.required && !envValues[item.key]?.trim()) || false;
-  const canCreate = !!form.repo_full_name && !!form.name && !!form.branch && (cloud || !!form.server_id) && !requiredEnvMissing && inspection?.deployable !== false && cloudReady;
+  const createDisabledReason = createAppDisabledReason({
+    cloud,
+    cloudReady,
+    session,
+    form,
+    requiredEnvMissing,
+    inspection,
+  });
+  const canCreate = !createDisabledReason;
 
   return (
     <AppShell>
@@ -357,7 +385,7 @@ export default function CreateApp() {
                 <SectionHeader title="Create summary" />
                 <DataList className="mt-4">
                   <SummaryItem label="Repo" value={form.repo_full_name || "Choose a repo"} />
-                  <SummaryItem label="Machine" value={cloud ? "Hostlet Cloud managed worker" : selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
+                  <SummaryItem label={cloud ? "Worker" : "Machine"} value={cloud ? "Hostlet Cloud managed worker" : selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
                   <SummaryItem label="Route" value={cloud ? `${routePreview} if available` : routePreview} />
                   <SummaryItem label="Runtime" value={`${form.runtime_kind === "compose" ? "Compose" : "Single"} · :${form.container_port}${form.health_path}`} />
                   <SummaryItem label="Automation" value={cloud ? "manual deploy · public Hostlet URL" : `${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
@@ -366,7 +394,8 @@ export default function CreateApp() {
                   <Plus size={16} />
                   {creating ? "Creating..." : inspection?.deployable ? "Create and deploy" : "Create app"}
                 </button>
-                {message && <p className="mt-3 rounded-md border border-line bg-surface-alt p-3 text-sm text-muted">{message}</p>}
+                {createDisabledReason && <p className="muted mt-2 text-sm">{createDisabledReason}</p>}
+                {message && <Notice tone={message.toLowerCase().includes("failed") ? "danger" : "neutral"} className="mt-3" description={message} />}
               </Panel>
               <Notice
                 tone="neutral"
@@ -376,7 +405,7 @@ export default function CreateApp() {
                       <HardDrive size={17} />
                       Target status
                     </div>
-                    <p className="muted mt-2">Hostlet will build from GitHub, start a Docker container on this machine, health check it, then publish the route after success.</p>
+                    <p className="muted mt-2">{cloud ? "Hostlet Cloud will build from GitHub, start a managed container, health check it, then publish the Hostlet Cloud URL after success." : "Hostlet will build from GitHub, start a Docker container on this machine, health check it, then publish the route after success."}</p>
                   </div>
                 }
               />
@@ -412,4 +441,31 @@ function slugAppName(value: string) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug || "app";
+}
+
+function createAppDisabledReason({
+  cloud,
+  cloudReady,
+  session,
+  form,
+  requiredEnvMissing,
+  inspection,
+}: {
+  cloud: boolean;
+  cloudReady: boolean;
+  session: SessionPayload | null;
+  form: CreateAppForm;
+  requiredEnvMissing: boolean;
+  inspection: RepoInspection | null;
+}) {
+  if (cloud && !session?.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
+  if (cloud && !session?.cloud?.billingActive) return "Start a Stripe sandbox subscription before creating cloud apps.";
+  if (cloud && !cloudReady) return "Finish Hostlet Cloud setup before creating apps.";
+  if (!form.repo_full_name) return "Choose a GitHub repository.";
+  if (!form.name.trim()) return "Enter an app name.";
+  if (!form.branch.trim()) return "Enter a branch.";
+  if (!cloud && !form.server_id) return "Choose a local deploy target.";
+  if (requiredEnvMissing) return "Fill required environment values from the repo inspection.";
+  if (inspection?.deployable === false) return "This repo is not deployable yet. Add a Dockerfile or package.json, then inspect again.";
+  return "";
 }

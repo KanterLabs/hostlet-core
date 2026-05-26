@@ -97,6 +97,7 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
     network_mode: host
     command: tunnel --no-autoupdate run
     environment:

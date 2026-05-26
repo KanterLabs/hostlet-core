@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, Clipboard, ExternalLink, GitBranch, Loader2, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
+import { Notice } from "@/components/ui";
 
 type DeviceStart = {
   flowId: string;
@@ -77,7 +78,7 @@ export function GitHubDeviceFlow({
         if (result.status === "authorized") {
           setStatus("authorized");
           onAuthorized?.();
-          window.setTimeout(() => window.location.assign(result.redirectTo || "/"), 500);
+          window.setTimeout(() => window.location.assign(localRedirectPath(result.redirectTo)), 500);
           return;
         }
         if (result.status === "expired" || result.status === "denied") {
@@ -121,7 +122,7 @@ export function GitHubDeviceFlow({
           {busy ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
           {busy ? "Starting..." : buttonLabel}
         </button>
-        {message && <p className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{message}</p>}
+        {message && <Notice tone="danger" className="mt-3" description={message} />}
       </div>
     );
   }
@@ -164,4 +165,15 @@ export function GitHubDeviceFlow({
       )}
     </div>
   );
+}
+
+function localRedirectPath(value?: string) {
+  if (!value) return "/";
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.origin !== window.location.origin) return "/";
+    return `${url.pathname}${url.search}${url.hash}` || "/";
+  } catch {
+    return "/";
+  }
 }

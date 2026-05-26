@@ -3,7 +3,7 @@
 </h1>
 
 <p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=18&duration=3000&pause=1000&color=27AE60&center=true&vCenter=true&width=500&lines=Self-hosted+deployment+that+just+works+%F0%9F%9A%80;Deploy+GitHub+projects+in+30+seconds+%E2%9A%A1;Your+apps%2C+your+server%2C+your+rules+%F0%9F%94%92" alt="Tagline" />
+  <b>Self-hosted deploys for your server. Private beta managed deploys on Hostlet Cloud.</b>
 </p>
 
 <p align="center">
@@ -27,8 +27,8 @@
 ---
 
 <p align="center">
-  <b>Hostlet</b> is your personal deployment control panel. <br/>
-  Push code to GitHub → watch it deploy. No cloud vendor lock-in. No monthly fees. Just you and your server.
+  <b>Hostlet</b> is a deployment control panel for self-hosted servers and the private Hostlet Cloud beta. <br/>
+  Push code to GitHub, watch it build, stream logs, and run behind Caddy.
 </p>
 
 ## ✨ What You Get
@@ -48,8 +48,11 @@
 | 🗄️ PostgreSQL Database | ✅ Ready |
 | 🛡️ Caddy Reverse Proxy | ✅ Ready |
 | 💾 Backup & Restore Scripts | ✅ Ready |
+| ☁️ Hostlet Cloud Private Beta | 🧪 0.4.0 beta |
+| 💳 Stripe Sandbox Billing | 🧪 0.4.0 beta |
+| 🔐 GitHub App Cloud Auth | 🧪 0.4.0 beta |
 
-> Hostlet is local-machine-only: the UI/API and deployed app containers run on the same host. Remote VPS agents are deferred.
+> Self-hosted Hostlet remains single-machine for 0.4.0: the UI/API and deployed app containers run on the same host. Hostlet Cloud is a separate private beta at `hostlet.cloud` using managed worker compute and `*.hostlet.cloud` app URLs. Remote self-hosted VPS agents remain deferred.
 
 ## Supported App Shapes
 
@@ -57,7 +60,7 @@
 - **Generated Node apps:** package.json projects using npm, pnpm, or yarn, including Next.js, Vite, Astro, Nuxt, Remix, SvelteKit, and generic Node.
 - **Compose apps:** one public web service plus private supporting services such as workers, Redis, Postgres, queues, or sidecars. Compose apps use a constrained `compose.yaml` plus `hostlet.yml`.
 
-Compose apps expose one public route. Named volumes persist across redeploys and rollbacks; Hostlet does not roll database or volume contents back.
+Compose apps expose one public route. Named volumes persist across redeploys. Compose rollback is disabled and clearly labeled as unsupported in 0.4.0; redeploy the desired revision instead. Hostlet does not roll database or volume contents back.
 
 ## 🚀 Quick Start
 
@@ -68,7 +71,7 @@ Compose apps expose one public route. Named volumes persist across redeploys and
 - A GitHub OAuth App with Device Flow enabled
 - *(Optional)* Cloudflare zone + tunnel token for public `*.your-domain.com` URLs
 
-### 1. Install
+### 1. Install Self-Hosted Hostlet
 
 ```bash
 git clone https://github.com/ShaneKanterman04/Hostlet.git
@@ -125,6 +128,21 @@ Open the UI URL printed by `hostlet init` and you're live! 🎉
 
 ---
 
+## Hostlet Cloud Private Beta
+
+Hostlet Cloud is the hosted 0.4.0 beta path at `https://hostlet.cloud`.
+
+- Cloud apps deploy to managed Hostlet workers and receive generated `*.hostlet.cloud` URLs.
+- Cloud sign-in uses GitHub OAuth plus GitHub App installation for repository access.
+- Billing uses Stripe sandbox in 0.4.0. Checkout alone is not authoritative; Stripe subscription webhooks must mark the subscription active or trialing before compute is available.
+- Cloud app creation and runtime mutations require an active cloud session, GitHub App installation, and active subscription.
+- Cloud does not support custom domains, Compose apps, public/private toggles, auto-redeploy toggles, arbitrary CPU/RAM edits, managed databases, persistent disk upsells, multi-worker scheduling, or Stripe live mode in 0.4.0.
+- Cloud secrets such as Stripe keys, GitHub App private keys, Cloudflare tokens, worker tokens, and queue access stay on the cloud VM and are never passed to customer apps.
+
+Self-hosted installs do not require a Hostlet Cloud account, Stripe subscription, or GitHub App installation. They keep Device Flow login, local deploys, Cloudflare Tunnel, webhooks, publish/private controls, rollback for single-service apps, restart, and delete.
+
+---
+
 ## 🎯 First-Time Setup
 
 1. Paste your setup token (from `hostlet init`)
@@ -158,7 +176,7 @@ The Settings page also shows update availability and links to release notes.
 
 ---
 
-## 🌐 Public App URLs (Optional)
+## 🌐 Self-Hosted Public App URLs (Optional)
 
 Want public-facing app URLs? Add these to `.env`:
 
@@ -172,6 +190,8 @@ CLOUDFLARE_TUNNEL_TOKEN=...
 ```
 
 Toggle **Publish URL** or **Make private** on any app detail page. You're in control.
+
+Raw Docker-published app ports bind to loopback in 0.4.0. Public exposure should go through Caddy and Cloudflare Tunnel or another trusted reverse proxy, not direct Docker host ports.
 
 ---
 
@@ -243,7 +263,11 @@ Rust API <-- WebSocket/Events --> Hostlet Agent
                                     v
                               App Containers
 
-Cloudflare Edge -> cloudflared -> Caddy -> App Container
+Self-hosted public path:
+Cloudflare Edge -> cloudflared -> Caddy -> App loopback port
+
+Hostlet Cloud beta path:
+Cloudflare Edge -> hostlet.cloud Caddy -> Web/API or managed app loopback port
 ```
 
 - **Web** (`apps/web`): Next.js dashboard with live logs

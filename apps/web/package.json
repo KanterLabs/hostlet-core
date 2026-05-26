@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev -H 0.0.0.0 --webpack",
     "build": "next build",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "responsive:qa": "node ../../scripts/responsive-qa.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",
@@ -14,6 +15,7 @@
     "react-dom": "19.2.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",

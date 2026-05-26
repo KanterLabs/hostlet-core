@@ -2,6 +2,7 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   AlertTriangle,
@@ -126,6 +127,16 @@ type SettingsForm = {
   auto_deploy: boolean;
 };
 
+type SessionPayload = {
+  mode: "self_hosted" | "cloud";
+  authenticated: boolean;
+  cloud?: {
+    billingActive: boolean;
+    githubInstalled: boolean;
+    nextStep: "login" | "install_github" | "billing" | "ready";
+  } | null;
+};
+
 const emptySettings: SettingsForm = {
   domain: "",
   health_path: "/",
@@ -144,7 +155,9 @@ const emptySettings: SettingsForm = {
 
 export default function AppDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const [app, setApp] = useState<App | null>(null);
+  const [session, setSession] = useState<SessionPayload | null>(null);
   const [settings, setSettings] = useState<SettingsForm>(emptySettings);
   const [resources, setResources] = useState<ResourceStats | null>(null);
   const [health, setHealth] = useState<RuntimeHealth | null>(null);
@@ -159,6 +172,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
   useEffect(() => {
     refreshApp();
+    api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
     api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
   }, [id]);
 
@@ -240,11 +254,11 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
   async function deploy() {
     if (busyAction || isActiveDeploy(app?.latestDeployment?.status)) return;
-    setBusyAction("deploy");
+      setBusyAction("deploy");
     setMessage("Starting deployment...");
     try {
       const res = await api<{ deploymentId: string }>(`/api/apps/${id}/deploy`, { method: "POST", body: "{}" });
-      location.href = `/deployments/${res.deploymentId}`;
+      router.push(`/deployments/${res.deploymentId}`);
     } catch (error) {
       setMessage(`Deploy failed to start. ${error instanceof Error ? error.message : ""}`);
       setBusyAction("");
@@ -253,11 +267,11 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
   async function rollback() {
     if (busyAction) return;
-    setBusyAction("rollback");
+      setBusyAction("rollback");
     setMessage("Starting rollback...");
     try {
       const res = await api<{ rollbackDeploymentId: string }>(`/api/apps/${id}/rollback`, { method: "POST", body: "{}" });
-      location.href = `/deployments/${res.rollbackDeploymentId}`;
+      router.push(`/deployments/${res.rollbackDeploymentId}`);
     } catch (error) {
       setMessage(`Rollback could not start. ${error instanceof Error ? error.message : ""}`);
       setBusyAction("");
@@ -275,7 +289,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
         setMessage("Server cleanup is running...");
         await waitForAgentJob(result.jobId, setMessage);
       }
-      location.href = "/apps";
+      router.push("/apps");
     } catch (error) {
       setMessage(`Delete failed. ${error instanceof Error ? error.message : ""}`);
       setBusyAction("");
@@ -303,23 +317,26 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     setBusyAction("settings");
     setMessage("Saving app settings...");
     try {
+      const payload: Record<string, unknown> = {
+        health_path: settings.health_path,
+        root_directory: settings.root_directory || ".",
+        install_command: settings.install_command.trim() || null,
+        build_command: settings.build_command.trim() || null,
+        start_command: settings.start_command.trim() || null,
+        container_port: Number(settings.container_port),
+      };
+      if (!cloud) {
+        payload.domain = settings.domain;
+        payload.runtime_kind = settings.runtime_kind;
+        payload.hostlet_config_path = settings.hostlet_config_path || "hostlet.yml";
+        payload.memory_limit_mb = settings.memory_limit_mb ? Number(settings.memory_limit_mb) : null;
+        payload.cpu_limit = settings.cpu_limit ? Number(settings.cpu_limit) : null;
+        payload.public_exposure = settings.public_exposure;
+        payload.auto_deploy = settings.auto_deploy;
+      }
       await api(`/api/apps/${id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          domain: settings.domain,
-          health_path: settings.health_path,
-          runtime_kind: settings.runtime_kind,
-          hostlet_config_path: settings.hostlet_config_path || "hostlet.yml",
-          root_directory: settings.root_directory || ".",
-          install_command: settings.install_command.trim() || null,
-          build_command: settings.build_command.trim() || null,
-          start_command: settings.start_command.trim() || null,
-          container_port: Number(settings.container_port),
-          memory_limit_mb: settings.memory_limit_mb ? Number(settings.memory_limit_mb) : null,
-          cpu_limit: settings.cpu_limit ? Number(settings.cpu_limit) : null,
-          public_exposure: settings.public_exposure,
-          auto_deploy: settings.auto_deploy,
-        }),
+        body: JSON.stringify(payload),
       });
       await refreshApp();
       setMessage("Settings saved. Redeploy for runtime changes to reach the container.");
@@ -397,6 +414,13 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const active = isActiveDeploy(app?.latestDeployment?.status);
   const cpu = cpuDisplay(resources?.cpuPercent || "0.00%");
   const webhook = webhookReadiness();
+  const rollbackReason = rollbackDisabledReason(app, active);
+  const cloud = session?.mode === "cloud";
+  const visitHref = appVisitHref(app, cloud);
+  const visitLabel = app ? appVisitLabel(app, cloud) : "No route";
+  const targetLabel = cloud ? "Worker" : "Machine";
+  const targetValue = cloud ? "Hostlet Cloud" : app?.server?.name || "Unknown";
+  const targetStatusLabel = `${cloud ? "worker" : "machine"} ${app?.server?.status || "offline"}`;
 
   return (
     <AppShell>
@@ -406,19 +430,10 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             description={app ? `${app.repoFullName} · ${app.branch} · ${displayDomain(app.domain)}` : "Loading app..."}
             actions={
               <>
-                {appVisitHref(app) && (
-                  <a className="button" href={appVisitHref(app) || "#"} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit app</a>
+                {visitHref && (
+                  <a className="button" href={visitHref} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit app</a>
                 )}
                 {app?.latestDeployment?.id && <Link className="button-secondary" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />Logs</Link>}
-                {app && (
-                  <button disabled={!!busyAction} className="button-secondary" onClick={toggleExposure}>
-                    <Globe2 size={16} />
-                    {busyAction === "exposure" ? "Updating..." : app.publicExposure ? "Make private" : "Publish URL"}
-                  </button>
-                )}
-                <button disabled={!!busyAction || active} onClick={deploy}><Play size={16} />{busyAction === "deploy" ? "Starting..." : "Deploy latest"}</button>
-                <button disabled={!!busyAction || active} className="button-secondary" onClick={rollback}><RotateCcw size={16} />Rollback</button>
-                <button disabled={!!busyAction} className="button-danger" onClick={deleteApp}><Trash2 size={16} />Delete</button>
               </>
             }
           />
@@ -426,18 +441,61 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
           <MetricsGrid>
             <Metric label="Deployment" value={deploymentStatus.replaceAll("_", " ")} detail={shortSha(app?.latestDeployment?.commitSha)} icon={Activity} />
             <Metric label="Runtime health" value={health?.status || "unknown"} detail={healthMetricDetail(health)} icon={AlertTriangle} />
-            <Metric label="Machine" value={app?.server?.name || "Unknown"} detail={app?.server?.status || "offline"} icon={Box} />
-            <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={app ? appVisitLabel(app) : "No route"} icon={Globe2} />
+            <Metric label={targetLabel} value={targetValue} detail={app?.server?.status || "offline"} icon={Box} />
+            <Metric label={cloud ? "Cloud URL" : "Exposure"} value={cloud ? "managed" : app?.publicExposure ? "public" : "private"} detail={visitLabel} icon={Globe2} />
           </MetricsGrid>
 
           <div className="mb-6 flex flex-wrap gap-2">
             <StatusPill status={deploymentStatus} />
             <StatusPill status={health?.status || "unknown"} label={`health ${health?.status || "unknown"}`} />
-            <StatusPill status={app?.server?.status || "offline"} label={`machine ${app?.server?.status || "offline"}`} />
-            <StatusPill status={app?.publicExposure ? "open" : "closed"} label={app?.publicExposure ? "public URL" : "private app"} />
+            <StatusPill status={app?.server?.status || "offline"} label={targetStatusLabel} />
+            <StatusPill status={app?.publicExposure ? "open" : "closed"} label={cloud ? "Hostlet Cloud URL" : app?.publicExposure ? "public URL" : "private app"} />
           </div>
 
-          <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />
+          {!cloud && <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />}
+
+          <Panel className="mb-6">
+            <SectionHeader title="App actions" description={cloud ? "Deploy and operate this app on the managed Hostlet Cloud worker." : "Deploy, operate, publish, and remove this self-hosted app."} />
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <div>
+                <div className="eyebrow mb-2">Deploy</div>
+                <div className="flex flex-wrap gap-2">
+                  <button disabled={!!busyAction || active} onClick={deploy}><Play size={16} />{busyAction === "deploy" ? "Starting..." : "Deploy latest"}</button>
+                  <button disabled={!!busyAction || !!rollbackReason} title={rollbackReason || "Rollback to the previous successful deployment"} className="button-secondary" onClick={rollback}><RotateCcw size={16} />Rollback</button>
+                </div>
+              </div>
+              <div>
+                <div className="eyebrow mb-2">Runtime</div>
+                <div className="flex flex-wrap gap-2">
+                  <button className="button-secondary" disabled={!!busyAction} onClick={checkHealthNow}>
+                    <Activity size={16} />
+                    {busyAction === "health" ? "Checking..." : "Check now"}
+                  </button>
+                  <button className="button-secondary" disabled={!!busyAction || !app?.currentDeploymentId} onClick={restartContainer}>
+                    <RotateCcw size={16} />
+                    {busyAction === "restart" ? "Restarting..." : "Restart"}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <div className="eyebrow mb-2">Settings</div>
+                {cloud ? (
+                  <p className="muted text-sm">Cloud URL, exposure, runtime kind, and plan resources are managed for this beta.</p>
+                ) : app ? (
+                  <button disabled={!!busyAction} className="button-secondary" onClick={toggleExposure}>
+                    <Globe2 size={16} />
+                    {busyAction === "exposure" ? "Updating..." : app.publicExposure ? "Make private" : "Publish URL"}
+                  </button>
+                ) : (
+                  <p className="muted text-sm">Loading settings.</p>
+                )}
+              </div>
+              <div>
+                <div className="eyebrow mb-2">Destructive</div>
+                <button disabled={!!busyAction} className="button-danger" onClick={deleteApp}><Trash2 size={16} />Delete</button>
+              </div>
+            </div>
+          </Panel>
 
           {app && !app.currentDeploymentId && (
             <Notice
@@ -459,24 +517,21 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             />
           )}
 
+          {rollbackReason && (
+            <Notice
+              tone="neutral"
+              className="mb-6"
+              title="Rollback unavailable."
+              description={rollbackReason}
+            />
+          )}
+
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_390px]">
             <div className="space-y-6">
               <section>
                 <SectionHeader
                   title="Runtime health"
                   description="Recurring checks against the current running container."
-                  action={
-                    <>
-                      <button className="button-secondary" disabled={!!busyAction} onClick={checkHealthNow}>
-                        <Activity size={16} />
-                        {busyAction === "health" ? "Checking..." : "Check now"}
-                      </button>
-                      <button className="button-secondary" disabled={!!busyAction || !app?.currentDeploymentId} onClick={restartContainer}>
-                        <RotateCcw size={16} />
-                        {busyAction === "restart" ? "Restarting..." : "Restart container"}
-                      </button>
-                    </>
-                  }
                 />
                 {health ? (
                   <Panel>
@@ -526,43 +581,60 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               </section>
 
               <Panel>
-                <SectionHeader icon={Settings} title="App settings" />
+                <SectionHeader icon={Settings} title="App settings" description={cloud ? "Cloud apps keep managed URL, runtime, exposure, and starter resources fixed for 0.4.0." : undefined} />
+                {cloud && (
+                  <Notice
+                    tone="neutral"
+                    className="mb-4"
+                    title="Managed cloud settings"
+                    description="Hostlet Cloud assigns the URL, keeps apps publicly reachable at that URL, uses the single-service runtime, and applies plan resource limits automatically."
+                  />
+                )}
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Domain" value={settings.domain} onChange={(value) => setSettings({ ...settings, domain: value })} />
+                  {!cloud && <Field label="Domain" value={settings.domain} onChange={(value) => setSettings({ ...settings, domain: value })} />}
+                  {cloud && <SummaryItem label="Hostlet Cloud URL" value={displayDomain(settings.domain)} />}
                   <Field label="Health path" value={settings.health_path} onChange={(value) => setSettings({ ...settings, health_path: value })} />
-                  <SelectField label="Runtime" value={settings.runtime_kind} onChange={(value) => setSettings({ ...settings, runtime_kind: value })}>
-                    <option value="single">Dockerfile or Node</option>
-                    <option value="compose">Docker Compose</option>
-                  </SelectField>
-                  {settings.runtime_kind === "compose" && <Field label="Hostlet config" value={settings.hostlet_config_path} onChange={(value) => setSettings({ ...settings, hostlet_config_path: value })} />}
+                  {!cloud && (
+                    <SelectField label="Runtime" value={settings.runtime_kind} onChange={(value) => setSettings({ ...settings, runtime_kind: value })}>
+                      <option value="single">Dockerfile or Node</option>
+                      <option value="compose">Docker Compose</option>
+                    </SelectField>
+                  )}
+                  {cloud && <SummaryItem label="Runtime" value="Single-service Dockerfile or generated Node app" />}
+                  {!cloud && settings.runtime_kind === "compose" && <Field label="Hostlet config" value={settings.hostlet_config_path} onChange={(value) => setSettings({ ...settings, hostlet_config_path: value })} />}
                   <Field label="Root directory" value={settings.root_directory} onChange={(value) => setSettings({ ...settings, root_directory: value })} />
                   <Field label="Container port" type="number" value={settings.container_port} onChange={(value) => setSettings({ ...settings, container_port: value })} />
                   <Field label="Install command" value={settings.install_command} onChange={(value) => setSettings({ ...settings, install_command: value })} />
                   <Field label="Build command" value={settings.build_command} onChange={(value) => setSettings({ ...settings, build_command: value })} />
                   <Field label="Start command" value={settings.start_command} onChange={(value) => setSettings({ ...settings, start_command: value })} />
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <SelectField label="Memory" value={settings.memory_limit_mb} onChange={(value) => setSettings({ ...settings, memory_limit_mb: value })}>
-                      <option value="">No cap</option>
-                      <option value="256">256 MB</option>
-                      <option value="512">512 MB</option>
-                      <option value="1024">1 GB</option>
-                      <option value="2048">2 GB</option>
-                      <option value="4096">4 GB</option>
-                    </SelectField>
-                    <SelectField label="CPU" value={settings.cpu_limit} onChange={(value) => setSettings({ ...settings, cpu_limit: value })}>
-                      <option value="">No cap</option>
-                      <option value="0.25">0.25 CPU</option>
-                      <option value="0.5">0.5 CPU</option>
-                      <option value="1">1 CPU</option>
-                      <option value="2">2 CPUs</option>
-                      <option value="4">4 CPUs</option>
-                    </SelectField>
+                  {!cloud && (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <SelectField label="Memory" value={settings.memory_limit_mb} onChange={(value) => setSettings({ ...settings, memory_limit_mb: value })}>
+                        <option value="">No cap</option>
+                        <option value="256">256 MB</option>
+                        <option value="512">512 MB</option>
+                        <option value="1024">1 GB</option>
+                        <option value="2048">2 GB</option>
+                        <option value="4096">4 GB</option>
+                      </SelectField>
+                      <SelectField label="CPU" value={settings.cpu_limit} onChange={(value) => setSettings({ ...settings, cpu_limit: value })}>
+                        <option value="">No cap</option>
+                        <option value="0.25">0.25 CPU</option>
+                        <option value="0.5">0.5 CPU</option>
+                        <option value="1">1 CPU</option>
+                        <option value="2">2 CPUs</option>
+                        <option value="4">4 CPUs</option>
+                      </SelectField>
+                    </div>
+                  )}
+                  {cloud && <SummaryItem label="Plan resources" value={`${settings.memory_limit_mb || "512"} MB · ${settings.cpu_limit || "0.5"} CPU`} />}
+                </div>
+                {!cloud && (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <ToggleCard checked={settings.public_exposure} onChange={(value) => setSettings({ ...settings, public_exposure: value })} icon={Globe2} label="Public URL" />
+                    <ToggleCard checked={settings.auto_deploy} onChange={(value) => setSettings({ ...settings, auto_deploy: value })} icon={GitBranch} label="Auto redeploy on branch push" />
                   </div>
-                </div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <ToggleCard checked={settings.public_exposure} onChange={(value) => setSettings({ ...settings, public_exposure: value })} icon={Globe2} label="Public URL" />
-                  <ToggleCard checked={settings.auto_deploy} onChange={(value) => setSettings({ ...settings, auto_deploy: value })} icon={GitBranch} label="Auto redeploy on branch push" />
-                </div>
+                )}
                 <button className="mt-4" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
               </Panel>
             </div>
@@ -592,23 +664,25 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 </div>
               </Panel>
 
-              <Panel>
-                <SectionHeader title="Automation" />
-                <DataList className="mt-4">
-                  <SummaryItem label="Auto redeploy" value={app?.autoDeploy ? "enabled" : "disabled"} />
-                  <SummaryItem label="Public URL" value={app?.publicExposure ? "published" : "private"} />
-                  <SummaryItem label="Latest webhook" value={webhookSummary(app?.latestWebhook)} />
-                </DataList>
-                <div className="mt-4 rounded-md border border-line bg-surface-alt p-3 text-sm">
-                  <div className="font-medium">GitHub webhook</div>
-                  <div className="mt-2 break-all font-mono text-xs">{webhook.webhookUrl}</div>
-                </div>
-              </Panel>
+              {!cloud && (
+                <Panel>
+                  <SectionHeader title="Automation" />
+                  <DataList className="mt-4">
+                    <SummaryItem label="Auto redeploy" value={app?.autoDeploy ? "enabled" : "disabled"} />
+                    <SummaryItem label="Public URL" value={app?.publicExposure ? "published" : "private"} />
+                    <SummaryItem label="Latest webhook" value={webhookSummary(app?.latestWebhook)} />
+                  </DataList>
+                  <div className="mt-4 rounded-md border border-line bg-surface-alt p-3 text-sm">
+                    <div className="font-medium">GitHub webhook</div>
+                    <div className="mt-2 break-all font-mono text-xs">{webhook.webhookUrl}</div>
+                  </div>
+                </Panel>
+              )}
 
-              {appVisitHref(app) && (
-                <a className="button-secondary w-full" href={appVisitHref(app) || "#"} target="_blank" rel="noreferrer">
+              {visitHref && (
+                <a className="button-secondary w-full" href={visitHref} target="_blank" rel="noreferrer">
                   <ExternalLink size={16} />
-                  Open {app?.publicExposure ? "public URL" : "private URL"}
+                  Open {cloud ? "Hostlet Cloud URL" : app?.publicExposure ? "public URL" : "private URL"}
                 </a>
               )}
             </aside>
@@ -627,6 +701,14 @@ function webhookSummary(webhook?: App["latestWebhook"] | null) {
 
 function isActiveDeploy(status?: string | null) {
   return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
+}
+
+function rollbackDisabledReason(app: App | null, active: boolean) {
+  if (!app) return "App details are still loading.";
+  if (active) return "Wait for the active deployment to finish before rolling back.";
+  if (app.runtimeKind === "compose") return "Compose rollback is disabled for Hostlet 0.4.0. Redeploy the target revision instead.";
+  if (!app.currentDeploymentId) return "Deploy this app once before rolling back.";
+  return "";
 }
 
 function shortSha(sha?: string | null) {
@@ -687,8 +769,13 @@ function displayDomain(domain: string) {
   return domain;
 }
 
-function appVisitHref(app?: App | null) {
+function appVisitHref(app?: App | null, cloud = false) {
   if (!app?.currentDeploymentId) return null;
+  if (cloud) {
+    const display = displayDomain(app.domain);
+    if (!display) return null;
+    return display.startsWith("http://") || display.startsWith("https://") ? display : `https://${display}`;
+  }
   if (!app.publicExposure) {
     const port = app.currentDeployment?.publishedPort;
     const host = privateAppHost(app);
@@ -708,7 +795,8 @@ function appVisitHref(app?: App | null) {
   return `https://${display}`;
 }
 
-function appVisitLabel(app: App) {
+function appVisitLabel(app: App, cloud = false) {
+  if (cloud) return displayDomain(app.domain) || "No Hostlet Cloud URL";
   if (app.publicExposure) return displayDomain(app.domain) || "No public URL";
   const port = app.currentDeployment?.publishedPort;
   const host = privateAppHost(app);

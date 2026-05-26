@@ -50,6 +50,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm build
+      - run: ../../scripts/ci-web-route-smoke.sh
+      - run: pnpm exec playwright install chromium
+      - run: pnpm responsive:qa
 
   compose:
     runs-on: [self-hosted, Linux, X64]
@@ -70,6 +73,36 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker compose -f infra/docker-compose.yml config >/dev/null
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
+      - name: Validate cloud production compose
+        env:
+          HOSTLET_MODE: cloud
+          PUBLIC_API_URL: https://hostlet.cloud
+          PUBLIC_WEB_URL: https://hostlet.cloud
+          PUBLIC_WEBHOOK_URL: https://hostlet.cloud
+          HOSTLET_ALLOWED_WEB_ORIGINS: https://hostlet.cloud
+          HOSTLET_BASE_DOMAIN: hostlet.cloud
+          HOSTLET_CADDYFILE: ./Caddyfile.direct
+          GITHUB_APP_ID: "1"
+          GITHUB_APP_SLUG: hostlet-ci
+          GITHUB_APP_CLIENT_ID: ci-client-id
+          GITHUB_APP_CLIENT_SECRET: ci-only-not-a-secret-github-app-client
+          GITHUB_APP_PRIVATE_KEY_PEM: ci-only-not-a-secret-private-key
+          GITHUB_APP_WEBHOOK_SECRET: ci-only-not-a-secret-github-app-webhook
+          STRIPE_SECRET_KEY: sk_test_ci_only_not_a_secret
+          STRIPE_PUBLISHABLE_KEY: pk_test_ci_only_not_a_secret
+          STRIPE_WEBHOOK_SECRET: whsec_ci_only_not_a_secret
+          STRIPE_PRICE_STUDENT: price_ci_student
+          STRIPE_PRICE_STARTER: price_ci_starter
+          STRIPE_PRICE_PRO: price_ci_pro
+        run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
+
+  cloud-api-smoke:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci-cloud-api-smoke.sh
 
   docker:
     runs-on: [self-hosted, Linux, X64]

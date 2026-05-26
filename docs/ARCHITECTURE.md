@@ -1,6 +1,9 @@
 # Architecture
 
-Hostlet is a self-hosted deployment control plane with a browser UI, Rust API, deployment agent, PostgreSQL database, local Caddy router, and optional Cloudflare Tunnel.
+Hostlet is a deployment control plane with two 0.4.0 modes:
+
+- `HOSTLET_MODE=self_hosted`: single-machine self-hosted control plane with browser UI, Rust API, local deployment agent, PostgreSQL database, Caddy router, and optional Cloudflare Tunnel.
+- `HOSTLET_MODE=cloud`: private hosted beta at `hostlet.cloud` with hosted web/API, managed worker agent, Caddy direct-origin routing for `hostlet.cloud` and `*.hostlet.cloud`, GitHub App repository access, and Stripe sandbox billing gates.
 
 ## System Layout
 
@@ -25,7 +28,11 @@ Rust API <---- authenticated WebSocket/events ----> Hostlet agent
                                                      v
                                                 App containers
 
-Cloudflare edge -> cloudflared -> 127.0.0.1:18080 -> Caddy -> local app container port
+Self-hosted public path:
+Cloudflare edge -> cloudflared -> 127.0.0.1:18080 -> Caddy -> local app loopback port
+
+Cloud beta public path:
+Cloudflare edge -> hostlet VM Caddy -> web/API or managed app loopback port
 ```
 
 ## Services
@@ -36,13 +43,13 @@ Cloudflare edge -> cloudflared -> 127.0.0.1:18080 -> Caddy -> local app containe
 
 - first-run password and unlock flow
 - GitHub connection status
-- local machine status
+- machine or managed worker status, depending mode
 - app list and app creation
-- app detail page with deploy, rollback, public tunnel toggle, delete, runtime health, manual container restart, and resource usage
+- app detail page with deploy, rollback where supported, delete, runtime health, manual container restart, resource usage, and mode-specific settings
 - app settings and encrypted environment-variable editing
 - deployment detail page with status and live logs
 - logs index
-- settings page with GitHub, Cloudflare, and Hostlet update status plus GitHub reconnect
+- settings page with mode-specific GitHub, Cloudflare, Hostlet update, billing, and job status panels
 
 The web app calls the API with cookies and sends `X-Hostlet-CSRF: 1` on state-changing requests.
 
@@ -64,6 +71,7 @@ The web app calls the API with cookies and sends `X-Hostlet-CSRF: 1` on state-ch
 - runtime health snapshot/event storage
 - Hostlet version and release update checks
 - Cloudflare DNS management for app tunnel open/close
+- cloud account/session, GitHub App installation, Stripe subscription, entitlement, and webhook state
 - basic in-memory rate limiting for high-risk public endpoints
 
 The API does not require Docker access. Docker operations are delegated to agents.
@@ -84,9 +92,11 @@ The API does not require Docker access. Docker operations are delegated to agent
 - reports status and logs to the API
 - publishes Docker resource and runtime health snapshots for local apps
 
-Hostlet currently runs one local agent on the same machine as the UI/API. The local agent uses host networking and Docker socket access so it can build images, start app containers, probe runtime health, restart app containers on request, and reload the local Caddy router. Remote VPS agents and install commands remain deferred.
+Self-hosted Hostlet currently runs one local agent on the same machine as the UI/API. The local agent uses host networking and Docker socket access so it can build images, start app containers, probe runtime health, restart app containers on request, and reload the local Caddy router. Remote self-hosted VPS agents and install commands remain deferred.
 
-### Caddy and Cloudflare Tunnel
+In cloud mode, the agent is a managed Hostlet worker. It is still host-privileged because it controls Docker and Caddy, but customer apps receive only their configured app environment and must never receive worker tokens, Cloudflare tokens, Stripe secrets, GitHub App private keys, direct database access, or direct job-queue access.
+
+### Caddy, Direct Origin, and Cloudflare Tunnel
 
 Local Compose includes `hostlet-caddy`, bound to loopback on port `18080`. Cloudflare Tunnel forwards wildcard hostname traffic to that Caddy listener.
 
@@ -98,6 +108,8 @@ Public exposure is controlled by DNS:
 - tunnel close: delete that app record
 
 The wildcard cloudflared ingress can stay running even when no app is public.
+
+Cloud mode uses direct-origin Caddy config for `hostlet.cloud` and `*.hostlet.cloud`. The control-plane host routes to web/API services and app hostnames route to managed app snippets. App snippets are written through temp files and rename; failed Caddy reloads restore the previous route state.
 
 ## Database
 
@@ -119,6 +131,7 @@ Main tables:
 - `app_health_snapshots`: latest runtime health per app/current container
 - `app_health_events`: recent runtime health history
 - `app_public_dns_records`: app-owned Cloudflare DNS records
+- `cloud_users`, `cloud_sessions`, `cloud_github_installations`, `cloud_subscriptions`, `cloud_plan_entitlements`, `cloud_usage_buckets`, and `cloud_webhook_events`: cloud identity, tenancy, billing, entitlement, and provider webhook dedupe state
 
 ## Deployment Flow
 
@@ -128,7 +141,7 @@ Main tables:
 4. Agent verifies the signature.
 5. Agent fetches the repo and checks out either `HEAD` or a webhook commit SHA.
 6. Agent builds a Docker image from the repo Dockerfile or a generated Node Dockerfile.
-7. Agent starts a new container on a host loopback port with the app's persistent data directory mounted at `/data`.
+7. Agent starts a new container on a host loopback port with the app's persistent data directory mounted at `/data` for single-service apps.
 8. Agent health-checks the configured path.
 9. If healthy, agent writes/updates route config and reloads Caddy.
 10. Agent reports success with image, container, local URL, and published port.
@@ -136,7 +149,7 @@ Main tables:
 
 Failed health checks preserve the previous working app. Failed new containers are left available for inspection.
 
-Each local app gets a stable Docker volume named `hostlet-app-data-<app-id>`, mounted into every deployment as `/data`. The agent injects `HOSTLET_DATA_DIR=/data` and, when the app has not set it explicitly, `DATA_DIR=/data`. Redeploys and rollbacks reuse the same volume; deleting the app removes it.
+Each single-service app gets a stable Docker volume named `hostlet-app-data-<app-id>`, mounted into every deployment as `/data`. The agent injects `HOSTLET_DATA_DIR=/data` and, when the app has not set it explicitly, `DATA_DIR=/data`. Redeploys and rollbacks reuse the same volume; deleting the app removes it. Compose apps keep their declared named volumes; Hostlet does not inject `/data` into arbitrary Compose services.
 
 ## Runtime Health Flow
 
@@ -159,7 +172,7 @@ Runtime health is intentionally separate from deployment status.
 4. Agent updates Caddy routing to the previous container port.
 5. API marks the rollback deployment as `rolled_back`.
 
-Rollback changes routing only; it does not delete containers or images.
+Rollback changes routing only; it does not delete containers or images. Compose rollback is disabled for 0.4.0 and returns a clear unsupported response.
 
 ## Public Exposure Flow
 
@@ -191,14 +204,18 @@ Update checks use public GitHub Releases and do not require a GitHub user token.
 
 - Browser to web/API: cookie-based control-plane session and unlock cookie.
 - API to GitHub: OAuth access token encrypted at rest.
+- API to GitHub App: cloud installation token generation and installation ownership checks.
+- API to Stripe: sandbox checkout, portal, webhook signature validation, subscription state, and entitlement gates.
 - API to agent: agent token plus signed job payloads.
 - Agent to Docker: privileged local boundary; the agent must be treated as host-trusted.
 - Cloudflare to local router: tunnel ingress forwards to loopback-only Caddy.
 
 ## Current Constraints
 
-- One local default server is seeded by environment.
-- Remote VPS agents are intentionally disabled.
+- Self-hosted mode seeds and uses one local default server.
+- Remote self-hosted VPS agents are intentionally disabled.
+- Hostlet Cloud 0.4.0 is single-worker/single-VM beta; multi-worker scheduling is deferred.
+- Cloud custom domains, Compose, managed databases, persistent disk upsells, arbitrary resource edits, and Stripe live mode are deferred.
 - No queue worker exists; jobs are sent directly to connected agents.
 - Deployment logs and resource snapshots are retained indefinitely unless cleaned manually. Runtime health snapshots keep the latest state, and runtime health events are pruned to seven days or the latest 500 events per app.
-- Automatic self-healing policies remain disabled; 0.2.0 provides manual check/restart, redeploy, and rollback actions.
+- Automatic self-healing policies remain disabled; Hostlet provides manual check/restart, redeploy, and rollback where supported.

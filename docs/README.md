@@ -1,6 +1,6 @@
 # Hostlet Documentation
 
-This guide documents the current Hostlet implementation: local setup, Cloudflare tunnel setup, app deployment, webhooks, operations, and known limits.
+This guide documents the current Hostlet 0.4.0 implementation: self-hosted setup, Hostlet Cloud private beta behavior, Cloudflare tunnel setup, app deployment, webhooks, operations, and known limits.
 
 Planning documents:
 
@@ -8,6 +8,7 @@ Planning documents:
 - [Hostlet 0.3.0 Plan](PLAN_0.3.0.md): durable agent jobs, recovery, audit history, retention, backups, release hardening, and remote-agent readiness.
 - [Hostlet 0.3.0 Validation Checklist](VALIDATION_0.3.0.md): pre-tag validation for durable jobs, audit events, release artifacts, and production updates.
 - [Hostlet 0.4.0 Hybrid Cloud Plan](PLAN_0.4.0_HYBRID_CLOUD.md): single-VM Hostlet Cloud MVP, cloud account foundations, and release gates.
+- [Hostlet 0.4.0 Final Polish Plan](PLAN_0.4.0_FINAL_POLISH.md): cloud safety, billing, runtime reliability, UX, docs, and release gates for the private beta.
 - [Hostlet 0.4.0 Validation Checklist](VALIDATION_0.4.0.md): self-hosted regression and cloud foundation validation before tagging.
 
 ## Components
@@ -18,6 +19,8 @@ Planning documents:
 - `postgres`: control-plane database.
 - `hostlet-caddy`: local reverse proxy on loopback port `18080` for tunnel traffic.
 - `cloudflared`: optional Cloudflare Tunnel connector.
+
+In `HOSTLET_MODE=cloud`, the web/API run as the hosted control plane for `hostlet.cloud`, the agent acts as a managed worker, Caddy handles direct-origin routing for `hostlet.cloud` and `*.hostlet.cloud`, GitHub repo access uses the Hostlet GitHub App, and Stripe sandbox subscription state gates compute.
 
 ## Recommended Production Setup With CLI
 
@@ -80,7 +83,7 @@ hostlet down
 
 Developers can run the CLI from source with `cargo run -p hostlet -- <command>`, but production installs should use the compiled release binary.
 
-## Access Modes
+## Self-Hosted Access Modes
 
 Hostlet has two control-plane access modes:
 
@@ -88,6 +91,20 @@ Hostlet has two control-plane access modes:
 - **Cloudflare Tunnel for Hostlet UI/API**: the Hostlet UI, API, and webhooks share one HTTPS hostname such as `https://hostlet.example.com`.
 
 These modes describe access to Hostlet itself. Deployed apps are private by default in both modes. Public app URLs are controlled per app with **Publish URL** / **Make private**.
+
+## Hostlet Cloud Private Beta
+
+Hostlet Cloud is the hosted 0.4.0 beta path at `https://hostlet.cloud`.
+
+- Control-plane host: `hostlet.cloud`.
+- Managed app hosts: `*.hostlet.cloud`.
+- Authentication: GitHub OAuth session plus GitHub App installation for repository access.
+- Billing: Stripe sandbox only for 0.4.0. Checkout completion creates pending local state; subscription webhooks mark active, trialing, cancelled, or deleted state.
+- Compute gate: cloud app create, deploy, restart, rollback, job retry/cancel, env changes, and runtime mutation require a cloud session, GitHub App installation, and an active/trialing subscription.
+- Supported app shape: single-service Dockerfile or generated Node app.
+- Deferred cloud features: custom domains, Compose, managed databases, persistent disk upsells, multi-worker scheduling, live Stripe mode, arbitrary resource edits, and customer-controlled public/private toggles.
+
+Cloud customer apps must never receive worker tokens, Cloudflare tokens, Stripe secrets, GitHub App private keys, direct database access, or direct job-queue access.
 
 ## Manual Local/LAN Setup
 
@@ -168,6 +185,8 @@ GITHUB_CLIENT_ID=...
 
 No `GITHUB_CLIENT_SECRET` or callback URL is required. In the UI, click **Connect GitHub**, open the GitHub verification page, and enter the displayed code.
 
+Hostlet Cloud does not use Device Flow for customer login. It uses the hosted GitHub OAuth redirect flow plus GitHub App installation state validation.
+
 ## First-Run Password
 
 The control-plane password is separate from GitHub. It protects the panel before GitHub login and is required on every browser session before using the UI.
@@ -219,7 +238,7 @@ You can override root directory, install command, build command, and start comma
 
 ## App Settings and Environment Variables
 
-Each app detail page includes editable settings for:
+Self-hosted app detail pages include editable settings for:
 
 - domain and health path
 - root directory
@@ -230,6 +249,8 @@ Each app detail page includes editable settings for:
 - auto-redeploy state
 
 Runtime changes require a redeploy before they affect the running container.
+
+Cloud app detail pages intentionally hide or lock settings that the API rejects in 0.4.0: custom domain, Compose runtime, public/private toggle, auto-redeploy toggle, and arbitrary CPU/RAM limits. Cloud users can still update health path, root directory, install/build/start commands, container port, and environment variables where allowed by the compute gate.
 
 Environment variables are stored encrypted. The UI lists keys only and never displays decrypted values. To change a value, enter a replacement value and save it, then redeploy the app.
 
@@ -262,7 +283,7 @@ hostlet update rollback
 
 Database rollback is not automatic. Keep the pre-update backup until the upgraded stack has been validated.
 
-## Public Tunnel Exposure
+## Self-Hosted Public Tunnel Exposure
 
 Public exposure is optional and per app.
 
@@ -297,6 +318,8 @@ hostlet.example.com -> http://127.0.0.1:18080
 ```
 
 Caddy routes the Hostlet control-plane hostname to the web/API services and routes app hostnames to their local container ports.
+
+Raw Docker-published app ports bind to loopback in 0.4.0. External traffic should reach apps through Caddy and Cloudflare Tunnel, not direct host-port exposure.
 
 ## GitHub Webhooks
 
@@ -343,9 +366,9 @@ Manual webhook setup is still possible if you do not want Hostlet to manage the 
 
 ## Deployment Target
 
-Hostlet 0.2.0 is intentionally local-machine-only. The UI, API, database, Caddy, and local agent run on the same host, and apps deploy as Docker containers on that host.
+Self-hosted Hostlet 0.4.0 is intentionally single-machine. The UI, API, database, Caddy, and local agent run on the same host, and apps deploy as Docker containers on that host.
 
-Remote VPS agent registration and install commands are disabled for this release while the local deploy path is hardened.
+Remote self-hosted VPS agent registration and install commands are disabled for this release while the local deploy path is hardened. Hostlet Cloud managed workers are separate from self-hosted remote-agent support.
 
 ## Runtime and Resource Limits
 
@@ -372,13 +395,15 @@ Limits:
 
 ## Rollback
 
-Rollback finds the previous successful deployment for the app and routes traffic back to that container. If routing fails, Hostlet preserves the current working app.
+Single-service rollback finds the previous successful deployment for the app and routes traffic back to that container. If routing fails, Hostlet preserves the current working app.
 
 Rollback currently changes routing only. It does not remove newer containers or reconcile application data.
 
+Compose rollback is disabled for 0.4.0. Redeploy the desired revision instead.
+
 ## App Data Persistence
 
-Every deployed app receives a writable persistent Docker volume mounted at `/data`. Hostlet names it `hostlet-app-data-<app-id>`, so redeploys and updates replace containers without deleting app data.
+Every single-service deployed app receives a writable persistent Docker volume mounted at `/data`. Hostlet names it `hostlet-app-data-<app-id>`, so redeploys and updates replace containers without deleting app data.
 
 The agent injects:
 
@@ -388,6 +413,8 @@ DATA_DIR=/data
 ```
 
 If an app explicitly sets `DATA_DIR`, Hostlet preserves that value and still sets `HOSTLET_DATA_DIR`. Deleting an app removes its persistent data directory.
+
+Compose apps keep their declared named volumes. Hostlet does not inject `/data` into arbitrary Compose services beyond the Compose file and `hostlet.yml`; document persistent paths in the app's Compose definition.
 
 ## Backup and Restore
 

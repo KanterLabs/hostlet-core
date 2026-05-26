@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import { Cloud, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { Cloud, CreditCard, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
-import { AppShell, DataList, DataRow, IconFrame, PageHeader, Panel, StatusPill } from "@/components/ui";
+import { AppShell, DataList, DataRow, IconFrame, Notice, PageHeader, Panel, StatusPill } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
 
@@ -71,7 +71,17 @@ type BackupMetadata = {
   scheduled?: string;
 };
 
+type SessionPayload = {
+  mode: "self_hosted" | "cloud";
+  cloud?: {
+    billingActive: boolean;
+    githubInstalled: boolean;
+    nextStep: "login" | "install_github" | "billing" | "ready";
+  } | null;
+};
+
 export default function Settings() {
+  const [session, setSession] = useState<SessionPayload | null>(null);
   const [github, setGithub] = useState<StatusPayload | null>(null);
   const [cloudflare, setCloudflare] = useState<StatusPayload | null>(null);
   const [version, setVersion] = useState<VersionPayload | null>(null);
@@ -93,6 +103,7 @@ export default function Settings() {
   }, []);
 
   function refresh() {
+    api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
     api<StatusPayload>("/api/github/status").then(setGithub).catch((error) => setGithub({ message: error instanceof Error ? error.message : "Could not load GitHub status." }));
     api<StatusPayload>("/api/cloudflare/status").then(setCloudflare).catch((error) => setCloudflare({ message: error instanceof Error ? error.message : "Could not load Cloudflare status." }));
     api<VersionPayload>("/api/system/version").then(setVersion).catch(() => setVersion(null));
@@ -134,47 +145,92 @@ export default function Settings() {
     refresh();
   }
 
+  async function startCheckout(plan: "student" | "starter" | "pro") {
+    const result = await api<{ url?: string | null }>("/api/cloud/billing/checkout", {
+      method: "POST",
+      body: JSON.stringify({ plan }),
+    });
+    if (result.url) window.location.assign(result.url);
+  }
+
+  const cloud = session?.mode === "cloud";
+  const cloudReady = session?.cloud?.nextStep === "ready";
+
   return (
     <AppShell>
           <PageHeader
-            eyebrow="Control plane"
+            eyebrow={cloud ? "Hostlet Cloud" : "Control plane"}
             title="Settings"
-            description="Connection status for GitHub auth, webhooks, Cloudflare DNS, and public app routing."
+            description={cloud ? "Cloud account, GitHub App, billing, and managed worker operations." : "Connection status for GitHub auth, webhooks, Cloudflare DNS, and public app routing."}
             actions={<button className="button-secondary" onClick={refresh}><RefreshCw size={16} />Refresh</button>}
           />
 
-          <WebhookNotice className="mb-6" />
+          {!cloud && <WebhookNotice className="mb-6" />}
+          {cloud && session?.cloud && !cloudReady && (
+            <Notice
+              tone="warning"
+              className="mb-6"
+              title="Finish Hostlet Cloud setup"
+              description="Cloud deploys require GitHub App access and an active Stripe sandbox subscription before compute is available."
+              action={
+                <>
+                  {!session.cloud.githubInstalled && <a className="button" href="/auth/github/install/start"><GitBranch size={16} />Install GitHub App</a>}
+                  {session.cloud.githubInstalled && !session.cloud.billingActive && <button onClick={() => startCheckout("starter")}><CreditCard size={16} />Start Starter</button>}
+                </>
+              }
+            />
+          )}
 
           <div className="grid gap-6 lg:grid-cols-2">
             <div className="space-y-3">
               <StatusCard
                 icon={GitBranch}
-                title="GitHub"
-                status={github?.tokenValid ? "connected" : github?.oauthConfigured ? "needs attention" : "not configured"}
-                message={github?.message || "Loading GitHub status..."}
-                rows={[
+                title={cloud ? "GitHub App" : "GitHub"}
+                status={cloud ? session?.cloud?.githubInstalled ? "connected" : "needs attention" : github?.tokenValid ? "connected" : github?.oauthConfigured ? "needs attention" : "not configured"}
+                message={cloud ? session?.cloud?.githubInstalled ? "Hostlet Cloud can access selected repositories." : "Install the Hostlet GitHub App before deploying cloud apps." : github?.message || "Loading GitHub status..."}
+                rows={cloud ? [
+                  ["Cloud auth", "GitHub OAuth redirect"],
+                  ["Repository access", session?.cloud?.githubInstalled ? "GitHub App installed" : "GitHub App required"],
+                  ["Account", github?.login || (github?.authenticated ? "signed in" : "not signed in")],
+                ] : [
                   ["Device Flow", github?.oauthConfigured ? "configured" : "missing"],
                   ["Webhook secret", github?.webhookConfigured ? "configured" : "missing"],
                   ["Account", github?.login || (github?.authenticated ? "signed in" : "not signed in")],
                 ]}
               />
-              {github?.oauthConfigured && github?.tokenValid !== true && <GitHubDeviceFlow buttonLabel="Reconnect GitHub" />}
+              {!cloud && github?.oauthConfigured && github?.tokenValid !== true && <GitHubDeviceFlow buttonLabel="Reconnect GitHub" />}
+              {cloud && !session?.cloud?.githubInstalled && <a className="button" href="/auth/github/install/start"><GitBranch size={16} />Install GitHub App</a>}
             </div>
-            <StatusCard
-              icon={Cloud}
-              title="Cloudflare"
-              status={cloudflare?.tokenValid ? "connected" : cloudflare?.configured ? "needs attention" : "not configured"}
-              message={cloudflare?.message || "Loading Cloudflare status..."}
-              rows={[
-                ["Base domain", cloudflare?.baseDomain || "missing"],
-                ["App domains", cloudflare?.defaultDomainPattern || "missing"],
-                ["Legacy prefix", cloudflare?.domainPrefix || "hostlet-"],
-                ["Tunnel target", cloudflare?.tunnelTargetConfigured ? "configured" : "missing"],
-              ]}
-            />
+            {cloud ? (
+              <StatusCard
+                icon={CreditCard}
+                title="Billing"
+                status={session?.cloud?.billingActive ? "connected" : "needs attention"}
+                message={session?.cloud?.billingActive ? "Stripe sandbox subscription is active." : "Start a Stripe sandbox subscription before creating or mutating cloud apps."}
+                rows={[
+                  ["Billing mode", "Stripe sandbox"],
+                  ["Subscription", session?.cloud?.billingActive ? "active" : "required"],
+                  ["Compute gate", cloudReady ? "ready" : "blocked"],
+                  ["App URLs", "*.hostlet.cloud"],
+                ]}
+              />
+            ) : (
+              <StatusCard
+                icon={Cloud}
+                title="Cloudflare"
+                status={cloudflare?.tokenValid ? "connected" : cloudflare?.configured ? "needs attention" : "not configured"}
+                message={cloudflare?.message || "Loading Cloudflare status..."}
+                rows={[
+                  ["Base domain", cloudflare?.baseDomain || "missing"],
+                  ["App domains", cloudflare?.defaultDomainPattern || "missing"],
+                  ["Legacy prefix", cloudflare?.domainPrefix || "hostlet-"],
+                  ["Tunnel target", cloudflare?.tunnelTargetConfigured ? "configured" : "missing"],
+                ]}
+              />
+            )}
           </div>
 
-          <Panel className="mt-6">
+          {!cloud && <Panel className="mt-6">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="flex items-center gap-3">
                 <IconFrame icon={Download} />
@@ -205,15 +261,15 @@ export default function Settings() {
                 </a>
               )}
             </div>
-            {updateMessage && <p className="muted mt-3">{updateMessage}</p>}
-            {version?.update?.unsupportedDirectUpdate && <p className="mt-3 text-sm text-red-700">This release does not support a direct update from the installed version. Read the release notes before upgrading.</p>}
-            {version?.updateChecksEnabled === false && <p className="muted mt-3">Update checks are disabled by HOSTLET_UPDATE_CHECKS=false.</p>}
-          </Panel>
+            {updateMessage && <Notice tone={updateMessage.toLowerCase().includes("could not") ? "danger" : "neutral"} className="mt-3" description={updateMessage} />}
+            {version?.update?.unsupportedDirectUpdate && <Notice tone="danger" className="mt-3" description="This release does not support a direct update from the installed version. Read the release notes before upgrading." />}
+            {version?.updateChecksEnabled === false && <Notice tone="neutral" className="mt-3" description="Update checks are disabled by HOSTLET_UPDATE_CHECKS=false." />}
+          </Panel>}
 
           <section className="mt-6 grid gap-4 md:grid-cols-3">
-            <Info icon={ShieldCheck} title="Control-plane access" value="Password + GitHub Device Flow" />
+            <Info icon={ShieldCheck} title="Control-plane access" value={cloud ? "GitHub OAuth session" : "Password + GitHub Device Flow"} />
             <Info icon={KeyRound} title="Secrets" value="Encrypted app env vars" />
-            <Info icon={Link2} title="App exposure" value="Private by default, public under base domain" />
+            <Info icon={Link2} title="App exposure" value={cloud ? "Managed *.hostlet.cloud URL" : "Private by default, public under base domain"} />
           </section>
 
           <Panel className="mt-6">
@@ -225,14 +281,17 @@ export default function Settings() {
                   <p className="muted mt-1">Preview retention counts, start cleanup, and recover recent durable jobs.</p>
                 </div>
               </div>
-              <button className="button-secondary" onClick={runCleanup}><Trash2 size={16} />Run cleanup</button>
+              {!cloud && <button className="button-secondary" onClick={runCleanup}><Trash2 size={16} />Run cleanup</button>}
             </div>
-            <DataList className="mt-5">
-              <DataRow label="Database cleanup" value={cleanup ? cleanupSummary(cleanup.database) : "loading"} />
-              <DataRow label="Docker keep set" value={cleanup ? `${cleanup.docker.keepContainers} containers, ${cleanup.docker.keepImages} images` : "loading"} />
-              <DataRow label="Docker cleanup job" value={cleanup?.docker.jobWillRun ? "available" : "not available"} />
-            </DataList>
-            {operationsMessage && <p className="muted mt-3">{operationsMessage}</p>}
+            {!cloud && (
+              <DataList className="mt-5">
+                <DataRow label="Database cleanup" value={cleanup ? cleanupSummary(cleanup.database) : "loading"} />
+                <DataRow label="Docker keep set" value={cleanup ? `${cleanup.docker.keepContainers} containers, ${cleanup.docker.keepImages} images` : "loading"} />
+                <DataRow label="Docker cleanup job" value={cleanup?.docker.jobWillRun ? "available" : "not available"} />
+              </DataList>
+            )}
+            {cloud && <Notice tone="neutral" className="mt-5" description="Global cleanup and Hostlet update actions are operator-managed in Hostlet Cloud. Customer-visible jobs remain scoped to your apps." />}
+            {operationsMessage && <Notice tone={operationsMessage.toLowerCase().includes("failed") ? "danger" : "neutral"} className="mt-3" description={operationsMessage} />}
 
             <div className="mt-6 grid gap-4 lg:grid-cols-2">
               <div>
@@ -243,7 +302,7 @@ export default function Settings() {
                       <div className="min-w-0">
                         <div className="truncate font-medium">{job.type}</div>
                         <div className="muted text-sm">{new Date(job.createdAt).toLocaleString()} · attempt {job.attempt}/{job.maxAttempts}</div>
-                        {job.failure && <div className="text-sm text-red-700">{job.failure}</div>}
+                        {job.failure && <Notice tone="danger" className="mt-2" description={job.failure} />}
                       </div>
                       <div className="flex items-center gap-2">
                         <StatusPill status={job.status} />

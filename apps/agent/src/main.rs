@@ -147,7 +147,7 @@ async fn claim_and_run_job(cfg: &Config) {
     else {
         return;
     };
-    match handle_job(cfg.clone(), payload.clone()).await {
+    match run_claimed_job_with_lease(cfg.clone(), job_id, payload.clone()).await {
         Ok(()) => complete_claimed_job(cfg, job_id, "success", None).await,
         Err(err) => {
             let message = format!("{err}");
@@ -169,6 +169,25 @@ async fn claim_and_run_job(cfg: &Config) {
             tracing::warn!("claimed job failed: {message}");
         }
     }
+}
+
+async fn run_claimed_job_with_lease(
+    cfg: Config,
+    job_id: Uuid,
+    payload: Value,
+) -> anyhow::Result<()> {
+    job_status(&cfg, job_id, "running", None).await;
+    let renew_cfg = cfg.clone();
+    let renew = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            job_status(&renew_cfg, job_id, "running", None).await;
+        }
+    });
+    let result = handle_job(cfg, payload).await;
+    renew.abort();
+    result
 }
 
 async fn complete_claimed_job(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
@@ -440,7 +459,7 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     .await?;
     status(&cfg, deployment_id, "starting", None).await;
     let container = format!("hostlet-{app_name}-{deployment_id}");
-    let port_map = format!("0.0.0.0::{port}");
+    let port_map = docker_port_map(port as u16);
     let data_volume = app_data_volume(app_id);
     ensure_app_data_volume(&cfg, deployment_id, &data_volume).await?;
     let data_mount = format!("type=volume,source={data_volume},target=/data");
@@ -531,8 +550,15 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let mut local_url = None;
     if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            write_local_caddy_route(router, &route_key, domain, internal_port).await?;
-            run_router_reload(&cfg, deployment_id, router).await?;
+            apply_local_caddy_route(
+                &cfg,
+                deployment_id,
+                router,
+                &route_key,
+                domain,
+                internal_port,
+            )
+            .await?;
         }
         let url = if cfg.local_router.is_some() {
             domain.to_string()
@@ -548,14 +574,7 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         .await;
         local_url = Some(url);
     } else {
-        write_caddy_route(&route_key, domain, internal_port).await?;
-        run_log(
-            &cfg,
-            deployment_id,
-            "caddy",
-            &["reload", "--config", "/etc/caddy/Caddyfile"],
-        )
-        .await?;
+        apply_caddy_route(&cfg, deployment_id, &route_key, domain, internal_port).await?;
     }
     status_extra(
         &cfg,
@@ -786,8 +805,15 @@ async fn deploy_compose(
     let mut local_url = None;
     if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            write_local_caddy_route(router, route_key, domain, internal_port).await?;
-            run_router_reload(&cfg, deployment_id, router).await?;
+            apply_local_caddy_route(
+                &cfg,
+                deployment_id,
+                router,
+                route_key,
+                domain,
+                internal_port,
+            )
+            .await?;
         }
         local_url = Some(if cfg.local_router.is_some() {
             domain.to_string()
@@ -795,14 +821,7 @@ async fn deploy_compose(
             format!("localhost:{internal_port}")
         });
     } else {
-        write_caddy_route(route_key, domain, internal_port).await?;
-        run_log(
-            &cfg,
-            deployment_id,
-            "caddy",
-            &["reload", "--config", "/etc/caddy/Caddyfile"],
-        )
-        .await?;
+        apply_caddy_route(&cfg, deployment_id, route_key, domain, internal_port).await?;
     }
     status_extra(
         &cfg,
@@ -848,8 +867,7 @@ async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     status(&cfg, deployment_id, "routing", None).await;
     if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            write_local_caddy_route(router, &route_key, domain, port).await?;
-            run_router_reload(&cfg, deployment_id, router).await?;
+            apply_local_caddy_route(&cfg, deployment_id, router, &route_key, domain, port).await?;
         }
         let local_url = cfg.local_router.as_ref().map(|_| domain);
         status_extra(
@@ -866,15 +884,7 @@ async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
         .await;
         return Ok(());
     }
-    write_caddy_route(&route_key, domain, port).await?;
-    let reload = run_log(
-        &cfg,
-        deployment_id,
-        "caddy",
-        &["reload", "--config", "/etc/caddy/Caddyfile"],
-    )
-    .await;
-    match reload {
+    match apply_caddy_route(&cfg, deployment_id, &route_key, domain, port).await {
         Ok(_) => {
             status_extra(
                 &cfg,
@@ -1574,16 +1584,42 @@ async fn wait_health(
     bail!("no successful response from {url}");
 }
 
-async fn write_caddy_route(app: &str, domain: &str, port: u16) -> anyhow::Result<()> {
+fn docker_port_map(port: u16) -> String {
+    format!("127.0.0.1::{port}")
+}
+
+async fn apply_caddy_route(
+    cfg: &Config,
+    deployment_id: Uuid,
+    app: &str,
+    domain: &str,
+    port: u16,
+) -> anyhow::Result<()> {
     let dir = PathBuf::from("/etc/caddy/hostlet");
     tokio::fs::create_dir_all(&dir).await?;
     let target = dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&dir, &target, domain).await?;
-    let block = format!(
-        "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n{domain} {{\n  reverse_proxy 127.0.0.1:{port}\n}}\n"
-    );
-    tokio::fs::write(target, block).await?;
+    let previous = tokio::fs::read(&target).await.ok();
+    write_route_file(&target, &render_caddy_route(app, domain, port)).await?;
+    let reload = run_log(
+        cfg,
+        deployment_id,
+        "caddy",
+        &["reload", "--config", "/etc/caddy/Caddyfile"],
+    )
+    .await;
+    if let Err(err) = reload {
+        restore_route_file(&target, previous).await?;
+        let _ = run_quiet("caddy", &["reload", "--config", "/etc/caddy/Caddyfile"]).await;
+        bail!("Caddy reload failed and the previous route was restored: {err}");
+    }
     Ok(())
+}
+
+fn render_caddy_route(app: &str, domain: &str, port: u16) -> String {
+    format!(
+        "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n{domain} {{\n  reverse_proxy 127.0.0.1:{port}\n}}\n"
+    )
 }
 
 async fn remove_caddy_route(app: &str) -> anyhow::Result<()> {
@@ -1595,7 +1631,9 @@ async fn remove_caddy_route(app: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn write_local_caddy_route(
+async fn apply_local_caddy_route(
+    cfg: &Config,
+    deployment_id: Uuid,
     router: &LocalRouter,
     app: &str,
     domain: &str,
@@ -1604,10 +1642,39 @@ async fn write_local_caddy_route(
     tokio::fs::create_dir_all(&router.snippets_dir).await?;
     let target = router.snippets_dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&router.snippets_dir, &target, domain).await?;
-    let block = format!(
+    let previous = tokio::fs::read(&target).await.ok();
+    write_route_file(&target, &render_local_caddy_route(app, domain, port)).await?;
+    if let Err(err) = run_router_reload(cfg, deployment_id, router).await {
+        restore_route_file(&target, previous).await?;
+        let _ = run_router_reload_quiet(router).await;
+        bail!("Caddy reload failed and the previous route was restored: {err}");
+    }
+    Ok(())
+}
+
+fn render_local_caddy_route(app: &str, domain: &str, port: u16) -> String {
+    format!(
         "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n@{app} host {domain}\nreverse_proxy @{app} 127.0.0.1:{port}\n"
-    );
-    tokio::fs::write(target, block).await?;
+    )
+}
+
+async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
+    let tmp = target.with_extension(format!("caddy.tmp-{}", std::process::id()));
+    tokio::fs::write(&tmp, contents).await?;
+    tokio::fs::rename(tmp, target).await?;
+    Ok(())
+}
+
+async fn restore_route_file(target: &Path, previous: Option<Vec<u8>>) -> anyhow::Result<()> {
+    if let Some(contents) = previous {
+        tokio::fs::write(target, contents).await?;
+    } else {
+        match tokio::fs::remove_file(target).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
     Ok(())
 }
 
@@ -1701,7 +1768,7 @@ struct StatusDetails<'a> {
 }
 
 async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
-    post(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":details.failure,"image_tag":details.image,"container_name":details.container,"local_url":details.local_url,"published_port":details.published_port,"compose_project":details.compose_project,"runtime_metadata":details.runtime_metadata})).await;
+    post_reliable(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":details.failure,"image_tag":details.image,"container_name":details.container,"local_url":details.local_url,"published_port":details.published_port,"compose_project":details.compose_project,"runtime_metadata":details.runtime_metadata})).await;
 }
 
 async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
@@ -1713,7 +1780,7 @@ async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
 }
 
 async fn job_status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
-    post(
+    post_reliable(
         cfg,
         json!({"type":"job_status","job_id":id,"status":status,"failure":failure}),
     )
@@ -1721,14 +1788,48 @@ async fn job_status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>)
 }
 
 async fn post(cfg: &Config, msg: Value) {
-    let _ = cfg
-        .http
+    let _ = send_event(cfg, &msg).await;
+}
+
+async fn post_reliable(cfg: &Config, msg: Value) {
+    let attempts = event_retry_delays();
+    for attempt in 0..attempts.len() {
+        match send_event(cfg, &msg).await {
+            Ok(()) => return,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    attempt = attempt + 1,
+                    event_type = msg.get("type").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                    "failed to post agent event"
+                );
+                if let Some(delay) = attempts.get(attempt + 1) {
+                    tokio::time::sleep(*delay).await;
+                }
+            }
+        }
+    }
+}
+
+async fn send_event(cfg: &Config, msg: &Value) -> anyhow::Result<()> {
+    cfg.http
         .post(format!("{}/api/agent/events", cfg.api_url))
         .header("x-hostlet-server-id", cfg.server_id.to_string())
         .header("x-hostlet-agent-token", &cfg.agent_token)
-        .json(&msg)
+        .json(msg)
         .send()
-        .await;
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+fn event_retry_delays() -> [Duration; 4] {
+    [
+        Duration::from_millis(0),
+        Duration::from_millis(250),
+        Duration::from_secs(1),
+        Duration::from_secs(3),
+    ]
 }
 
 #[derive(Default)]
@@ -2383,7 +2484,7 @@ fn compose_override_yaml(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    ports:\n      - target: {port}\n        host_ip: 0.0.0.0\n        protocol: tcp\n"
+        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
     )
 }
 
@@ -2412,6 +2513,7 @@ fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<
             "pid",
             "ipc",
             "devices",
+            "networks",
             "ports",
         ] {
             if service.contains_key(serde_yaml::Value::String(key.to_string())) {
@@ -2425,6 +2527,21 @@ fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<
             for volume in volumes {
                 if let Some(value) = volume.as_str() {
                     if value.starts_with('/') || value.contains("../") {
+                        bail!("compose service {service_name} uses an unsupported host bind mount");
+                    }
+                    continue;
+                }
+                if let Some(mapping) = volume.as_mapping() {
+                    let volume_type = mapping
+                        .get(serde_yaml::Value::String("type".into()))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let source = mapping
+                        .get(serde_yaml::Value::String("source".into()))
+                        .or_else(|| mapping.get(serde_yaml::Value::String("src".into())))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if volume_type == "bind" || source.starts_with('/') || source.contains("../") {
                         bail!("compose service {service_name} uses an unsupported host bind mount");
                     }
                 }
@@ -2830,10 +2947,61 @@ mod tests {
     }
 
     #[test]
+    fn app_ports_bind_to_loopback_only() {
+        assert_eq!(docker_port_map(3000), "127.0.0.1::3000");
+        let override_yaml = compose_override_yaml(
+            "web",
+            3000,
+            Uuid::nil(),
+            Uuid::nil(),
+            &serde_json::json!({}),
+        );
+        assert!(override_yaml.contains("host_ip: 127.0.0.1"));
+        assert!(!override_yaml.contains("host_ip: 0.0.0.0"));
+    }
+
+    #[test]
+    fn caddy_routes_render_loopback_upstreams() {
+        assert!(render_caddy_route("app", "app.example.com", 12345)
+            .contains("reverse_proxy 127.0.0.1:12345"));
+        assert!(render_local_caddy_route("app", "app.example.com", 12345)
+            .contains("reverse_proxy @app 127.0.0.1:12345"));
+    }
+
+    #[test]
+    fn reliable_status_events_have_retry_backoff() {
+        let delays = event_retry_delays();
+        assert_eq!(delays.len(), 4);
+        assert_eq!(delays[0], Duration::from_millis(0));
+        assert!(delays[1] < delays[2]);
+        assert!(delays[2] < delays[3]);
+    }
+
+    #[test]
     fn route_domain_parsing_is_exact_not_substring_based() {
         let route = "# hostlet-route-key: app-a\n# hostlet-domain: myapp.example.com\n@a host myapp.example.com\n";
         assert_eq!(route_domain(route), Some("myapp.example.com"));
         assert_ne!(route_domain(route), Some("app.example.com"));
+    }
+
+    #[tokio::test]
+    async fn caddy_route_reload_failure_restores_previous_file_state() {
+        let dir = std::env::temp_dir().join(format!("hostlet-agent-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("app.caddy");
+
+        tokio::fs::write(&target, b"old route").await.unwrap();
+        restore_route_file(&target, Some(b"old route".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&target).await.unwrap(),
+            "old route"
+        );
+
+        restore_route_file(&target, None).await.unwrap();
+        assert!(!target.exists());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]
@@ -2889,5 +3057,23 @@ services:
       - /etc:/host-etc
 "#;
         assert!(validate_compose_subset(bind_mount, "web").is_err());
+        let long_bind_mount = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - type: bind
+        source: /etc
+        target: /host-etc
+"#;
+        assert!(validate_compose_subset(long_bind_mount, "web").is_err());
+        let service_network = r#"
+services:
+  web:
+    build: .
+    networks:
+      - hostlet
+"#;
+        assert!(validate_compose_subset(service_network, "web").is_err());
     }
 }

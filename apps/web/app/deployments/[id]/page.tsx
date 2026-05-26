@@ -2,12 +2,13 @@
 
 import { use, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CheckCircle2, Clock, ScrollText, TerminalSquare, XCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
 import { api, apiUrl } from "@/lib/api";
 import { AppShell, Notice, PageHeader, Panel, SectionHeader, StatusPill } from "@/components/ui";
 
 type Deployment = {
   id: string;
+  appId?: string;
   status: string;
   commitSha?: string | null;
   failure?: string | null;
@@ -22,35 +23,51 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
   const { id } = use(params);
   const [deployment, setDeployment] = useState<Deployment | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
-  const [redirecting, setRedirecting] = useState(false);
+  const [socketState, setSocketState] = useState<"connecting" | "connected" | "reconnecting" | "closed">("connecting");
+  const [socketMessage, setSocketMessage] = useState("");
 
   useEffect(() => {
     const loadDeployment = () => api<Deployment>(`/api/deployments/${id}`).then(setDeployment).catch(() => setDeployment({ id, status: "unknown", failure: "Deployment could not be loaded." }));
     loadDeployment();
     const poll = setInterval(loadDeployment, 2500);
     api<LogLine[]>(`/api/deployments/${id}/logs`).then((rows) => setLogs(rows.map((row) => `${row.stream}: ${row.line}`))).catch(() => {});
-    const ws = new WebSocket(`${apiUrl().replace("http", "ws")}/ws/logs/${id}`);
-    if (redirecting) {
-      clearInterval(poll);
-      ws.close();
-      return () => {};
-    }
-    ws.onmessage = (event) => {
-      const row = JSON.parse(event.data);
-      setLogs((current) => [...current, `${row.stream}: ${row.line}`].slice(-1000));
+    let closed = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let ws: WebSocket | undefined;
+    const connect = () => {
+      setSocketState((current) => current === "closed" ? "connecting" : current);
+      ws = new WebSocket(`${apiUrl().replace("http", "ws")}/ws/logs/${id}`);
+      ws.onopen = () => {
+        setSocketState("connected");
+        setSocketMessage("");
+      };
+      ws.onmessage = (event) => {
+        try {
+          const row = JSON.parse(event.data);
+          setLogs((current) => [...current, `${row.stream}: ${row.line}`].slice(-1000));
+        } catch {
+          setSocketMessage("A log event could not be parsed.");
+        }
+      };
+      ws.onerror = () => {
+        setSocketMessage("Live log connection had an error.");
+      };
+      ws.onclose = () => {
+        if (closed) return;
+        setSocketState("reconnecting");
+        setSocketMessage("Live logs disconnected. Reconnecting...");
+        retry = setTimeout(connect, 2000);
+      };
     };
+    connect();
     return () => {
+      closed = true;
       clearInterval(poll);
-      ws.close();
+      if (retry) clearTimeout(retry);
+      ws?.close();
+      setSocketState("closed");
     };
-  }, [id, redirecting]);
-
-  useEffect(() => {
-    if (deployment?.status !== "success" || redirecting) return;
-    setRedirecting(true);
-    const timer = setTimeout(() => window.location.assign("/apps"), 1600);
-    return () => clearTimeout(timer);
-  }, [deployment?.status, redirecting]);
+  }, [id]);
 
   const steps = ["queued", "running", "building", "starting", "health_checking", "routing", "success"];
   const status = deployment?.status || "loading";
@@ -63,7 +80,12 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
             eyebrow="Deployment"
             title="Deployment logs"
             description={deployment?.commitSha ? `Commit ${deployment.commitSha}` : "Build, runtime, health check, and routing output."}
-            actions={<Link className="button-secondary" href="/apps"><ArrowLeft size={16} />Back to apps</Link>}
+            actions={
+              <>
+                {deployment?.appId && <Link className="button" href={`/apps/${deployment.appId}`}><ArrowLeft size={16} />App detail</Link>}
+                <Link className="button-secondary" href="/apps"><ScrollText size={16} />All apps</Link>
+              </>
+            }
           />
 
           <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
@@ -87,12 +109,30 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                 <p className="muted mt-4">{statusHelp(status)}</p>
               </Panel>
 
-              {redirecting && <Notice tone="success" description="Deployment succeeded. Returning to Apps..." />}
+              {status === "success" && (
+                <Notice
+                  tone="success"
+                  description="Deployment succeeded. Logs remain available here."
+                  action={deployment?.appId && <Link className="button-secondary" href={`/apps/${deployment.appId}`}>Open app detail</Link>}
+                />
+              )}
               {deployment?.failure && <Notice tone="danger" description={deployment.failure} />}
+              {socketMessage && <Notice tone={socketState === "reconnecting" ? "warning" : "neutral"} description={socketMessage} />}
             </aside>
 
             <section className="min-w-0">
-              <SectionHeader icon={TerminalSquare} title="Live output" className="mb-3" action={<div className="text-xs text-muted">{logs.length} lines</div>} />
+              <SectionHeader
+                icon={TerminalSquare}
+                title="Live output"
+                className="mb-3"
+                action={
+                  <div className="flex items-center gap-2 text-xs text-muted">
+                    {socketState === "reconnecting" && <RefreshCw className="animate-spin" size={14} />}
+                    <span>{socketLabel(socketState)}</span>
+                    <span>{logs.length} lines</span>
+                  </div>
+                }
+              />
               <pre className="h-[68vh] max-w-full overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-sm leading-6 text-green-100 shadow-sm shadow-neutral-950/20 [overflow-wrap:normal] [white-space:pre]">
                 {groupedLogs || "Waiting for deployment logs..."}
               </pre>
@@ -100,6 +140,15 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
           </div>
     </AppShell>
   );
+}
+
+function socketLabel(state: "connecting" | "connected" | "reconnecting" | "closed") {
+  switch (state) {
+    case "connected": return "live";
+    case "reconnecting": return "reconnecting";
+    case "closed": return "closed";
+    default: return "connecting";
+  }
 }
 
 function humanStatus(status: string) {

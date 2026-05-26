@@ -51,9 +51,18 @@ type RuntimeHealth = {
   lastCheckedAt?: string | null;
   lastHealthyAt?: string | null;
 };
+type SessionPayload = {
+  mode: "self_hosted" | "cloud";
+  cloud?: {
+    billingActive: boolean;
+    githubInstalled: boolean;
+    nextStep: "login" | "install_github" | "billing" | "ready";
+  } | null;
+};
 
 export default function Apps() {
   const [apps, setApps] = useState<App[]>([]);
+  const [session, setSession] = useState<SessionPayload | null>(null);
   const [message, setMessage] = useState("Loading apps...");
   const [filter, setFilter] = useState<"all" | "active" | "failed" | "public" | "healthy" | "degraded" | "unhealthy" | "unknown">("all");
 
@@ -79,7 +88,12 @@ export default function Apps() {
       clearInterval(timer);
     };
   }, []);
+  useEffect(() => {
+    api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
+  }, []);
 
+  const cloud = session?.mode === "cloud";
+  const createDisabledReason = cloudCreateDisabledReason(session);
   const filtered = useMemo(() => {
     return apps.filter((app) => {
       if (filter === "active") return isActiveDeploy(app.latestDeployment?.status);
@@ -98,8 +112,14 @@ export default function Apps() {
           <PageHeader
             eyebrow="Applications"
             title="Apps"
-            description="Deployable projects, routes, latest health, automation, and public exposure."
-            actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
+            description={cloud ? "Deployable projects, Hostlet Cloud URLs, latest health, and runtime state." : "Deployable projects, routes, latest health, automation, and public exposure."}
+            actions={
+              createDisabledReason ? (
+                <button className="button" disabled title={createDisabledReason}><Plus size={16} />Create app</button>
+              ) : (
+                <Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>
+              )
+            }
           />
 
           <FilterTabs label="Filter" icon={ListFilter} value={filter} items={["all", "active", "failed", "public", "healthy", "degraded", "unhealthy", "unknown"] as const} onChange={setFilter} />
@@ -114,13 +134,13 @@ export default function Apps() {
                         <Link href={`/apps/${app.id}`} className="truncate text-lg font-semibold hover:text-action">{app.name}</Link>
                         <StatusPill status={app.latestDeployment?.status || app.currentDeployment?.status || "not deployed"} />
                         <StatusPill status={app.health?.status || "unknown"} label={`health ${app.health?.status || "unknown"}`} />
-                        <StatusPill status={app.server?.status || "offline"} label={`machine ${app.server?.status || "offline"}`} />
+                        <StatusPill status={app.server?.status || "offline"} label={`${cloud ? "worker" : "machine"} ${app.server?.status || "offline"}`} />
                       </div>
                       <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
-                      {appVisitHref(app) && (
-                        <a className="button" href={appVisitHref(app) || "#"} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit</a>
+                      {appVisitHref(app, cloud) && (
+                        <a className="button" href={appVisitHref(app, cloud) || "#"} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit</a>
                       )}
                       <Link className="button-secondary" href={`/apps/${app.id}`}><Box size={16} />Open</Link>
                       {app.latestDeployment?.id && (
@@ -130,15 +150,15 @@ export default function Apps() {
                   </div>
 
                   <KeyValueGrid>
-                    <KeyValueItem label={app.publicExposure ? "Public URL" : "Private URL"} value={appVisitLabel(app)} href={appVisitHref(app)} externalIcon={<ExternalLink size={13} />} />
-                    <KeyValueItem label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
+                    <KeyValueItem label={cloud ? "Hostlet Cloud URL" : app.publicExposure ? "Public URL" : "Private URL"} value={appVisitLabel(app, cloud)} href={appVisitHref(app, cloud)} externalIcon={<ExternalLink size={13} />} />
+                    <KeyValueItem label={cloud ? "Worker" : "Machine"} value={cloud ? "Hostlet Cloud managed worker" : `${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
                     <KeyValueItem label="Runtime" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
                     <KeyValueItem label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
                     <KeyValueItem label="Runtime health" value={healthSummary(app.health)} />
                     <KeyValueItem label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
-                    <KeyValueItem label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
-                    <KeyValueItem label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />
-                    <KeyValueItem label="Webhook" value={webhookSummary(app.latestWebhook)} />
+                    <KeyValueItem label="Limits" value={cloud ? `${app.memoryLimitMb || 512} MB · ${app.cpuLimit || 0.5} CPU` : `${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
+                    {!cloud && <KeyValueItem label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />}
+                    {!cloud && <KeyValueItem label="Webhook" value={webhookSummary(app.latestWebhook)} />}
                   </KeyValueGrid>
 
                   {app.latestDeployment?.failure && (
@@ -153,9 +173,9 @@ export default function Apps() {
             <EmptyState
               icon={Box}
               title={message || "No apps match this filter"}
-              description="Create an app from a GitHub repository, then deploy it to this Hostlet machine."
-              actionHref="/apps/new"
-              actionLabel="Create app"
+              description={cloud ? "Create a cloud app from a GitHub repository, then deploy it to a Hostlet Cloud URL." : "Create an app from a GitHub repository, then deploy it to this Hostlet machine."}
+              actionHref={createDisabledReason ? undefined : "/apps/new"}
+              actionLabel={createDisabledReason ? undefined : "Create app"}
             />
           )}
     </AppShell>
@@ -188,8 +208,13 @@ function healthSummary(health?: RuntimeHealth | null) {
   return bits.join(" · ");
 }
 
-function appVisitHref(app: App) {
+function appVisitHref(app: App, cloud = false) {
   if (!app.currentDeploymentId) return null;
+  if (cloud) {
+    const display = displayDomain(app.domain);
+    if (!display) return null;
+    return display.startsWith("http://") || display.startsWith("https://") ? display : `https://${display}`;
+  }
   if (!app.publicExposure) {
     const port = app.currentDeployment?.publishedPort;
     const host = privateAppHost(app);
@@ -209,7 +234,8 @@ function appVisitHref(app: App) {
   return `https://${display}`;
 }
 
-function appVisitLabel(app: App) {
+function appVisitLabel(app: App, cloud = false) {
+  if (cloud) return displayDomain(app.domain) || "No Hostlet Cloud URL";
   if (app.publicExposure) return displayDomain(app.domain) || "No public URL";
   const port = app.currentDeployment?.publishedPort;
   const host = privateAppHost(app);
@@ -241,4 +267,12 @@ function displayDomain(domain: string) {
 
 function isActiveDeploy(status?: string | null) {
   return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
+}
+
+function cloudCreateDisabledReason(session: SessionPayload | null) {
+  if (session?.mode !== "cloud") return "";
+  if (!session.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
+  if (!session.cloud.billingActive) return "Start a Stripe sandbox subscription before creating cloud apps.";
+  if (session.cloud.nextStep !== "ready") return "Finish Hostlet Cloud setup before creating apps.";
+  return "";
 }

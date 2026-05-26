@@ -646,6 +646,11 @@ async fn handle_agent_message(state: &AppState, server_id: Uuid, msg: serde_json
                  SET status=$1,
                      failure_summary=$2,
                      updated_at=now(),
+                     lease_expires_at=CASE
+                       WHEN $1 IN ('claimed','running') THEN now() + interval '5 minutes'
+                       WHEN $1 IN ('success','failed') THEN NULL
+                       ELSE lease_expires_at
+                     END,
                      finished_at=CASE WHEN $1 IN ('success','failed') THEN now() ELSE finished_at END
                  WHERE id=$3 AND server_id=$4",
             )

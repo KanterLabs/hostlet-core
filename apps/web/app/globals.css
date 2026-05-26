@@ -54,6 +54,10 @@ button, .button {
   @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-action-strong focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
+.compact {
+  @apply min-h-8 px-2.5 py-1.5 text-xs;
+}
+
 .button-secondary {
   @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-line bg-surface px-3 py-2 text-sm font-medium text-ink shadow-sm shadow-neutral-950/5 ring-0 transition hover:border-neutral-300 hover:bg-surface-alt focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
@@ -112,6 +116,6 @@ button, .button {
 
 @media (max-width: 1023px) {
   .app-shell {
-    padding-bottom: 72px;
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
   }
 }

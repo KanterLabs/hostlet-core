@@ -1,5 +1,8 @@
 use crate::{
-    auth::current_user_id, crypto::verify_signature, deploy::create_and_send_deploy, github_app,
+    auth::{current_user_id, request_context},
+    crypto::verify_signature,
+    deploy::create_and_send_deploy,
+    github_app,
     state::AppState,
 };
 use axum::{
@@ -83,6 +86,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
                 .into_response();
             }
             Err(err) => {
+                tracing::warn!(error = %err, "GitHub App installation status check failed");
                 return Json(serde_json::json!({
                     "oauthConfigured": true,
                     "webhookConfigured": webhook_configured,
@@ -90,7 +94,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
                     "authenticated": true,
                     "tokenValid": false,
                     "login": null,
-                    "message": format!("GitHub App installation check failed: {err}")
+                    "message": "GitHub App installation check failed. Try again or reinstall the app."
                 }))
                 .into_response();
             }
@@ -168,9 +172,11 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
 }
 
 pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
+    let user_id = context.user_id;
     if state.mode == crate::state::HostletMode::Cloud {
         let missing = github_app::missing_cloud_github_app_config(&state);
         if !missing.is_empty() {
@@ -191,7 +197,14 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
                     .unwrap_or_else(|| Value::Array(Vec::new()));
                 Json(items).into_response()
             }
-            Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+            Err(err) => {
+                tracing::warn!(error = %err, "GitHub App repository listing failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "GitHub repositories could not be loaded",
+                )
+                    .into_response()
+            }
         };
     }
     let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1").bind(user_id).fetch_optional(&state.db).await;
@@ -222,13 +235,23 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
                     .into_response(),
                 Err(_) => StatusCode::BAD_GATEWAY.into_response(),
             },
-            Err(err) => (
-                StatusCode::BAD_GATEWAY,
-                format!("GitHub repository request failed: {err}"),
-            )
-                .into_response(),
+            Err(err) => {
+                tracing::warn!(error = %err, "GitHub repository request failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "GitHub repositories could not be loaded",
+                )
+                    .into_response()
+            }
         },
-        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "GitHub repository request could not be sent");
+            (
+                StatusCode::BAD_GATEWAY,
+                "GitHub repositories could not be loaded",
+            )
+                .into_response()
+        }
     }
 }
 
@@ -237,9 +260,11 @@ pub async fn repo_inspect(
     headers: HeaderMap,
     Json(body): Json<RepoInspectRequest>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
+    let user_id = context.user_id;
     let repo = body
         .repo_full_name
         .as_deref()
@@ -268,11 +293,25 @@ pub async fn repo_inspect(
     let token =
         match github_app::installation_token_for_app_user(&state, user_id, Some(&repo)).await {
             Ok(token) => token,
-            Err(err) => return (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+            Err(err) => {
+                tracing::warn!(error = %err, repo, "GitHub App installation token lookup failed");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    "GitHub repository access could not be verified",
+                )
+                    .into_response();
+            }
         };
     match inspect_repo(&state, &repo, body.branch.as_deref(), token.as_deref()).await {
         Ok(value) => Json(value).into_response(),
-        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, repo, "GitHub repository inspection failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                "GitHub repository could not be inspected",
+            )
+                .into_response()
+        }
     }
 }
 

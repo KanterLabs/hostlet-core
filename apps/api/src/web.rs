@@ -1,5 +1,8 @@
 use crate::{
-    auth::{cloud_request_ready, current_cloud_user_id, current_user_id},
+    auth::{
+        cloud_compute_allowed_for_context, cloud_request_ready, current_cloud_user_id,
+        current_user_id, request_context, RequestContext,
+    },
     crypto::verify_token,
     deploy, github,
     state::{AppState, HostletMode},
@@ -8,7 +11,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use hmac::{Hmac, Mac};
@@ -77,6 +80,15 @@ pub struct BillingPlanRequest {
     plan: String,
 }
 
+async fn customer_context(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<RequestContext, Response> {
+    request_context(headers, state)
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED.into_response())
+}
+
 pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let Some(_user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -92,9 +104,11 @@ pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> 
 }
 
 pub async fn audit_events(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let rows = sqlx::query(
         r#"
         SELECT e.id,
@@ -192,10 +206,21 @@ pub async fn cleanup_preview(
 }
 
 pub async fn run_cleanup(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    run_cleanup_inner(&state, Some(user_id)).await
+    if state.mode == HostletMode::Cloud {
+        return (
+            StatusCode::FORBIDDEN,
+            "cloud users cannot run global cleanup",
+        )
+            .into_response();
+    }
+    run_cleanup_inner(&state, Some(context.user_id)).await
 }
 
 async fn run_cleanup_inner(state: &AppState, user_id: Option<Uuid>) -> axum::response::Response {
@@ -566,9 +591,11 @@ pub async fn server_install_command() -> impl IntoResponse {
 }
 
 pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let rows = sqlx::query(
         r#"
         SELECT
@@ -658,9 +685,11 @@ pub async fn get_app(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let app = sqlx::query(
         r#"
         SELECT
@@ -750,9 +779,11 @@ pub async fn app_health(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let row = sqlx::query(
         r#"
         SELECT a.id,
@@ -789,9 +820,11 @@ pub async fn app_health_events(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let rows = sqlx::query(
         r#"
         SELECT e.id,
@@ -842,8 +875,15 @@ pub async fn check_app_health_now(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
+    };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
     };
     let row = sqlx::query(
         r#"
@@ -858,7 +898,7 @@ pub async fn check_app_health_now(
         "#,
     )
     .bind(id)
-    .bind(user_id)
+    .bind(context.user_id)
     .fetch_optional(&state.db)
     .await;
     let Ok(Some(row)) = row else {
@@ -909,10 +949,14 @@ pub async fn restart_app_container(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = crate::auth::cloud_compute_allowed_for_user(&state, user_id).await {
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
         return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
     }
     let row = sqlx::query(
@@ -928,7 +972,7 @@ pub async fn restart_app_container(
         "#,
     )
     .bind(id)
-    .bind(user_id)
+    .bind(context.user_id)
     .fetch_optional(&state.db)
     .await;
     let Ok(Some(row)) = row else {
@@ -1024,9 +1068,11 @@ pub async fn health_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let rows = sqlx::query(
         r#"
         SELECT COALESCE(hs.status, 'unknown') AS status, count(*) AS count
@@ -1165,6 +1211,13 @@ fn valid_stripe_signature(headers: &HeaderMap, body: &[u8], webhook_secret: &str
     let Some(timestamp) = timestamp else {
         return false;
     };
+    let Ok(timestamp_seconds) = timestamp.parse::<i64>() else {
+        return false;
+    };
+    let age_seconds = (chrono::Utc::now().timestamp() - timestamp_seconds).abs();
+    if age_seconds > 300 {
+        return false;
+    }
     let signed_payload = [timestamp.as_bytes(), b".", body].concat();
     let mut mac = Hmac::<Sha256>::new_from_slice(webhook_secret.as_bytes())
         .expect("HMAC accepts any key length");
@@ -1173,6 +1226,23 @@ fn valid_stripe_signature(headers: &HeaderMap, body: &[u8], webhook_secret: &str
     signatures
         .iter()
         .any(|candidate| crate::crypto::constant_time_eq(candidate.as_bytes(), expected.as_bytes()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripeWebhookAction {
+    CheckoutCompleted,
+    SubscriptionChanged,
+    Ignore,
+}
+
+fn stripe_webhook_action(event_type: &str) -> StripeWebhookAction {
+    match event_type {
+        "checkout.session.completed" => StripeWebhookAction::CheckoutCompleted,
+        "customer.subscription.created"
+        | "customer.subscription.updated"
+        | "customer.subscription.deleted" => StripeWebhookAction::SubscriptionChanged,
+        _ => StripeWebhookAction::Ignore,
+    }
 }
 
 async fn handle_checkout_completed(
@@ -1201,21 +1271,17 @@ async fn handle_checkout_completed(
         .execute(&state.db)
         .await?;
     }
-    let subscription_id = object
-        .get("subscription")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let plan = object
-        .get("metadata")
-        .and_then(|value| value.get("plan"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("starter");
+    let subscription_id = stripe_checkout_subscription_id(object)?;
+    let plan = stripe_plan_code(object)?;
     sqlx::query(
         "INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
-         VALUES ($1,$2,$3,'active')
+         VALUES ($1,$2,$3,'pending')
          ON CONFLICT (stripe_subscription_id) DO UPDATE SET
            plan_code=EXCLUDED.plan_code,
-           status='active',
+           status=CASE
+             WHEN cloud_subscriptions.status IN ('active','trialing') THEN cloud_subscriptions.status
+             ELSE 'pending'
+           END,
            updated_at=now()",
     )
     .bind(cloud_user_id)
@@ -1257,11 +1323,7 @@ async fn handle_subscription_event(
         .get("status")
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
-    let plan = object
-        .get("metadata")
-        .and_then(|value| value.get("plan"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("starter");
+    let plan = stripe_plan_code(object)?;
     let current_period_start = stripe_timestamp(object, "current_period_start");
     let current_period_end = stripe_timestamp(object, "current_period_end");
     let cancel_at_period_end = object
@@ -1299,6 +1361,28 @@ fn stripe_cloud_user_id(object: &serde_json::Value) -> anyhow::Result<Uuid> {
         .and_then(|value| value.as_str())
         .ok_or_else(|| anyhow::anyhow!("Stripe object missing cloud_user_id metadata"))?;
     Ok(Uuid::parse_str(value)?)
+}
+
+fn stripe_checkout_subscription_id(object: &serde_json::Value) -> anyhow::Result<&str> {
+    object
+        .get("subscription")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Stripe checkout session missing subscription id"))
+}
+
+fn stripe_plan_code(object: &serde_json::Value) -> anyhow::Result<&str> {
+    let plan = object
+        .get("metadata")
+        .and_then(|value| value.get("plan"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .ok_or_else(|| anyhow::anyhow!("Stripe object missing plan metadata"))?;
+    if matches!(plan, "student" | "starter" | "pro") {
+        Ok(plan)
+    } else {
+        anyhow::bail!("Stripe object contains unsupported plan metadata")
+    }
 }
 
 fn stripe_timestamp(
@@ -1435,11 +1519,32 @@ pub async fn cloud_billing_checkout(
                     "url": value.get("url").and_then(|value| value.as_str())
                 }))
                 .into_response(),
-                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+                Err(err) => {
+                    tracing::warn!(error = %err, "Stripe checkout response was not valid JSON");
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "Stripe checkout could not be started",
+                    )
+                        .into_response()
+                }
             },
-            Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+            Err(err) => {
+                tracing::warn!(error = %err, "Stripe checkout request failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Stripe checkout could not be started",
+                )
+                    .into_response()
+            }
         },
-        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "Stripe checkout request could not be sent");
+            (
+                StatusCode::BAD_GATEWAY,
+                "Stripe checkout could not be started",
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1493,11 +1598,32 @@ pub async fn cloud_billing_portal(
                     "url": value.get("url").and_then(|value| value.as_str())
                 }))
                 .into_response(),
-                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+                Err(err) => {
+                    tracing::warn!(error = %err, "Stripe portal response was not valid JSON");
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "Stripe billing portal could not be opened",
+                    )
+                        .into_response()
+                }
             },
-            Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+            Err(err) => {
+                tracing::warn!(error = %err, "Stripe portal request failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Stripe billing portal could not be opened",
+                )
+                    .into_response()
+            }
         },
-        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "Stripe portal request could not be sent");
+            (
+                StatusCode::BAD_GATEWAY,
+                "Stripe billing portal could not be opened",
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1543,12 +1669,12 @@ pub async fn cloud_billing_webhook(
     if done.rows_affected() == 0 {
         return StatusCode::NO_CONTENT.into_response();
     }
-    let result = match event_type {
-        "checkout.session.completed" => handle_checkout_completed(&state, &payload).await,
-        "customer.subscription.created"
-        | "customer.subscription.updated"
-        | "customer.subscription.deleted" => handle_subscription_event(&state, &payload).await,
-        _ => Ok(()),
+    let result = match stripe_webhook_action(event_type) {
+        StripeWebhookAction::CheckoutCompleted => handle_checkout_completed(&state, &payload).await,
+        StripeWebhookAction::SubscriptionChanged => {
+            handle_subscription_event(&state, &payload).await
+        }
+        StripeWebhookAction::Ignore => Ok(()),
     };
     if let Err(err) = result {
         tracing::warn!(error = %err, event_id, event_type, "failed to process Stripe webhook");
@@ -1679,9 +1805,11 @@ pub async fn app_resources(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let row = sqlx::query(
         r#"
         SELECT d.container_name, s.kind,
@@ -1750,9 +1878,17 @@ pub async fn create_app(
     headers: HeaderMap,
     Json(body): Json<CreateApp>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    };
+    let user_id = context.user_id;
     let app_name = body.name.trim();
     let repo_full_name = body.repo_full_name.trim();
     let branch = body.branch.trim();
@@ -1810,6 +1946,13 @@ pub async fn create_app(
         return (
             StatusCode::BAD_REQUEST,
             "Docker Compose is not supported on Hostlet Cloud yet",
+        )
+            .into_response();
+    }
+    if state.mode == HostletMode::Cloud && cloud_create_contains_unsupported_settings(&body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unsupported Hostlet Cloud app setting",
         )
             .into_response();
     }
@@ -1919,6 +2062,9 @@ pub async fn create_app(
     if let Err(message) = validate_env_vars(&body.env) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
+    if let Err(err) = enforce_cloud_app_entitlements(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    }
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1927,7 +2073,11 @@ pub async fn create_app(
     if auto_deploy && state.mode != HostletMode::Cloud {
         if let Err(err) = github::ensure_repo_webhook(&state, user_id, repo_full_name).await {
             tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
-            return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                "GitHub webhook could not be configured",
+            )
+                .into_response();
         }
     }
     let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id")
@@ -2031,9 +2181,24 @@ pub async fn update_app(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateApp>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    };
+    let user_id = context.user_id;
+    if state.mode == HostletMode::Cloud && cloud_update_contains_unsupported_settings(&body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unsupported Hostlet Cloud app setting",
+        )
+            .into_response();
+    }
     let row = sqlx::query(
         "SELECT id, domain, public_exposure, repo_full_name, auto_deploy FROM apps WHERE id=$1 AND user_id=$2",
     )
@@ -2190,7 +2355,11 @@ pub async fn update_app(
     if body.auto_deploy == Some(true) && !old_auto_deploy {
         if let Err(err) = github::ensure_repo_webhook(&state, user_id, &repo_full_name).await {
             tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
-            return (StatusCode::BAD_GATEWAY, err.to_string()).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                "GitHub webhook could not be configured",
+            )
+                .into_response();
         }
     }
     let env_replaced = body.env.is_some();
@@ -2403,9 +2572,11 @@ pub async fn app_env_vars(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     if !app_belongs_to_user(&state, id, user_id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -2430,9 +2601,17 @@ pub async fn set_app_env_var(
     Path((id, key)): Path<(Uuid, String)>,
     Json(body): Json<EnvValue>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    };
+    let user_id = context.user_id;
     if !app_belongs_to_user(&state, id, user_id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -2481,9 +2660,17 @@ pub async fn delete_app_env_var(
     headers: HeaderMap,
     Path((id, key)): Path<(Uuid, String)>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    };
+    let user_id = context.user_id;
     if !app_belongs_to_user(&state, id, user_id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -2521,19 +2708,36 @@ pub async fn agent_job_status(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let row = sqlx::query(
         r#"
         SELECT j.id,j.job_type,j.app_id,j.status,j.failure_summary,j.finished_at
         FROM agent_jobs j
         JOIN servers s ON s.id = j.server_id
-        WHERE j.id=$1 AND (s.user_id=$2 OR s.kind='local')
+        WHERE j.id=$1
+          AND (
+            EXISTS (SELECT 1 FROM apps a WHERE a.id=j.app_id AND a.user_id=$2)
+            OR EXISTS (
+              SELECT 1 FROM deployments d
+              JOIN apps a ON a.id=d.app_id
+              WHERE d.id=j.deployment_id AND a.user_id=$2
+            )
+            OR (
+              $3 = false
+              AND j.app_id IS NULL
+              AND j.deployment_id IS NULL
+              AND (s.user_id=$2 OR s.kind='local')
+            )
+          )
         "#,
     )
     .bind(id)
     .bind(user_id)
+    .bind(state.mode == HostletMode::Cloud)
     .fetch_optional(&state.db)
     .await;
     match row {
@@ -2572,21 +2776,36 @@ pub async fn list_agent_jobs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    let user_id = context.user_id;
     let rows = sqlx::query(
         r#"
         SELECT j.id,j.job_type,j.app_id,j.deployment_id,j.status,j.failure_summary,
                j.attempt,j.max_attempts,j.claimed_by,j.created_at,j.updated_at,j.finished_at
         FROM agent_jobs j
         JOIN servers s ON s.id = j.server_id
-        WHERE s.user_id=$1 OR s.kind='local'
+        WHERE
+          EXISTS (SELECT 1 FROM apps a WHERE a.id=j.app_id AND a.user_id=$1)
+          OR EXISTS (
+            SELECT 1 FROM deployments d
+            JOIN apps a ON a.id=d.app_id
+            WHERE d.id=j.deployment_id AND a.user_id=$1
+          )
+          OR (
+            $2 = false
+            AND j.app_id IS NULL
+            AND j.deployment_id IS NULL
+            AND (s.user_id=$1 OR s.kind='local')
+          )
         ORDER BY j.created_at DESC
         LIMIT 200
         "#,
     )
     .bind(user_id)
+    .bind(state.mode == HostletMode::Cloud)
     .fetch_all(&state.db)
     .await;
     match rows {
@@ -2623,9 +2842,14 @@ pub async fn retry_agent_job(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    }
+    let user_id = context.user_id;
     let result = sqlx::query(
         r#"
         UPDATE agent_jobs j
@@ -2640,7 +2864,20 @@ pub async fn retry_agent_job(
         FROM servers s
         WHERE j.id=$1
           AND s.id=j.server_id
-          AND (s.user_id=$2 OR s.kind='local')
+          AND (
+            EXISTS (SELECT 1 FROM apps a WHERE a.id=j.app_id AND a.user_id=$2)
+            OR EXISTS (
+              SELECT 1 FROM deployments d
+              JOIN apps a ON a.id=d.app_id
+              WHERE d.id=j.deployment_id AND a.user_id=$2
+            )
+            OR (
+              $3 = false
+              AND j.app_id IS NULL
+              AND j.deployment_id IS NULL
+              AND (s.user_id=$2 OR s.kind='local')
+            )
+          )
           AND j.status IN ('failed','expired','cancelled')
           AND COALESCE(j.payload_json, '{}'::jsonb) <> '{}'::jsonb
         RETURNING j.app_id,j.deployment_id
@@ -2648,6 +2885,7 @@ pub async fn retry_agent_job(
     )
     .bind(id)
     .bind(user_id)
+    .bind(state.mode == HostletMode::Cloud)
     .fetch_optional(&state.db)
     .await;
     match result {
@@ -2680,9 +2918,14 @@ pub async fn cancel_agent_job(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
     };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    }
+    let user_id = context.user_id;
     let result = sqlx::query(
         r#"
         UPDATE agent_jobs j
@@ -2694,13 +2937,27 @@ pub async fn cancel_agent_job(
         FROM servers s
         WHERE j.id=$1
           AND s.id=j.server_id
-          AND (s.user_id=$2 OR s.kind='local')
+          AND (
+            EXISTS (SELECT 1 FROM apps a WHERE a.id=j.app_id AND a.user_id=$2)
+            OR EXISTS (
+              SELECT 1 FROM deployments d
+              JOIN apps a ON a.id=d.app_id
+              WHERE d.id=j.deployment_id AND a.user_id=$2
+            )
+            OR (
+              $3 = false
+              AND j.app_id IS NULL
+              AND j.deployment_id IS NULL
+              AND (s.user_id=$2 OR s.kind='local')
+            )
+          )
           AND j.status='queued'
         RETURNING j.app_id,j.deployment_id
         "#,
     )
     .bind(id)
     .bind(user_id)
+    .bind(state.mode == HostletMode::Cloud)
     .fetch_optional(&state.db)
     .await;
     match result {
@@ -2733,9 +2990,17 @@ pub async fn delete_app(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
+    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
+        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
+    };
+    let user_id = context.user_id;
     let app =
         sqlx::query("SELECT server_id,domain,public_exposure FROM apps WHERE id=$1 AND user_id=$2")
             .bind(id)
@@ -3003,6 +3268,49 @@ async fn app_domain_in_use(state: &AppState, domain: &str, except_app_id: Option
     }
 }
 
+async fn enforce_cloud_app_entitlements(
+    state: &AppState,
+    context: RequestContext,
+) -> anyhow::Result<()> {
+    if state.mode != HostletMode::Cloud {
+        return Ok(());
+    }
+    let Some(cloud_user_id) = context.cloud_user_id else {
+        anyhow::bail!("Hostlet Cloud session is required");
+    };
+    let entitlement = sqlx::query(
+        r#"
+        SELECT e.app_limit, e.memory_limit_mb, e.cpu_limit
+        FROM cloud_subscriptions s
+        JOIN cloud_plan_entitlements e ON e.plan_code=s.plan_code
+        WHERE s.cloud_user_id=$1
+          AND s.status IN ('active','trialing')
+          AND (s.current_period_end IS NULL OR s.current_period_end > now())
+        ORDER BY s.created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(cloud_user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(entitlement) = entitlement else {
+        anyhow::bail!("An active Hostlet Cloud subscription is required before creating apps");
+    };
+    let active_apps: i64 = sqlx::query_scalar("SELECT count(*) FROM apps WHERE user_id=$1")
+        .bind(context.user_id)
+        .fetch_one(&state.db)
+        .await?;
+    if active_apps >= i64::from(entitlement.get::<i32, _>("app_limit")) {
+        anyhow::bail!("Hostlet Cloud app limit reached for this plan");
+    }
+    if entitlement.get::<i32, _>("memory_limit_mb") < 512
+        || entitlement.get::<f64, _>("cpu_limit") < 0.5
+    {
+        anyhow::bail!("Hostlet Cloud plan does not include the required starter resources");
+    }
+    Ok(())
+}
+
 async fn cloud_app_domain(
     state: &AppState,
     app_name: &str,
@@ -3210,6 +3518,26 @@ fn clean_runtime_kind(value: Option<&str>) -> Result<String, &'static str> {
         "single" | "compose" => Ok(value.to_string()),
         _ => Err("runtime kind must be single or compose"),
     }
+}
+
+fn cloud_create_contains_unsupported_settings(body: &CreateApp) -> bool {
+    !body.domain.trim().is_empty()
+        || body.public_exposure == Some(false)
+        || body.auto_deploy == Some(true)
+        || body.memory_limit_mb.is_some()
+        || body.cpu_limit.is_some()
+}
+
+fn cloud_update_contains_unsupported_settings(body: &UpdateApp) -> bool {
+    body.domain.is_some()
+        || body.public_exposure.is_some()
+        || body.auto_deploy.is_some()
+        || body.memory_limit_mb.is_some()
+        || body.cpu_limit.is_some()
+        || body
+            .runtime_kind
+            .as_deref()
+            .is_some_and(|value| value.trim() == "compose")
 }
 
 fn clean_hostlet_config_path(value: Option<&str>) -> Result<String, &'static str> {
@@ -3664,7 +3992,16 @@ fn reserved_public_domain_label(label: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_slug, cloud_app_domain_label, reserved_public_domain_label};
+    use super::{
+        app_slug, cloud_app_domain_label, cloud_billing_webhook,
+        cloud_create_contains_unsupported_settings, cloud_update_contains_unsupported_settings,
+        reserved_public_domain_label, run_cleanup, stripe_checkout_subscription_id,
+        stripe_plan_code, stripe_webhook_action, valid_stripe_signature, AppState, Bytes,
+        CreateApp, State, StatusCode, StripeWebhookAction, UpdateApp, Uuid,
+    };
+    use axum::{http::HeaderMap, response::IntoResponse};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
 
     #[test]
     fn cloud_domain_label_prefers_clean_app_slug() {
@@ -3685,6 +4022,427 @@ mod tests {
     #[test]
     fn app_slug_falls_back_for_empty_names() {
         assert_eq!(app_slug("!!!"), "app");
+    }
+
+    #[test]
+    fn cloud_create_rejects_customer_controlled_runtime_settings() {
+        let base = CreateApp {
+            name: "Demo".into(),
+            repo_full_name: "owner/repo".into(),
+            branch: "main".into(),
+            server_id: None,
+            container_port: 3000,
+            health_path: "/".into(),
+            domain: "".into(),
+            runtime_kind: Some("single".into()),
+            hostlet_config_path: None,
+            runtime_config: None,
+            root_directory: None,
+            install_command: None,
+            build_command: None,
+            start_command: None,
+            memory_limit_mb: None,
+            cpu_limit: None,
+            public_exposure: None,
+            auto_deploy: None,
+            deploy_after_create: None,
+            env: vec![],
+        };
+        assert!(!cloud_create_contains_unsupported_settings(&base));
+
+        let mut custom_domain = base;
+        custom_domain.domain = "demo.example.com".into();
+        assert!(cloud_create_contains_unsupported_settings(&custom_domain));
+
+        let mut custom_resources = custom_domain;
+        custom_resources.domain = "".into();
+        custom_resources.memory_limit_mb = Some(1024);
+        assert!(cloud_create_contains_unsupported_settings(
+            &custom_resources
+        ));
+    }
+
+    #[test]
+    fn cloud_update_rejects_cloud_restricted_settings() {
+        let allowed = UpdateApp {
+            domain: None,
+            runtime_kind: Some("single".into()),
+            hostlet_config_path: None,
+            runtime_config: None,
+            health_path: Some("/health".into()),
+            root_directory: None,
+            install_command: None,
+            build_command: None,
+            start_command: None,
+            container_port: Some(3000),
+            memory_limit_mb: None,
+            cpu_limit: None,
+            public_exposure: None,
+            auto_deploy: None,
+            env: None,
+        };
+        assert!(!cloud_update_contains_unsupported_settings(&allowed));
+
+        let mut compose = allowed;
+        compose.runtime_kind = Some(" compose ".into());
+        assert!(cloud_update_contains_unsupported_settings(&compose));
+
+        let mut public_toggle = compose;
+        public_toggle.runtime_kind = None;
+        public_toggle.public_exposure = Some(false);
+        assert!(cloud_update_contains_unsupported_settings(&public_toggle));
+    }
+
+    #[test]
+    fn checkout_completion_requires_subscription_before_pending_record() {
+        let object = serde_json::json!({
+            "metadata": {
+                "cloud_user_id": "00000000-0000-0000-0000-000000000001",
+                "plan": "starter"
+            }
+        });
+        assert!(stripe_checkout_subscription_id(&object).is_err());
+
+        let object = serde_json::json!({
+            "subscription": "sub_123",
+            "metadata": {
+                "cloud_user_id": "00000000-0000-0000-0000-000000000001",
+                "plan": "starter"
+            }
+        });
+        assert_eq!(stripe_checkout_subscription_id(&object).unwrap(), "sub_123");
+    }
+
+    #[test]
+    fn stripe_plan_metadata_is_required_and_known() {
+        assert_eq!(
+            stripe_plan_code(&serde_json::json!({"metadata": {"plan": "pro"}})).unwrap(),
+            "pro"
+        );
+        assert!(stripe_plan_code(&serde_json::json!({"metadata": {}})).is_err());
+        assert!(
+            stripe_plan_code(&serde_json::json!({"metadata": {"plan": "enterprise"}})).is_err()
+        );
+    }
+
+    #[test]
+    fn stripe_signature_requires_recent_valid_v1_signature() {
+        let body = br#"{"id":"evt_123"}"#;
+        let secret = "whsec_test";
+        let timestamp = chrono::Utc::now().timestamp();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "stripe-signature",
+            stripe_signature_header(body, secret, timestamp)
+                .parse()
+                .unwrap(),
+        );
+        assert!(valid_stripe_signature(&headers, body, secret));
+
+        headers.insert(
+            "stripe-signature",
+            stripe_signature_header(body, secret, timestamp - 301)
+                .parse()
+                .unwrap(),
+        );
+        assert!(!valid_stripe_signature(&headers, body, secret));
+    }
+
+    #[test]
+    fn stripe_signature_is_provider_auth_not_browser_origin() {
+        let body = br#"{"id":"evt_123"}"#;
+        let secret = "whsec_test";
+        let timestamp = chrono::Utc::now().timestamp();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "stripe-signature",
+            stripe_signature_header(body, secret, timestamp)
+                .parse()
+                .unwrap(),
+        );
+        assert!(valid_stripe_signature(&headers, body, secret));
+
+        headers.insert("origin", "https://hostlet.cloud".parse().unwrap());
+        headers.insert("stripe-signature", "t=1,v1=bad".parse().unwrap());
+        assert!(!valid_stripe_signature(&headers, body, secret));
+    }
+
+    #[test]
+    fn stripe_webhook_routes_all_subscription_lifecycle_events() {
+        assert_eq!(
+            stripe_webhook_action("checkout.session.completed"),
+            StripeWebhookAction::CheckoutCompleted
+        );
+        for event_type in [
+            "customer.subscription.created",
+            "customer.subscription.updated",
+            "customer.subscription.deleted",
+        ] {
+            assert_eq!(
+                stripe_webhook_action(event_type),
+                StripeWebhookAction::SubscriptionChanged
+            );
+        }
+        assert_eq!(
+            stripe_webhook_action("invoice.paid"),
+            StripeWebhookAction::Ignore
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_db_stripe_webhooks_dedupe_and_update_subscription_lifecycle() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cloud_db(&state).await;
+        let cloud_user_id = insert_cloud_user(&state, 303, "stripe-user").await;
+        let secret = state.stripe_webhook_secret.as_deref().unwrap();
+
+        let checkout = stripe_event(
+            "evt_checkout",
+            "checkout.session.completed",
+            serde_json::json!({
+                "id": "cs_test_1",
+                "customer": "cus_test_1",
+                "subscription": "sub_test_1",
+                "metadata": {
+                    "cloud_user_id": cloud_user_id.to_string(),
+                    "plan": "starter"
+                }
+            }),
+        );
+        assert_eq!(
+            post_stripe_webhook(&state, secret, checkout.clone()).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            post_stripe_webhook(&state, secret, checkout).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM cloud_webhook_events WHERE provider='stripe' AND provider_event_id='evt_checkout'",
+            )
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            subscription_status(&state, "sub_test_1").await.as_deref(),
+            Some("pending")
+        );
+
+        for (event_id, event_type, status) in [
+            (
+                "evt_sub_created",
+                "customer.subscription.created",
+                "trialing",
+            ),
+            ("evt_sub_updated", "customer.subscription.updated", "active"),
+            (
+                "evt_sub_deleted",
+                "customer.subscription.deleted",
+                "canceled",
+            ),
+        ] {
+            let payload = stripe_event(
+                event_id,
+                event_type,
+                serde_json::json!({
+                    "id": "sub_test_1",
+                    "customer": "cus_test_1",
+                    "status": status,
+                    "metadata": {
+                        "plan": "starter"
+                    },
+                    "current_period_start": 1_700_000_000i64,
+                    "current_period_end": 1_700_086_400i64,
+                    "cancel_at_period_end": status == "canceled"
+                }),
+            );
+            assert_eq!(
+                post_stripe_webhook(&state, secret, payload).await,
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                subscription_status(&state, "sub_test_1").await.as_deref(),
+                Some(status)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_db_stripe_webhook_rejects_missing_metadata_without_activating() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cloud_db(&state).await;
+        let cloud_user_id = insert_cloud_user(&state, 404, "stripe-missing").await;
+        let secret = state.stripe_webhook_secret.as_deref().unwrap();
+
+        let missing_subscription = stripe_event(
+            "evt_missing_subscription",
+            "checkout.session.completed",
+            serde_json::json!({
+                "id": "cs_missing_sub",
+                "customer": "cus_missing_sub",
+                "metadata": {
+                    "cloud_user_id": cloud_user_id.to_string(),
+                    "plan": "starter"
+                }
+            }),
+        );
+        assert_eq!(
+            post_stripe_webhook(&state, secret, missing_subscription).await,
+            StatusCode::BAD_GATEWAY
+        );
+
+        let missing_plan = stripe_event(
+            "evt_missing_plan",
+            "customer.subscription.updated",
+            serde_json::json!({
+                "id": "sub_missing_plan",
+                "customer": "cus_missing_sub",
+                "status": "active",
+                "metadata": {
+                    "cloud_user_id": cloud_user_id.to_string()
+                }
+            }),
+        );
+        assert_eq!(
+            post_stripe_webhook(&state, secret, missing_plan).await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM cloud_subscriptions WHERE cloud_user_id=$1 AND status IN ('active','trialing')",
+            )
+            .bind(cloud_user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_db_operator_cleanup_rejects_cloud_customer_session() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cloud_db(&state).await;
+        let user_id = insert_app_user(&state, 505, "cleanup-user").await;
+        let cloud_user_id = insert_cloud_user(&state, 505, "cleanup-user").await;
+        insert_cloud_session(&state, cloud_user_id, "cleanup-token").await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            crate::auth::test_cloud_cookie_header(&state.session_secret, user_id, "cleanup-token")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            run_cleanup(State(state), headers)
+                .await
+                .into_response()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    fn stripe_signature_header(body: &[u8], secret: &str, timestamp: i64) -> String {
+        let timestamp = timestamp.to_string();
+        let signed_payload = [timestamp.as_bytes(), b".", body].concat();
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&signed_payload);
+        let signature = super::hex_bytes(&mac.finalize().into_bytes());
+        format!("t={timestamp},v1={signature}")
+    }
+
+    async fn post_stripe_webhook(
+        state: &AppState,
+        secret: &str,
+        payload: serde_json::Value,
+    ) -> StatusCode {
+        let body = serde_json::to_vec(&payload).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "stripe-signature",
+            stripe_signature_header(&body, secret, chrono::Utc::now().timestamp())
+                .parse()
+                .unwrap(),
+        );
+        cloud_billing_webhook(State(state.clone()), headers, Bytes::from(body))
+            .await
+            .into_response()
+            .status()
+    }
+
+    fn stripe_event(id: &str, event_type: &str, object: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "type": event_type,
+            "data": {
+                "object": object
+            }
+        })
+    }
+
+    async fn reset_cloud_db(state: &AppState) {
+        sqlx::query(
+            "TRUNCATE cloud_webhook_events, cloud_usage_buckets, cloud_subscriptions,
+             cloud_stripe_customers, cloud_github_installations, cloud_sessions,
+             cloud_users, users CASCADE",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_cloud_user(state: &AppState, github_id: i64, login: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO cloud_users (github_id, login) VALUES ($1,$2) RETURNING id",
+        )
+        .bind(github_id)
+        .bind(login)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_app_user(state: &AppState, github_id: i64, login: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (github_id, login) VALUES ($1,$2) RETURNING id",
+        )
+        .bind(github_id)
+        .bind(login)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_cloud_session(state: &AppState, cloud_user_id: Uuid, token: &str) {
+        sqlx::query(
+            "INSERT INTO cloud_sessions (cloud_user_id, token_hash, expires_at)
+             VALUES ($1,$2,now() + interval '1 hour')",
+        )
+        .bind(cloud_user_id)
+        .bind(crate::crypto::hash_token(token))
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn subscription_status(state: &AppState, subscription_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM cloud_subscriptions WHERE stripe_subscription_id=$1",
+        )
+        .bind(subscription_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap()
     }
 }
 

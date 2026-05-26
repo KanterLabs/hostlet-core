@@ -79,6 +79,7 @@ export default function Dashboard() {
   const recentApps = useMemo(() => apps.slice(0, 5), [apps]);
   const cloud = session?.mode === "cloud";
   const cloudReady = session?.cloud?.nextStep === "ready";
+  const createDisabledReason = cloudCreateDisabledReason(session);
 
   async function startCheckout(plan: "student" | "starter" | "pro") {
     const result = await api<{ url?: string | null }>("/api/cloud/billing/checkout", {
@@ -95,7 +96,11 @@ export default function Dashboard() {
             title="Overview"
             description={cloud ? "Deploy GitHub projects to always-on Hostlet Cloud URLs." : "Deploy GitHub projects onto your own machines with Docker, Caddy, live logs, rollbacks, and optional Cloudflare exposure."}
             actions={
-              <Link className="button" href="/apps/new" aria-disabled={cloud && !cloudReady}><Plus size={16} />Create app</Link>
+              createDisabledReason ? (
+                <button className="button" disabled title={createDisabledReason}><Plus size={16} />Create app</button>
+              ) : (
+                <Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>
+              )
             }
           />
 
@@ -124,7 +129,7 @@ export default function Dashboard() {
             <Metric label="Apps" value={String(apps.length)} detail={`${healthyApps} healthy`} icon={Box} />
             <Metric label="Active deploys" value={String(activeDeploys)} detail="builds, checks, routing" icon={Rocket} />
             <Metric label="Unhealthy apps" value={String(unhealthyApps)} detail="runtime monitor" icon={ShieldCheck} />
-            <Metric label="Public apps" value={String(publicApps)} detail="Cloudflare DNS open" icon={ShieldCheck} />
+            <Metric label="Public apps" value={String(publicApps)} detail={cloud ? "Hostlet Cloud URLs" : "Cloudflare DNS open"} icon={ShieldCheck} />
             <Metric label={cloud ? "Cloud worker" : "Machines online"} value={cloud ? "managed" : `${onlineServers}/${servers.length || 1}`} detail={cloud ? "Hostlet compute" : "agent heartbeat"} icon={HardDrive} />
           </MetricsGrid>
 
@@ -144,8 +149,8 @@ export default function Dashboard() {
                         <p className="muted mt-1 truncate">{app.repoFullName} · {app.branch}</p>
                       </div>
                       <div className="text-sm">
-                        <div className="eyebrow">Machine</div>
-                        <div className="mt-1 truncate">{app.server?.name || "Unknown"}</div>
+                        <div className="eyebrow">{cloud ? "Worker" : "Machine"}</div>
+                        <div className="mt-1 truncate">{cloud ? "Hostlet Cloud" : app.server?.name || "Unknown"}</div>
                       </div>
                       <div className="text-sm">
                         <div className="eyebrow">Exposure</div>
@@ -160,7 +165,11 @@ export default function Dashboard() {
                     <IconFrame icon={Box} className="mb-4" />
                     <div className="font-medium">No apps yet</div>
                     <p className="muted mt-2 max-w-xl">Create the first app, connect a GitHub repo, then start a deployment.</p>
-                    <Link className="button mt-5" href="/apps/new">Create app</Link>
+                    {createDisabledReason ? (
+                      <button className="mt-5" disabled title={createDisabledReason}>Create app</button>
+                    ) : (
+                      <Link className="button mt-5" href="/apps/new">Create app</Link>
+                    )}
                   </div>
                 </div>
               )}
@@ -172,8 +181,8 @@ export default function Dashboard() {
                 <SectionHeader icon={GitBranch} title="Release state" />
                 <DataList className="mt-4">
                   <DataRow label="Version" value={version?.currentVersion || "loading"} />
-                  <DataRow label="Runtime" value="Docker + Caddy" />
-                <DataRow label="Default access" value={cloud ? "Hostlet subdomain" : "Private apps"} />
+                  <DataRow label="Runtime" value={cloud ? "Hostlet Cloud worker" : "Docker + Caddy"} />
+                  <DataRow label="Default access" value={cloud ? "Hostlet Cloud URL" : "Private apps"} />
                   <DataRow label="CI target" value="self-hosted Linux X64" />
                 </DataList>
               </Panel>
@@ -189,4 +198,12 @@ export default function Dashboard() {
 
 function isActive(status?: string | null) {
   return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
+}
+
+function cloudCreateDisabledReason(session: SessionPayload | null) {
+  if (session?.mode !== "cloud") return "";
+  if (!session.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
+  if (!session.cloud.billingActive) return "Start a Stripe sandbox subscription before creating cloud apps.";
+  if (session.cloud.nextStep !== "ready") return "Finish Hostlet Cloud setup before creating apps.";
+  return "";
 }

@@ -261,6 +261,47 @@ fn bool_env(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
+pub async fn db_test_state_from_env() -> Option<AppState> {
+    let database_url = std::env::var("HOSTLET_DB_TEST_URL").ok()?;
+    std::env::set_var("DATABASE_URL", database_url);
+    set_test_env_default("HOSTLET_MODE", "cloud");
+    set_test_env_default("PUBLIC_API_URL", "http://127.0.0.1:18080");
+    set_test_env_default("PUBLIC_WEB_URL", "http://127.0.0.1:3000");
+    set_test_env_default("PUBLIC_WEBHOOK_URL", "http://127.0.0.1:18080");
+    set_test_env_default("HOSTLET_ALLOWED_WEB_ORIGINS", "http://127.0.0.1:3000");
+    set_test_env_default("HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS", "false");
+    set_test_env_default("HOSTLET_SETUP_TOKEN", "ci-only-not-a-secret-setup-token-01");
+    set_test_env_default("HOSTLET_ALLOWED_GITHUB_LOGINS", "ci-user");
+    set_test_env_default(
+        "ENCRYPTION_KEY",
+        "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+    );
+    set_test_env_default("JOB_SIGNING_SECRET", "ci-only-not-a-secret-job-signing-01");
+    set_test_env_default("SESSION_SECRET", "ci-only-not-a-secret-session-secret-01");
+    set_test_env_default("LOCAL_AGENT_TOKEN", "ci-only-not-a-secret-agent-token-01");
+    set_test_env_default(
+        "GITHUB_WEBHOOK_SECRET",
+        "ci-only-not-a-secret-webhook-secret-01",
+    );
+    set_test_env_default("HOSTLET_BASE_DOMAIN", "hostlet.cloud");
+    set_test_env_default("STRIPE_SECRET_KEY", "sk_test_ci_only_not_a_secret");
+    set_test_env_default("STRIPE_PUBLISHABLE_KEY", "pk_test_ci_only_not_a_secret");
+    set_test_env_default("STRIPE_WEBHOOK_SECRET", "whsec_ci_only_not_a_secret");
+    set_test_env_default("STRIPE_PRICE_STUDENT", "price_ci_student");
+    set_test_env_default("STRIPE_PRICE_STARTER", "price_ci_starter");
+    set_test_env_default("STRIPE_PRICE_PRO", "price_ci_pro");
+    set_test_env_default("HOSTLET_UPDATE_CHECKS", "false");
+    AppState::from_env().await.ok()
+}
+
+#[cfg(test)]
+fn set_test_env_default(key: &str, value: &str) {
+    if std::env::var(key).is_err() {
+        std::env::set_var(key, value);
+    }
+}
+
 fn allowed_github_logins() -> Option<HashSet<String>> {
     let values = nonempty_env("HOSTLET_ALLOWED_GITHUB_LOGINS")?;
     let logins = values
