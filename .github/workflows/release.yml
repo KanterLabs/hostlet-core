@@ -81,7 +81,7 @@ jobs:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
           for image in hostlet-api hostlet-web hostlet-agent; do
-            digest="$(docker buildx imagetools inspect "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            digest="$(docker buildx imagetools inspect "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" --raw | sha256sum | awk '{print "sha256:"$1}')"
             key="$(printf '%s' "${image}" | tr '[:lower:]-' '[:upper:]_')"
             echo "${key}_DIGEST=${digest}" >> "$GITHUB_ENV"
           done
