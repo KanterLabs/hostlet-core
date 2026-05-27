@@ -1,6 +1,11 @@
 export function apiUrl() {
-  const configured = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-  if (typeof window === "undefined") return configured;
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (typeof window === "undefined") return configured || process.env.PUBLIC_API_URL || "http://localhost:8080";
+
+  if (!configured) {
+    if (window.location.protocol === "https:" || window.location.port === "18080") return window.location.origin;
+    return `${window.location.protocol}//${window.location.hostname}:8080`;
+  }
 
   const url = new URL(configured);
   const pageHost = window.location.hostname;
@@ -10,7 +15,7 @@ export function apiUrl() {
   return url.toString().replace(/\/$/, "");
 }
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.PUBLIC_API_URL || "http://localhost:8080";
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();

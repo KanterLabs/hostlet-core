@@ -37,7 +37,7 @@ export function webhookReadiness(): WebhookReadiness {
 }
 
 function safeWebhookUrl() {
-  const configured = process.env.NEXT_PUBLIC_WEBHOOK_URL?.trim();
+  const configured = process.env.NEXT_PUBLIC_WEBHOOK_URL?.trim() || process.env.PUBLIC_WEBHOOK_URL?.trim();
   return configured || safeApiUrl();
 }
 
@@ -45,7 +45,7 @@ function safeApiUrl() {
   try {
     return apiUrl();
   } catch {
-    return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+    return process.env.NEXT_PUBLIC_API_URL || process.env.PUBLIC_API_URL || "http://localhost:8080";
   }
 }
 

@@ -82,6 +82,7 @@ jobs:
       LOCAL_AGENT_TOKEN: ci-only-not-a-secret-agent-token-01
       GITHUB_WEBHOOK_SECRET: ci-only-not-a-secret-webhook-secret-01
       CLOUDFLARE_TUNNEL_TOKEN: ci-only-not-a-secret-tunnel-token-01
+      HOSTLET_IMAGE_TAG: v0.4.0
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@v4

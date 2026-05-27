@@ -70,6 +70,7 @@ jobs:
       LOCAL_AGENT_TOKEN: ci-only-not-a-secret-agent-token-01
       GITHUB_WEBHOOK_SECRET: ci-only-not-a-secret-webhook-secret-01
       CLOUDFLARE_TUNNEL_TOKEN: ci-only-not-a-secret-tunnel-token-01
+      HOSTLET_IMAGE_TAG: v0.4.0
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@v4
@@ -113,59 +114,3 @@ jobs:
       - run: docker build -f apps/web/Dockerfile -t hostlet-web-ci .
       - run: docker build -f apps/api/Dockerfile -t hostlet-api-ci .
       - run: docker build -f apps/agent/Dockerfile -t hostlet-agent-ci .
-
-  publish-images:
-    runs-on: [self-hosted, Linux, X64]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-    needs:
-      - rust
-      - web
-      - compose
-      - cloud-api-smoke
-      - docker
-    env:
-      IMAGE_REGISTRY: ghcr.io/shanekanterman04
-      PUBLIC_API_URL: https://hostlet.cloud
-      PUBLIC_WEBHOOK_URL: https://hostlet.cloud
-    steps:
-      - uses: actions/checkout@v4
-      - name: Compute image tags
-        run: echo "IMAGE_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
-      - name: Log in to GHCR
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Build production images
-        run: |
-          docker build \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            -f apps/api/Dockerfile \
-            -t "${IMAGE_REGISTRY}/hostlet-api:${IMAGE_TAG}" \
-            -t "${IMAGE_REGISTRY}/hostlet-api:cloud-prod" \
-            .
-          docker build \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            -f apps/web/Dockerfile \
-            --build-arg NEXT_PUBLIC_API_URL="${PUBLIC_API_URL}" \
-            --build-arg NEXT_PUBLIC_WEBHOOK_URL="${PUBLIC_WEBHOOK_URL}" \
-            -t "${IMAGE_REGISTRY}/hostlet-web:${IMAGE_TAG}" \
-            -t "${IMAGE_REGISTRY}/hostlet-web:cloud-prod" \
-            .
-          docker build \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            -f apps/agent/Dockerfile \
-            -t "${IMAGE_REGISTRY}/hostlet-agent:${IMAGE_TAG}" \
-            -t "${IMAGE_REGISTRY}/hostlet-agent:cloud-prod" \
-            .
-      - name: Push production images
-        run: |
-          for image in hostlet-api hostlet-web hostlet-agent; do
-            docker push "${IMAGE_REGISTRY}/${image}:${IMAGE_TAG}"
-            docker push "${IMAGE_REGISTRY}/${image}:cloud-prod"
-            docker manifest inspect "${IMAGE_REGISTRY}/${image}:${IMAGE_TAG}" >/dev/null
-            docker manifest inspect "${IMAGE_REGISTRY}/${image}:cloud-prod" >/dev/null
-          done

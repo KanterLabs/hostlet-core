@@ -578,7 +578,16 @@ fn compose_up(root: &Path, tunnel: bool, dev: bool) -> anyhow::Result<()> {
     if tunnel && !dev {
         args.extend(["--profile".into(), "tunnel".into()]);
     }
-    args.extend(["up".into(), "-d".into(), "--build".into()]);
+    if dev {
+        args.extend(["up".into(), "-d".into(), "--build".into()]);
+        return run_passthrough(root, "docker", &args);
+    }
+
+    let mut pull_args = args.clone();
+    pull_args.push("pull".into());
+    run_passthrough(root, "docker", &pull_args)?;
+
+    args.extend(["up".into(), "-d".into(), "--no-build".into()]);
     run_passthrough(root, "docker", &args)
 }
 
@@ -871,9 +880,6 @@ async fn update(root: &Path, dry_run: bool, yes: bool, no_backup: bool) -> anyho
         Some(pre_update_backup(root)?)
     };
     let update_state = save_update_state(root)?;
-    if root.join(".git").exists() {
-        let _ = run_passthrough(root, "git", &["pull".into(), "--ff-only".into()]);
-    }
     let asset = release
         .asset(LINUX_X64_ASSET)
         .context("latest release does not include hostlet-linux-x64")?;
@@ -889,6 +895,8 @@ async fn update(root: &Path, dry_run: bool, yes: bool, no_backup: bool) -> anyho
     if actual != expected {
         bail!("downloaded CLI checksum mismatch");
     }
+    checkout_release_tag(root, &release)?;
+    update_env_image_tag(root, &release.image_tag())?;
     let current_exe = std::env::current_exe().context("could not locate current hostlet binary")?;
     let previous = tmp_dir.join(format!("hostlet.previous.{}", timestamp_suffix()));
     fs::copy(&current_exe, &previous).with_context(|| "failed to save previous CLI binary")?;
@@ -947,7 +955,31 @@ fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
     {
         bail!("latest release is missing required update assets");
     }
+    if !release.has_release_images() {
+        bail!("latest release is missing required Hostlet image metadata");
+    }
     Ok(())
+}
+
+fn update_env_image_tag(root: &Path, image_tag: &str) -> anyhow::Result<()> {
+    let env_path = root.join(".env");
+    let mut env = read_env_file(&env_path)
+        .with_context(|| format!("failed to read {}", env_path.display()))?;
+    env.insert("HOSTLET_IMAGE_TAG".into(), image_tag.to_string());
+    write_env_file(&env_path, &env)
+}
+
+fn checkout_release_tag(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
+    if !root.join(".git").exists() {
+        return Ok(());
+    }
+    let tag = release.image_tag();
+    run_passthrough(
+        root,
+        "git",
+        &["fetch".into(), "--tags".into(), "--force".into()],
+    )?;
+    run_passthrough(root, "git", &["checkout".into(), "--detach".into(), tag])
 }
 
 fn pre_update_backup(root: &Path) -> anyhow::Result<PathBuf> {
@@ -973,7 +1005,11 @@ fn save_update_state(root: &Path) -> anyhow::Result<PathBuf> {
         .join(".hostlet-update")
         .join(format!("state-{}", timestamp_suffix()));
     fs::create_dir_all(&state_dir)?;
-    for relative in ["infra/docker-compose.yml", "infra/docker-compose.prod.yml"] {
+    for relative in [
+        ".env",
+        "infra/docker-compose.yml",
+        "infra/docker-compose.prod.yml",
+    ] {
         let source = root.join(relative);
         if source.exists() {
             let target = state_dir.join(relative);
@@ -1057,7 +1093,11 @@ fn latest_update_state(update_dir: &Path) -> Option<PathBuf> {
 }
 
 fn restore_update_state(root: &Path, state_dir: &Path) -> anyhow::Result<()> {
-    for relative in ["infra/docker-compose.yml", "infra/docker-compose.prod.yml"] {
+    for relative in [
+        ".env",
+        "infra/docker-compose.yml",
+        "infra/docker-compose.prod.yml",
+    ] {
         let source = state_dir.join(relative);
         if source.exists() {
             let target = root.join(relative);
@@ -1066,6 +1106,9 @@ fn restore_update_state(root: &Path, state_dir: &Path) -> anyhow::Result<()> {
             }
             fs::copy(&source, &target)
                 .with_context(|| format!("failed to restore {}", target.display()))?;
+            if relative == ".env" {
+                set_secret_file_permissions(&target)?;
+            }
         }
     }
     Ok(())
@@ -1079,6 +1122,9 @@ struct ReleaseInfo {
     compose_migrations: bool,
     database_migrations: bool,
     assets: Vec<ReleaseAsset>,
+    image_registry: Option<String>,
+    image_tag: Option<String>,
+    images: ReleaseImages,
 }
 
 struct ReleaseAsset {
@@ -1086,9 +1132,31 @@ struct ReleaseAsset {
     download_url: String,
 }
 
+#[derive(Default)]
+struct ReleaseImages {
+    api: Option<ReleaseImage>,
+    web: Option<ReleaseImage>,
+    agent: Option<ReleaseImage>,
+}
+
+struct ReleaseImage {
+    reference: String,
+    digest: Option<String>,
+}
+
 impl ReleaseInfo {
     fn asset(&self, name: &str) -> Option<&ReleaseAsset> {
         self.assets.iter().find(|asset| asset.name == name)
+    }
+
+    fn image_tag(&self) -> String {
+        self.image_tag
+            .clone()
+            .unwrap_or_else(|| format!("v{}", self.version.trim_start_matches('v')))
+    }
+
+    fn has_release_images(&self) -> bool {
+        self.images.api.is_some() && self.images.web.is_some() && self.images.agent.is_some()
     }
 }
 
@@ -1135,6 +1203,9 @@ async fn latest_release(client: &reqwest::Client) -> anyhow::Result<ReleaseInfo>
         compose_migrations: false,
         database_migrations: false,
         assets,
+        image_registry: None,
+        image_tag: None,
+        images: ReleaseImages::default(),
     };
     if let Some(manifest_url) = release
         .asset("hostlet-release.json")
@@ -1157,6 +1228,11 @@ async fn apply_release_manifest(
         .error_for_status()?
         .json()
         .await?;
+    apply_release_manifest_value(release, &value);
+    Ok(())
+}
+
+fn apply_release_manifest_value(release: &mut ReleaseInfo, value: &Value) {
     if let Some(version) = value.get("version").and_then(|v| v.as_str()) {
         release.version = version.trim_start_matches('v').to_string();
     }
@@ -1178,7 +1254,34 @@ async fn apply_release_manifest(
     if let Some(notes_url) = value.get("notes_url").and_then(|v| v.as_str()) {
         release.notes_url = notes_url.to_string();
     }
-    Ok(())
+    release.image_registry = value
+        .get("image_registry")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| release.image_registry.clone());
+    release.image_tag = value
+        .get("image_tag")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| release.image_tag.clone());
+    if let Some(images) = value.get("images").and_then(|v| v.as_object()) {
+        release.images.api = parse_release_image(images.get("api")).or(release.images.api.take());
+        release.images.web = parse_release_image(images.get("web")).or(release.images.web.take());
+        release.images.agent =
+            parse_release_image(images.get("agent")).or(release.images.agent.take());
+    }
+}
+
+fn parse_release_image(value: Option<&Value>) -> Option<ReleaseImage> {
+    let value = value?;
+    Some(ReleaseImage {
+        reference: value.get("ref")?.as_str()?.to_string(),
+        digest: value
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    })
 }
 
 fn print_update_check(release: &ReleaseInfo) {
@@ -1194,6 +1297,36 @@ fn print_update_check(release: &ReleaseInfo) {
             "Migrations:      compose={} database={}",
             release.compose_migrations, release.database_migrations
         );
+    }
+    if release.has_release_images() {
+        println!("Image tag:       {}", release.image_tag());
+        println!(
+            "Images:          api={} web={} agent={}",
+            release
+                .images
+                .api
+                .as_ref()
+                .map_or("missing", |image| image.reference.as_str()),
+            release
+                .images
+                .web
+                .as_ref()
+                .map_or("missing", |image| image.reference.as_str()),
+            release
+                .images
+                .agent
+                .as_ref()
+                .map_or("missing", |image| image.reference.as_str())
+        );
+        let signed_digests = [
+            release.images.api.as_ref(),
+            release.images.web.as_ref(),
+            release.images.agent.as_ref(),
+        ]
+        .iter()
+        .filter(|image| image.and_then(|image| image.digest.as_ref()).is_some())
+        .count();
+        println!("Image digests:   {signed_digests}/3 available");
     }
     println!(
         "Checksum signing: {}",
@@ -1402,6 +1535,10 @@ fn default_env() -> BTreeMap<String, String> {
     env.insert("POSTGRES_DB".into(), "hostlet".into());
     env.insert("DOCKER_GID".into(), docker_gid());
     env.insert(
+        "HOSTLET_IMAGE_TAG".into(),
+        format!("v{}", env!("CARGO_PKG_VERSION")),
+    );
+    env.insert(
         "DATABASE_URL".into(),
         format!("postgres://hostlet:{postgres_password}@localhost:5432/hostlet"),
     );
@@ -1559,6 +1696,21 @@ fn require_interactive() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn test_release() -> ReleaseInfo {
+        ReleaseInfo {
+            version: "0.4.0".into(),
+            notes_url: "https://example.test/release".into(),
+            released_at: None,
+            minimum_supported_version: None,
+            compose_migrations: false,
+            database_migrations: false,
+            assets: Vec::new(),
+            image_registry: None,
+            image_tag: None,
+            images: ReleaseImages::default(),
+        }
+    }
+
     #[test]
     fn env_quote_round_trips_spaces() {
         let value = "secret with spaces";
@@ -1577,5 +1729,78 @@ mod tests {
         assert!(version_is_newer("0.1.9", "0.2.0"));
         assert!(!version_is_newer("0.2.0", "0.2.0"));
         assert!(!version_is_newer("0.2.1", "0.2.0"));
+    }
+
+    #[test]
+    fn release_manifest_parses_image_metadata() {
+        let manifest = serde_json::json!({
+            "version": "v0.4.1",
+            "image_registry": "ghcr.io/shanekanterman04",
+            "image_tag": "v0.4.1",
+            "images": {
+                "api": {
+                    "ref": "ghcr.io/shanekanterman04/hostlet-api:v0.4.1",
+                    "digest": "sha256:api"
+                },
+                "web": {
+                    "ref": "ghcr.io/shanekanterman04/hostlet-web:v0.4.1",
+                    "digest": "sha256:web"
+                },
+                "agent": {
+                    "ref": "ghcr.io/shanekanterman04/hostlet-agent:v0.4.1",
+                    "digest": "sha256:agent"
+                }
+            }
+        });
+        let mut release = test_release();
+
+        apply_release_manifest_value(&mut release, &manifest);
+
+        assert_eq!(release.version, "0.4.1");
+        assert_eq!(release.image_tag(), "v0.4.1");
+        assert!(release.has_release_images());
+        assert_eq!(
+            release.images.web.as_ref().unwrap().reference,
+            "ghcr.io/shanekanterman04/hostlet-web:v0.4.1"
+        );
+        assert_eq!(
+            release.images.agent.as_ref().unwrap().digest.as_deref(),
+            Some("sha256:agent")
+        );
+    }
+
+    #[test]
+    fn default_env_pins_current_release_image_tag() {
+        let env = default_env();
+        assert_eq!(
+            env.get("HOSTLET_IMAGE_TAG").map(String::as_str),
+            Some(concat!("v", env!("CARGO_PKG_VERSION")))
+        );
+    }
+
+    #[test]
+    fn update_env_image_tag_rewrites_existing_env_file() {
+        let root = std::env::temp_dir().join(format!("hostlet-cli-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let env_path = root.join(".env");
+        fs::write(
+            &env_path,
+            "POSTGRES_PASSWORD=secret\nHOSTLET_IMAGE_TAG=v0.4.0\nPUBLIC_API_URL=http://localhost:8080\n",
+        )
+        .unwrap();
+
+        update_env_image_tag(&root, "v0.4.1").unwrap();
+        let env = read_env_file(&env_path).unwrap();
+
+        assert_eq!(
+            env.get("HOSTLET_IMAGE_TAG").map(String::as_str),
+            Some("v0.4.1")
+        );
+        assert_eq!(
+            env.get("POSTGRES_PASSWORD").map(String::as_str),
+            Some("secret")
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

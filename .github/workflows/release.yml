@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
   id-token: write
   attestations: write
 
@@ -33,6 +34,57 @@ jobs:
               }
             done
           fi
+      - name: Compute image tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and push release images
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          IMAGE_REGISTRY: ghcr.io/shanekanterman04
+        run: |
+          docker build \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.version="${RELEASE_TAG}" \
+            -f apps/api/Dockerfile \
+            -t "${IMAGE_REGISTRY}/hostlet-api:${RELEASE_TAG}" \
+            -t "${IMAGE_REGISTRY}/hostlet-api:${SHA_TAG}" \
+            .
+          docker build \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.version="${RELEASE_TAG}" \
+            -f apps/web/Dockerfile \
+            -t "${IMAGE_REGISTRY}/hostlet-web:${RELEASE_TAG}" \
+            -t "${IMAGE_REGISTRY}/hostlet-web:${SHA_TAG}" \
+            .
+          docker build \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.version="${RELEASE_TAG}" \
+            -f apps/agent/Dockerfile \
+            -t "${IMAGE_REGISTRY}/hostlet-agent:${RELEASE_TAG}" \
+            -t "${IMAGE_REGISTRY}/hostlet-agent:${SHA_TAG}" \
+            .
+          for image in hostlet-api hostlet-web hostlet-agent; do
+            docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"
+            docker push "${IMAGE_REGISTRY}/${image}:${SHA_TAG}"
+          done
+      - name: Capture release image digests
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          IMAGE_REGISTRY: ghcr.io/shanekanterman04
+        run: |
+          for image in hostlet-api hostlet-web hostlet-agent; do
+            digest="$(docker buildx imagetools inspect "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            key="$(printf '%s' "${image}" | tr '[:lower:]-' '[:upper:]_')"
+            echo "${key}_DIGEST=${digest}" >> "$GITHUB_ENV"
+          done
       - run: |
           mkdir -p dist
           cp target/release/hostlet dist/hostlet-linux-x64
@@ -40,6 +92,7 @@ jobs:
           cd dist
           sha256sum hostlet-linux-x64 > hostlet-linux-x64.sha256
           VERSION="${GITHUB_REF_NAME#v}"
+          IMAGE_TAG="${GITHUB_REF_NAME}"
           CHECKSUM="$(cut -d ' ' -f 1 hostlet-linux-x64.sha256)"
           RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > hostlet-release.json <<EOF
@@ -47,6 +100,22 @@ jobs:
             "version": "${VERSION}",
             "released_at": "${RELEASED_AT}",
             "minimum_supported_version": "0.1.0",
+            "image_registry": "ghcr.io/shanekanterman04",
+            "image_tag": "${IMAGE_TAG}",
+            "images": {
+              "api": {
+                "ref": "ghcr.io/shanekanterman04/hostlet-api:${IMAGE_TAG}",
+                "digest": "${HOSTLET_API_DIGEST:-}"
+              },
+              "web": {
+                "ref": "ghcr.io/shanekanterman04/hostlet-web:${IMAGE_TAG}",
+                "digest": "${HOSTLET_WEB_DIGEST:-}"
+              },
+              "agent": {
+                "ref": "ghcr.io/shanekanterman04/hostlet-agent:${IMAGE_TAG}",
+                "digest": "${HOSTLET_AGENT_DIGEST:-}"
+              }
+            },
             "assets": {
               "hostlet-linux-x64": {
                 "sha256": "${CHECKSUM}"

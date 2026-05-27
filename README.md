@@ -296,8 +296,8 @@ docker compose -f infra/docker-compose.yml up --build
 # Pull prebuilt production images and restart without building on the VM
 scripts/deploy-hostlet-cloud-images.sh
 
-# Optional pinned rollback/deploy
-HOSTLET_IMAGE_TAG=sha-<commit> scripts/deploy-hostlet-cloud-images.sh
+# Optional release rollback/deploy: set HOSTLET_IMAGE_TAG=vX.Y.Z in .env first
+scripts/deploy-hostlet-cloud-images.sh
 
 # With Cloudflare Tunnel
 docker compose --env-file .env -f infra/docker-compose.prod.yml --profile tunnel up -d --no-build

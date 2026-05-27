@@ -19,6 +19,12 @@ if [ ! -f "${COMPOSE_FILE}" ]; then
   exit 1
 fi
 
+HOSTLET_IMAGE_TAG="$(grep -E '^HOSTLET_IMAGE_TAG=' "${ENV_FILE}" | tail -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' || true)"
+if [[ ! "${HOSTLET_IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "HOSTLET_IMAGE_TAG must be set in ${ENV_FILE} to a Hostlet release tag like v0.4.0" >&2
+  exit 1
+fi
+
 compose() {
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
@@ -45,7 +51,7 @@ for service in "${SERVICES[@]}"; do
   fi
 done
 
-echo "Pulling Hostlet images..."
+echo "Pulling Hostlet ${HOSTLET_IMAGE_TAG} images..."
 compose pull "${SERVICES[@]}"
 
 echo "Restarting Hostlet services without building on the VM..."
@@ -87,7 +93,7 @@ done
 cat <<'EOF'
 
 Rollback:
-  1. Set HOSTLET_IMAGE_TAG in /srv/hostlet/.env to a previous sha-* tag.
+  1. Set HOSTLET_IMAGE_TAG in /srv/hostlet/.env to a previous vX.Y.Z tag.
   2. Re-run scripts/deploy-hostlet-cloud-images.sh.
-  3. After recovery, decide whether to move cloud-prod forward again from CI.
+  3. After recovery, keep cloud and self-host promotion on tagged releases.
 EOF

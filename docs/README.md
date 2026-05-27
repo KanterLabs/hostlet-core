@@ -438,11 +438,11 @@ Pull and run prebuilt production images:
 
 ```bash
 HOSTLET_IMAGE_REGISTRY=ghcr.io/shanekanterman04
-HOSTLET_IMAGE_TAG=cloud-prod
+HOSTLET_IMAGE_TAG=v0.4.0
 scripts/deploy-hostlet-cloud-images.sh
 ```
 
-Production Compose still keeps `build:` entries as a manual fallback, but normal production updates should pull images and run with `--no-build` so the VM does not compile Rust or Next.js.
+Production Compose is image-only. Cloud and self-hosted production deploys should pull the same tagged release images and run with `--no-build` so the VM does not compile Rust or Next.js.
 
 One-time GHCR setup on the production VM:
 
@@ -451,7 +451,7 @@ One-time GHCR setup on the production VM:
 echo "$GITHUB_PACKAGE_READ_TOKEN" | docker login ghcr.io -u ShaneKanterman04 --password-stdin
 ```
 
-Set `HOSTLET_IMAGE_TAG=sha-<commit>` in `.env` for a pinned deploy or rollback. Leave it as `cloud-prod` for the latest published cloud image set.
+Set `HOSTLET_IMAGE_TAG=vX.Y.Z` in `.env` for a pinned deploy or rollback. Use the same release tag for Hostlet Cloud and self-hosted production.
 
 Run Cloudflare Tunnel from the same Compose stack only when needed:
 
