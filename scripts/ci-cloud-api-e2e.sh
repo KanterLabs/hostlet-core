@@ -221,7 +221,7 @@ SQL
 expect_status 404 -H "cookie: ${OTHER_COOKIE_HEADER}" "${BASE_URL}/api/apps/${app_id}"
 expect_status 404 -H "cookie: ${OTHER_COOKIE_HEADER}" "${BASE_URL}/api/apps/${app_id}/env"
 
-expect_status 204 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X PATCH "${BASE_URL}/api/apps/${app_id}" --data '{"memory_limit_mb":1024}'
+expect_status 400 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X PATCH "${BASE_URL}/api/apps/${app_id}" --data '{"memory_limit_mb":1024}'
 expect_status 400 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X PATCH "${BASE_URL}/api/apps/${app_id}" --data '{"runtime_kind":"compose"}'
 
 echo "cloud API E2E passed"

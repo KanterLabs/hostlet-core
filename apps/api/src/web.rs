@@ -3599,6 +3599,8 @@ fn cloud_update_contains_unsupported_settings(body: &UpdateApp) -> bool {
     body.domain.is_some()
         || body.public_exposure.is_some()
         || body.auto_deploy.is_some()
+        || body.memory_limit_mb.is_some()
+        || body.cpu_limit.is_some()
         || body
             .runtime_kind
             .as_deref()
@@ -4162,9 +4164,7 @@ mod tests {
         let mut custom_resources = public_toggle;
         custom_resources.public_exposure = None;
         custom_resources.memory_limit_mb = Some(Some(1024));
-        assert!(!cloud_update_contains_unsupported_settings(
-            &custom_resources
-        ));
+        assert!(cloud_update_contains_unsupported_settings(&custom_resources));
     }
 
     #[test]
