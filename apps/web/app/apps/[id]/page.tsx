@@ -480,7 +480,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               <div>
                 <div className="eyebrow mb-2">Settings</div>
                 {cloud ? (
-                  <p className="muted text-sm">Cloud URL, exposure, runtime kind, and plan resources are managed for this beta.</p>
+                  <p className="muted text-sm">Cloud URL, exposure, and runtime kind are managed by Hostlet Cloud.</p>
                 ) : app ? (
                   <button disabled={!!busyAction} className="button-secondary" onClick={toggleExposure}>
                     <Globe2 size={16} />
@@ -581,13 +581,13 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               </section>
 
               <Panel>
-                <SectionHeader icon={Settings} title="App settings" description={cloud ? "Cloud apps keep managed URL, runtime, exposure, and starter resources fixed for 0.4.0." : undefined} />
+                <SectionHeader icon={Settings} title="App settings" description={cloud ? "Cloud apps keep managed URL, runtime, and exposure settings managed by Hostlet." : undefined} />
                 {cloud && (
                   <Notice
                     tone="neutral"
                     className="mb-4"
                     title="Managed cloud settings"
-                    description="Hostlet Cloud assigns the URL, keeps apps publicly reachable at that URL, uses the single-service runtime, and applies plan resource limits automatically."
+                    description="Hostlet Cloud assigns the URL, keeps apps publicly reachable at that URL, and uses the single-service runtime."
                   />
                 )}
                 <div className="grid gap-4 md:grid-cols-2">
@@ -627,7 +627,6 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       </SelectField>
                     </div>
                   )}
-                  {cloud && <SummaryItem label="Plan resources" value={`${settings.memory_limit_mb || "512"} MB · ${settings.cpu_limit || "0.5"} CPU`} />}
                 </div>
                 {!cloud && (
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Box, CheckCircle2, Cpu, CreditCard, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
+import { AlertTriangle, Box, CheckCircle2, CreditCard, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
@@ -357,7 +357,7 @@ export default function CreateApp() {
               </Panel>
 
               <Panel>
-                <SectionHeader icon={Cpu} title="Runtime" />
+                <SectionHeader icon={Box} title="Runtime" />
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="Root directory" value={form.root_directory} onChange={(value) => setForm({ ...form, root_directory: value })} placeholder="." />
                   <Field label="Container port" type="number" value={String(form.container_port)} onChange={(value) => setForm({ ...form, container_port: Number(value) })} />
@@ -367,9 +367,7 @@ export default function CreateApp() {
                     {!cloud && <option value="compose">Docker Compose</option>}
                   </SelectField>
                   {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setForm({ ...form, hostlet_config_path: value })} placeholder="hostlet.yml" />}
-                  {cloud ? (
-                    <SummaryItem label="Plan resources" value="512 MB · 0.5 CPU" />
-                  ) : (
+                  {!cloud && (
                     <>
                       <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })}>
                         <option value={256}>256 MB</option>
@@ -475,7 +473,7 @@ function createAppDisabledReason({
   inspection: RepoInspection | null;
 }) {
   if (cloud && !session?.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
-  if (cloud && !session?.cloud?.billingActive) return "Start a Stripe sandbox subscription before creating cloud apps.";
+  if (cloud && !session?.cloud?.billingActive) return "Choose a Hostlet Cloud plan before creating cloud apps.";
   if (cloud && !cloudReady) return "Finish Hostlet Cloud setup before creating apps.";
   if (!form.repo_full_name) return "Choose a GitHub repository.";
   if (!form.name.trim()) return "Enter an app name.";

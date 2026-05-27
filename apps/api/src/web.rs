@@ -1450,6 +1450,76 @@ pub async fn cloud_status(State(state): State<AppState>, headers: HeaderMap) -> 
     .into_response()
 }
 
+pub async fn cloud_usage(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if state.mode != HostletMode::Cloud {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let context = match customer_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let app_count: i64 = match sqlx::query_scalar("SELECT count(*) FROM apps WHERE user_id=$1")
+        .bind(context.user_id)
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(count) => count,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load cloud app usage");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let subscription = match context.cloud_user_id {
+        Some(cloud_user_id) => {
+            sqlx::query(
+                r#"
+            SELECT s.plan_code,
+                   s.status,
+                   s.current_period_start,
+                   s.current_period_end,
+                   s.cancel_at_period_end,
+                   e.app_limit
+            FROM cloud_subscriptions s
+            JOIN cloud_plan_entitlements e ON e.plan_code=s.plan_code
+            WHERE s.cloud_user_id=$1
+              AND s.status IN ('active','trialing')
+              AND (s.current_period_end IS NULL OR s.current_period_end > now())
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            "#,
+            )
+            .bind(cloud_user_id)
+            .fetch_optional(&state.db)
+            .await
+        }
+        None => Ok(None),
+    };
+    let subscription = match subscription {
+        Ok(row) => row,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load cloud usage subscription");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let app_limit = subscription
+        .as_ref()
+        .map(|row| row.get::<i32, _>("app_limit"))
+        .unwrap_or(0);
+    Json(serde_json::json!({
+        "planCode": subscription.as_ref().map(|row| row.get::<String, _>("plan_code")),
+        "subscriptionStatus": subscription.as_ref().map(|row| row.get::<String, _>("status")),
+        "currentPeriodStart": subscription.as_ref().and_then(|row| row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("current_period_start")),
+        "currentPeriodEnd": subscription.as_ref().and_then(|row| row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("current_period_end")),
+        "cancelAtPeriodEnd": subscription.as_ref().map(|row| row.get::<bool, _>("cancel_at_period_end")).unwrap_or(false),
+        "apps": {
+            "used": app_count,
+            "limit": app_limit,
+            "remaining": (i64::from(app_limit) - app_count).max(0)
+        }
+    }))
+    .into_response()
+}
+
 pub async fn cloud_billing_checkout(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1924,14 +1994,14 @@ pub async fn create_app(
         )
             .into_response();
     }
-    if !valid_memory_limit(body.memory_limit_mb) {
+    if state.mode != HostletMode::Cloud && !valid_memory_limit(body.memory_limit_mb) {
         return (
             StatusCode::BAD_REQUEST,
             "memory limit must be between 64 and 262144 MB",
         )
             .into_response();
     }
-    if !valid_cpu_limit(body.cpu_limit) {
+    if state.mode != HostletMode::Cloud && !valid_cpu_limit(body.cpu_limit) {
         return (
             StatusCode::BAD_REQUEST,
             "CPU limit must be between 0.1 and 128",
@@ -2329,22 +2399,24 @@ pub async fn update_app(
             return (StatusCode::BAD_REQUEST, "container port must be 1-65535").into_response();
         }
     }
-    if let Some(memory_limit_mb) = body.memory_limit_mb {
-        if !valid_memory_limit(memory_limit_mb) {
-            return (
-                StatusCode::BAD_REQUEST,
-                "memory limit must be between 64 and 262144 MB",
-            )
-                .into_response();
+    if state.mode != HostletMode::Cloud {
+        if let Some(memory_limit_mb) = body.memory_limit_mb {
+            if !valid_memory_limit(memory_limit_mb) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "memory limit must be between 64 and 262144 MB",
+                )
+                    .into_response();
+            }
         }
-    }
-    if let Some(cpu_limit) = body.cpu_limit {
-        if !valid_cpu_limit(cpu_limit) {
-            return (
-                StatusCode::BAD_REQUEST,
-                "CPU limit must be between 0.1 and 128",
-            )
-                .into_response();
+        if let Some(cpu_limit) = body.cpu_limit {
+            if !valid_cpu_limit(cpu_limit) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "CPU limit must be between 0.1 and 128",
+                )
+                    .into_response();
+            }
         }
     }
     if let Some(env) = &body.env {
@@ -2465,19 +2537,21 @@ pub async fn update_app(
                 .execute(&mut *tx)
                 .await?;
         }
-        if let Some(memory_limit_mb) = body.memory_limit_mb {
-            sqlx::query("UPDATE apps SET memory_limit_mb=$1, updated_at=now() WHERE id=$2")
-                .bind(memory_limit_mb)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        if let Some(cpu_limit) = body.cpu_limit {
-            sqlx::query("UPDATE apps SET cpu_limit=$1, updated_at=now() WHERE id=$2")
-                .bind(cpu_limit)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+        if state.mode != HostletMode::Cloud {
+            if let Some(memory_limit_mb) = body.memory_limit_mb {
+                sqlx::query("UPDATE apps SET memory_limit_mb=$1, updated_at=now() WHERE id=$2")
+                    .bind(memory_limit_mb)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            if let Some(cpu_limit) = body.cpu_limit {
+                sqlx::query("UPDATE apps SET cpu_limit=$1, updated_at=now() WHERE id=$2")
+                    .bind(cpu_limit)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         if let Some(env) = body.env {
             sqlx::query("DELETE FROM app_env_vars WHERE app_id=$1")
@@ -3280,7 +3354,7 @@ async fn enforce_cloud_app_entitlements(
     };
     let entitlement = sqlx::query(
         r#"
-        SELECT e.app_limit, e.memory_limit_mb, e.cpu_limit
+        SELECT e.app_limit
         FROM cloud_subscriptions s
         JOIN cloud_plan_entitlements e ON e.plan_code=s.plan_code
         WHERE s.cloud_user_id=$1
@@ -3302,11 +3376,6 @@ async fn enforce_cloud_app_entitlements(
         .await?;
     if active_apps >= i64::from(entitlement.get::<i32, _>("app_limit")) {
         anyhow::bail!("Hostlet Cloud app limit reached for this plan");
-    }
-    if entitlement.get::<i32, _>("memory_limit_mb") < 512
-        || entitlement.get::<f64, _>("cpu_limit") < 0.5
-    {
-        anyhow::bail!("Hostlet Cloud plan does not include the required starter resources");
     }
     Ok(())
 }
@@ -3524,16 +3593,12 @@ fn cloud_create_contains_unsupported_settings(body: &CreateApp) -> bool {
     !body.domain.trim().is_empty()
         || body.public_exposure == Some(false)
         || body.auto_deploy == Some(true)
-        || body.memory_limit_mb.is_some()
-        || body.cpu_limit.is_some()
 }
 
 fn cloud_update_contains_unsupported_settings(body: &UpdateApp) -> bool {
     body.domain.is_some()
         || body.public_exposure.is_some()
         || body.auto_deploy.is_some()
-        || body.memory_limit_mb.is_some()
-        || body.cpu_limit.is_some()
         || body
             .runtime_kind
             .as_deref()
@@ -3993,13 +4058,15 @@ fn reserved_public_domain_label(label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_slug, cloud_app_domain_label, cloud_billing_webhook,
-        cloud_create_contains_unsupported_settings, cloud_update_contains_unsupported_settings,
-        reserved_public_domain_label, run_cleanup, stripe_checkout_subscription_id,
-        stripe_plan_code, stripe_webhook_action, valid_stripe_signature, AppState, Bytes,
-        CreateApp, State, StatusCode, StripeWebhookAction, UpdateApp, Uuid,
+        app_env_vars, app_slug, cancel_agent_job, check_app_health_now, cloud_app_domain_label,
+        cloud_billing_webhook, cloud_create_contains_unsupported_settings,
+        cloud_update_contains_unsupported_settings, create_app, delete_app, delete_app_env_var,
+        get_app, reserved_public_domain_label, restart_app_container, retry_agent_job, run_cleanup,
+        set_app_env_var, stripe_checkout_subscription_id, stripe_plan_code, stripe_webhook_action,
+        update_app, valid_stripe_signature, AppState, Bytes, CreateApp, EnvValue, State,
+        StatusCode, StripeWebhookAction, UpdateApp, Uuid,
     };
-    use axum::{http::HeaderMap, response::IntoResponse};
+    use axum::{extract::Path, http::HeaderMap, response::IntoResponse, Json};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -4057,7 +4124,7 @@ mod tests {
         let mut custom_resources = custom_domain;
         custom_resources.domain = "".into();
         custom_resources.memory_limit_mb = Some(1024);
-        assert!(cloud_create_contains_unsupported_settings(
+        assert!(!cloud_create_contains_unsupported_settings(
             &custom_resources
         ));
     }
@@ -4091,6 +4158,13 @@ mod tests {
         public_toggle.runtime_kind = None;
         public_toggle.public_exposure = Some(false);
         assert!(cloud_update_contains_unsupported_settings(&public_toggle));
+
+        let mut custom_resources = public_toggle;
+        custom_resources.public_exposure = None;
+        custom_resources.memory_limit_mb = Some(Some(1024));
+        assert!(!cloud_update_contains_unsupported_settings(
+            &custom_resources
+        ));
     }
 
     #[test]
@@ -4352,6 +4426,165 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cloud_db_compute_mutations_require_ready_account() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cloud_db(&state).await;
+        let user_id = insert_app_user(&state, 606, "gated-user").await;
+        let cloud_user_id = insert_cloud_user(&state, 606, "gated-user").await;
+        insert_cloud_session(&state, cloud_user_id, "gated-token").await;
+        let headers = cloud_headers(&state, user_id, "gated-token");
+        let app_id = insert_cloud_app(&state, user_id, "gated-app").await;
+        let deployment_id = insert_successful_deployment(&state, app_id).await;
+        let job_id = insert_agent_job(&state, app_id, Some(deployment_id), "failed").await;
+
+        for status in [
+            create_app(
+                State(state.clone()),
+                headers.clone(),
+                Json(create_app_payload("blocked-create")),
+            )
+            .await
+            .into_response()
+            .status(),
+            update_app(
+                State(state.clone()),
+                headers.clone(),
+                Path(app_id),
+                Json(update_app_payload()),
+            )
+            .await
+            .into_response()
+            .status(),
+            set_app_env_var(
+                State(state.clone()),
+                headers.clone(),
+                Path((app_id, "SECRET".to_string())),
+                Json(EnvValue {
+                    value: "blocked".into(),
+                }),
+            )
+            .await
+            .into_response()
+            .status(),
+            delete_app_env_var(
+                State(state.clone()),
+                headers.clone(),
+                Path((app_id, "SECRET".to_string())),
+            )
+            .await
+            .into_response()
+            .status(),
+            check_app_health_now(State(state.clone()), headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+            restart_app_container(State(state.clone()), headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+            retry_agent_job(State(state.clone()), headers.clone(), Path(job_id))
+                .await
+                .into_response()
+                .status(),
+            cancel_agent_job(State(state.clone()), headers.clone(), Path(job_id))
+                .await
+                .into_response()
+                .status(),
+            delete_app(State(state.clone()), headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+        ] {
+            assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        }
+
+        activate_cloud_account(&state, cloud_user_id).await;
+        assert_eq!(
+            check_app_health_now(State(state.clone()), headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            restart_app_container(State(state.clone()), headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_db_customer_data_is_isolated_by_user() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cloud_db(&state).await;
+        let owner_user = insert_app_user(&state, 707, "owner-user").await;
+        let other_user = insert_app_user(&state, 808, "other-user").await;
+        let owner_cloud = insert_cloud_user(&state, 707, "owner-user").await;
+        let other_cloud = insert_cloud_user(&state, 808, "other-user").await;
+        insert_cloud_session(&state, owner_cloud, "owner-token").await;
+        insert_cloud_session(&state, other_cloud, "other-token").await;
+        activate_cloud_account(&state, owner_cloud).await;
+        activate_cloud_account(&state, other_cloud).await;
+
+        let app_id = insert_cloud_app(&state, owner_user, "owner-app").await;
+        let deployment_id = insert_successful_deployment(&state, app_id).await;
+        insert_env_var(&state, app_id, "OWNER_SECRET", "secret").await;
+        let job_id = insert_agent_job(&state, app_id, Some(deployment_id), "failed").await;
+        let owner_headers = cloud_headers(&state, owner_user, "owner-token");
+        let other_headers = cloud_headers(&state, other_user, "other-token");
+
+        assert_eq!(
+            get_app(State(state.clone()), owner_headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::OK
+        );
+        for status in [
+            get_app(State(state.clone()), other_headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+            app_env_vars(State(state.clone()), other_headers.clone(), Path(app_id))
+                .await
+                .into_response()
+                .status(),
+            crate::deploy::get_deployment(
+                State(state.clone()),
+                other_headers.clone(),
+                Path(deployment_id),
+            )
+            .await
+            .into_response()
+            .status(),
+            crate::deploy::deployment_logs(
+                State(state.clone()),
+                other_headers.clone(),
+                Path(deployment_id),
+            )
+            .await
+            .into_response()
+            .status(),
+            retry_agent_job(State(state.clone()), other_headers.clone(), Path(job_id))
+                .await
+                .into_response()
+                .status(),
+            cancel_agent_job(State(state.clone()), other_headers.clone(), Path(job_id))
+                .await
+                .into_response()
+                .status(),
+        ] {
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
+
     fn stripe_signature_header(body: &[u8], secret: &str, timestamp: i64) -> String {
         let timestamp = timestamp.to_string();
         let signed_payload = [timestamp.as_bytes(), b".", body].concat();
@@ -4433,6 +4666,162 @@ mod tests {
         .execute(&state.db)
         .await
         .unwrap();
+    }
+
+    fn cloud_headers(state: &AppState, user_id: Uuid, cloud_token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            crate::auth::test_cloud_cookie_header(&state.session_secret, user_id, cloud_token)
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
+    async fn activate_cloud_account(state: &AppState, cloud_user_id: Uuid) {
+        sqlx::query(
+            "INSERT INTO cloud_github_installations
+               (cloud_user_id, installation_id, account_login, account_type, permissions_json, repository_selection)
+             VALUES ($1,$2,'ci-user','User','{}'::jsonb,'selected')",
+        )
+        .bind(cloud_user_id)
+        .bind(rand_installation_id())
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
+             VALUES ($1,$2,'starter','active')",
+        )
+        .bind(cloud_user_id)
+        .bind(format!("sub_{}", Uuid::new_v4().simple()))
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_cloud_app(state: &AppState, user_id: Uuid, name: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO apps
+               (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,root_directory,memory_limit_mb,cpu_limit,public_exposure,auto_deploy)
+             VALUES ($1,'00000000-0000-0000-0000-000000000001',$2,'hostlet-ci/node-hello','main',3000,'/health',$3,'single','.',512,0.5,true,false)
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind(format!("{name}.hostlet.cloud"))
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_successful_deployment(state: &AppState, app_id: Uuid) -> Uuid {
+        let id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO deployments
+               (app_id,server_id,status,commit_sha,started_at,finished_at,container_name,published_port,runtime_kind)
+             VALUES ($1,'00000000-0000-0000-0000-000000000001','success','HEAD',now(),now(),$2,32001,'single')
+             RETURNING id",
+        )
+        .bind(app_id)
+        .bind(format!("hostlet-app-{app_id}"))
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+            .bind(id)
+            .bind(app_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO deployment_logs (deployment_id,stream,line) VALUES ($1,'stdout','ready')",
+        )
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn insert_agent_job(
+        state: &AppState,
+        app_id: Uuid,
+        deployment_id: Option<Uuid>,
+        status: &str,
+    ) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO agent_jobs
+               (server_id,app_id,deployment_id,job_type,status,payload_json)
+             VALUES ('00000000-0000-0000-0000-000000000001',$1,$2,'health_check',$3,'{\"type\":\"health_check\"}'::jsonb)
+             RETURNING id",
+        )
+        .bind(app_id)
+        .bind(deployment_id)
+        .bind(status)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_env_var(state: &AppState, app_id: Uuid, key: &str, value: &str) {
+        sqlx::query("INSERT INTO app_env_vars (app_id,key,value_ciphertext) VALUES ($1,$2,$3)")
+            .bind(app_id)
+            .bind(key)
+            .bind(state.crypto.encrypt(value).unwrap())
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    fn create_app_payload(name: &str) -> CreateApp {
+        CreateApp {
+            name: name.into(),
+            repo_full_name: "hostlet-ci/node-hello".into(),
+            branch: "main".into(),
+            server_id: None,
+            container_port: 3000,
+            health_path: "/health".into(),
+            domain: "".into(),
+            runtime_kind: Some("single".into()),
+            hostlet_config_path: None,
+            runtime_config: None,
+            root_directory: Some(".".into()),
+            install_command: None,
+            build_command: None,
+            start_command: None,
+            memory_limit_mb: None,
+            cpu_limit: None,
+            public_exposure: None,
+            auto_deploy: None,
+            deploy_after_create: Some(false),
+            env: vec![],
+        }
+    }
+
+    fn update_app_payload() -> UpdateApp {
+        UpdateApp {
+            domain: None,
+            runtime_kind: None,
+            hostlet_config_path: None,
+            runtime_config: None,
+            health_path: Some("/ready".into()),
+            root_directory: None,
+            install_command: None,
+            build_command: None,
+            start_command: None,
+            container_port: Some(3000),
+            memory_limit_mb: None,
+            cpu_limit: None,
+            public_exposure: None,
+            auto_deploy: None,
+            env: None,
+        }
+    }
+
+    fn rand_installation_id() -> i64 {
+        let bytes = *Uuid::new_v4().as_bytes();
+        i64::from_be_bytes(bytes[..8].try_into().unwrap()).abs()
     }
 
     async fn subscription_status(state: &AppState, subscription_id: &str) -> Option<String> {

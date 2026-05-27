@@ -88,7 +88,7 @@ export default function Logs() {
 function cloudCreateDisabledReason(session: SessionPayload | null) {
   if (session?.mode !== "cloud") return "";
   if (!session.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
-  if (!session.cloud.billingActive) return "Start a Stripe sandbox subscription before creating cloud apps.";
+  if (!session.cloud.billingActive) return "Choose a Hostlet Cloud plan before creating cloud apps.";
   if (session.cloud.nextStep !== "ready") return "Finish Hostlet Cloud setup before creating apps.";
   return "";
 }

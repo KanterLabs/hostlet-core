@@ -6,6 +6,7 @@
     "dev": "next dev -H 0.0.0.0 --webpack",
     "build": "next build",
     "lint": "tsc --noEmit",
+    "test:web": "playwright test",
     "responsive:qa": "node ../../scripts/responsive-qa.mjs"
   },
   "dependencies": {

@@ -293,11 +293,14 @@ docker compose -f infra/docker-compose.yml up --build
 ### Production Deploy
 
 ```bash
-# Build production images (no source bind mounts)
-docker compose -f infra/docker-compose.prod.yml up -d --build
+# Pull prebuilt production images and restart without building on the VM
+scripts/deploy-hostlet-cloud-images.sh
+
+# Optional pinned rollback/deploy
+HOSTLET_IMAGE_TAG=sha-<commit> scripts/deploy-hostlet-cloud-images.sh
 
 # With Cloudflare Tunnel
-docker compose -f infra/docker-compose.prod.yml --profile tunnel up -d --build
+docker compose --env-file .env -f infra/docker-compose.prod.yml --profile tunnel up -d --no-build
 ```
 
 ---

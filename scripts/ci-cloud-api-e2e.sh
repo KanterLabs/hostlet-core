@@ -162,15 +162,34 @@ create_payload='{
 expect_status 402 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "${create_payload}"
 
 docker exec -i "${CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
+VALUES ('${CLOUD_USER_ID}', 'sub_ci_without_install', 'starter', 'active')
+ON CONFLICT (stripe_subscription_id) DO UPDATE SET status=EXCLUDED.status;
+SQL
+expect_status 402 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "${create_payload}"
+
+docker exec -i "${CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
 INSERT INTO cloud_github_installations (cloud_user_id, installation_id, account_login, account_type, permissions_json, repository_selection)
 VALUES ('${CLOUD_USER_ID}', 12345, 'ci-user', 'User', '{}'::jsonb, 'selected')
 ON CONFLICT (installation_id) DO UPDATE SET cloud_user_id=EXCLUDED.cloud_user_id, suspended_at=NULL;
 INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
-VALUES ('${CLOUD_USER_ID}', 'sub_ci_cloud_e2e', 'starter', 'active')
+VALUES ('${CLOUD_USER_ID}', 'sub_ci_cloud_e2e', 'starter', 'canceled')
 ON CONFLICT (stripe_subscription_id) DO UPDATE SET status=EXCLUDED.status;
+UPDATE cloud_subscriptions SET status='canceled' WHERE stripe_subscription_id='sub_ci_without_install';
 SQL
+expect_status 402 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "${create_payload}"
 
-expect_status 400 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "$(printf '%s' "${create_payload}" | node -e 'let s=""; process.stdin.on("data", d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); j.memory_limit_mb=2048; process.stdout.write(JSON.stringify(j));})')"
+REVOKED_TOKEN="ci-cloud-revoked-token"
+REVOKED_TOKEN_HASH="$(token_hash "${REVOKED_TOKEN}")"
+REVOKED_COOKIE="hostlet_session=${SESSION_COOKIE}; hostlet_cloud_session=${REVOKED_TOKEN}"
+docker exec -i "${CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+INSERT INTO cloud_sessions (cloud_user_id, token_hash, expires_at, revoked_at)
+VALUES ('${CLOUD_USER_ID}', '${REVOKED_TOKEN_HASH}', now() + interval '1 hour', now())
+ON CONFLICT (token_hash) DO NOTHING;
+UPDATE cloud_subscriptions SET status='active' WHERE stripe_subscription_id='sub_ci_cloud_e2e';
+SQL
+expect_status 402 -H "cookie: ${REVOKED_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "${create_payload}"
+
 expect_status 400 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "$(printf '%s' "${create_payload}" | node -e 'let s=""; process.stdin.on("data", d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); j.runtime_kind="compose"; process.stdout.write(JSON.stringify(j));})')"
 
 allowed_payload="$(printf '%s' "${create_payload}" | node -e 'let s=""; process.stdin.on("data", d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); delete j.public_exposure; delete j.auto_deploy; process.stdout.write(JSON.stringify(j));})')"
@@ -181,7 +200,28 @@ if [ "$(printf '%s' "${app_detail}" | json_get memoryLimitMb)" != "512" ] || [ "
   echo "cloud app did not receive fixed plan resources" >&2
   exit 1
 fi
-expect_status 400 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X PATCH "${BASE_URL}/api/apps/${app_id}" --data '{"memory_limit_mb":1024}'
+
+OTHER_USER_ID="00000000-0000-0000-0000-000000000102"
+OTHER_CLOUD_USER_ID="00000000-0000-0000-0000-000000000202"
+OTHER_TOKEN="ci-cloud-other-token"
+OTHER_TOKEN_HASH="$(token_hash "${OTHER_TOKEN}")"
+OTHER_SESSION_COOKIE="$(signed_cookie "${OTHER_USER_ID}")"
+OTHER_COOKIE_HEADER="hostlet_session=${OTHER_SESSION_COOKIE}; hostlet_cloud_session=${OTHER_TOKEN}"
+docker exec -i "${CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+INSERT INTO users (id, github_id, login) VALUES ('${OTHER_USER_ID}', 9002, 'other-user') ON CONFLICT (github_id) DO UPDATE SET login=EXCLUDED.login;
+INSERT INTO cloud_users (id, github_id, login) VALUES ('${OTHER_CLOUD_USER_ID}', 9002, 'other-user') ON CONFLICT (github_id) DO UPDATE SET login=EXCLUDED.login, status='active';
+INSERT INTO cloud_sessions (cloud_user_id, token_hash, expires_at) VALUES ('${OTHER_CLOUD_USER_ID}', '${OTHER_TOKEN_HASH}', now() + interval '1 hour') ON CONFLICT (token_hash) DO NOTHING;
+INSERT INTO cloud_github_installations (cloud_user_id, installation_id, account_login, account_type, permissions_json, repository_selection)
+VALUES ('${OTHER_CLOUD_USER_ID}', 12346, 'other-user', 'User', '{}'::jsonb, 'selected')
+ON CONFLICT (installation_id) DO UPDATE SET cloud_user_id=EXCLUDED.cloud_user_id, suspended_at=NULL;
+INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
+VALUES ('${OTHER_CLOUD_USER_ID}', 'sub_ci_other_cloud_e2e', 'starter', 'active')
+ON CONFLICT (stripe_subscription_id) DO UPDATE SET status=EXCLUDED.status;
+SQL
+expect_status 404 -H "cookie: ${OTHER_COOKIE_HEADER}" "${BASE_URL}/api/apps/${app_id}"
+expect_status 404 -H "cookie: ${OTHER_COOKIE_HEADER}" "${BASE_URL}/api/apps/${app_id}/env"
+
+expect_status 204 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X PATCH "${BASE_URL}/api/apps/${app_id}" --data '{"memory_limit_mb":1024}'
 expect_status 400 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X PATCH "${BASE_URL}/api/apps/${app_id}" --data '{"runtime_kind":"compose"}'
 
 echo "cloud API E2E passed"

@@ -103,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/github/repo-inspect", post(github::repo_inspect))
         .route("/api/cloudflare/status", get(web::cloudflare_status))
         .route("/api/cloud/status", get(web::cloud_status))
+        .route("/api/cloud/usage", get(web::cloud_usage))
         .route(
             "/api/cloud/billing/checkout",
             post(web::cloud_billing_checkout),

@@ -10,6 +10,7 @@ services:
       - hostlet-postgres:/var/lib/postgresql/data
 
   api:
+    image: ${HOSTLET_IMAGE_REGISTRY:-ghcr.io/shanekanterman04}/hostlet-api:${HOSTLET_IMAGE_TAG:-cloud-prod}
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
@@ -57,6 +58,7 @@ services:
       - postgres
 
   local-agent:
+    image: ${HOSTLET_IMAGE_REGISTRY:-ghcr.io/shanekanterman04}/hostlet-agent:${HOSTLET_IMAGE_TAG:-cloud-prod}
     build:
       context: ..
       dockerfile: apps/agent/Dockerfile
@@ -109,6 +111,7 @@ services:
       - caddy
 
   web:
+    image: ${HOSTLET_IMAGE_REGISTRY:-ghcr.io/shanekanterman04}/hostlet-web:${HOSTLET_IMAGE_TAG:-cloud-prod}
     build:
       context: ..
       dockerfile: apps/web/Dockerfile

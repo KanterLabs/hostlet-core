@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - main
-      - hostlet-0.4.0-cloud-foundation
 
 permissions:
   contents: read
@@ -52,6 +51,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm exec playwright install chromium
+      - run: pnpm test:web
       - run: pnpm responsive:qa
       - run: ../../scripts/ci-security-artifact-smoke.sh
       - uses: actions/upload-artifact@v4

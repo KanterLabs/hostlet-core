@@ -122,6 +122,7 @@ make_fixture_repo() {
   git config user.name "Hostlet CI"
   cat > server.js <<'EOF'
 const http = require("http");
+const fs = require("fs");
 const port = Number(process.env.PORT || 3000);
 const version = process.env.APP_VERSION || "v1";
 http.createServer((req, res) => {
@@ -130,8 +131,17 @@ http.createServer((req, res) => {
     res.end("ok");
     return;
   }
+  let persisted = "no-data";
+  try {
+    fs.mkdirSync("/data", { recursive: true });
+    const marker = "/data/hostlet-ci-version";
+    if (!fs.existsSync(marker)) fs.writeFileSync(marker, version);
+    persisted = fs.readFileSync(marker, "utf8");
+  } catch {
+    persisted = "no-data";
+  }
   res.writeHead(200, { "content-type": "text/plain" });
-  res.end(`hostlet-ci-${version}`);
+  res.end(`hostlet-ci-${version}-${persisted}`);
 }).listen(port, "0.0.0.0");
 EOF
   cat > Dockerfile <<'EOF'
@@ -272,7 +282,7 @@ wait_deployment_status "${deployment_id}"
 app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
 published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
 curl -fsS "http://127.0.0.1:${published_port}/health" | grep -q '^ok$'
-curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1'
+curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
 
 logs_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
 printf '%s' "${logs_payload}" | grep -q 'Health check passed'
@@ -281,6 +291,21 @@ if printf '%s' "${logs_payload}" | grep -q 'secret-value-for-redaction'; then
   exit 1
 fi
 docker ps --filter "name=hostlet-app-${CREATED_APP_ID}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+
+expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PUT "${BASE_URL}/api/apps/${app_id}/env/APP_VERSION" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' --data '{"value":"v2"}'
+redeploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+redeploy_id="$(printf '%s' "${redeploy_payload}" | json_get deploymentId)"
+wait_deployment_status "${redeploy_id}"
+app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
+curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v2-v1'
+
+rollback_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -X POST "${BASE_URL}/api/apps/${app_id}/rollback" --data '{}')"
+rollback_id="$(printf '%s' "${rollback_payload}" | json_get rollbackDeploymentId)"
+wait_deployment_status "${rollback_id}"
+app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
+curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
 
 restart_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps/${app_id}/restart" --data '{}')"
 restart_job="$(printf '%s' "${restart_payload}" | json_get jobId)"

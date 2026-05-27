@@ -434,16 +434,29 @@ Backups include a Postgres dump and, when available, the local agent state volum
 
 ## Production Compose
 
-Build and run production images:
+Pull and run prebuilt production images:
 
 ```bash
-docker compose -f infra/docker-compose.prod.yml up -d --build
+HOSTLET_IMAGE_REGISTRY=ghcr.io/shanekanterman04
+HOSTLET_IMAGE_TAG=cloud-prod
+scripts/deploy-hostlet-cloud-images.sh
 ```
+
+Production Compose still keeps `build:` entries as a manual fallback, but normal production updates should pull images and run with `--no-build` so the VM does not compile Rust or Next.js.
+
+One-time GHCR setup on the production VM:
+
+```bash
+# Use a GitHub token with read:packages access. Do not store it in git.
+echo "$GITHUB_PACKAGE_READ_TOKEN" | docker login ghcr.io -u ShaneKanterman04 --password-stdin
+```
+
+Set `HOSTLET_IMAGE_TAG=sha-<commit>` in `.env` for a pinned deploy or rollback. Leave it as `cloud-prod` for the latest published cloud image set.
 
 Run Cloudflare Tunnel from the same Compose stack only when needed:
 
 ```bash
-docker compose -f infra/docker-compose.prod.yml --profile tunnel up -d --build
+docker compose --env-file .env -f infra/docker-compose.prod.yml --profile tunnel up -d --no-build
 ```
 
 Production Compose uses release Dockerfiles for the API, web UI, and local agent. It does not bind-mount the source tree.

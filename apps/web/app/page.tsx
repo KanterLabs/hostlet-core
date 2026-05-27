@@ -6,6 +6,7 @@ import { Box, CreditCard, GitBranch, HardDrive, Plus, Rocket, ShieldCheck } from
 import { GitHubStatus } from "@/components/GitHubStatus";
 import { api } from "@/lib/api";
 import { AppShell, DataList, DataRow, IconFrame, Metric, MetricsGrid, Notice, PageHeader, Panel, PanelHeader, SectionHeader, StatusPill } from "@/components/ui";
+import { CloudUsagePanel, type CloudUsage } from "@/components/CloudUsagePanel";
 
 type App = {
   id: string;
@@ -29,6 +30,8 @@ type SessionPayload = {
     billingActive: boolean;
     githubInstalled: boolean;
     nextStep: "login" | "install_github" | "billing" | "ready";
+    planCode?: string | null;
+    subscriptionStatus?: string | null;
   } | null;
 };
 
@@ -37,7 +40,10 @@ export default function Dashboard() {
   const [servers, setServers] = useState<Server[]>([]);
   const [version, setVersion] = useState<VersionPayload | null>(null);
   const [session, setSession] = useState<SessionPayload | null>(null);
+  const [usage, setUsage] = useState<CloudUsage | null>(null);
   const [message, setMessage] = useState("Loading Hostlet...");
+  const [billingMessage, setBillingMessage] = useState("");
+  const [billingBusy, setBillingBusy] = useState<"student" | "starter" | "pro" | "">("");
 
   useEffect(() => {
     let active = true;
@@ -69,6 +75,7 @@ export default function Dashboard() {
   useEffect(() => {
     api<VersionPayload>("/api/system/version").then(setVersion).catch(() => setVersion(null));
     api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
+    api<CloudUsage>("/api/cloud/usage").then(setUsage).catch(() => setUsage(null));
   }, []);
 
   const activeDeploys = apps.filter((app) => isActive(app.latestDeployment?.status)).length;
@@ -79,14 +86,22 @@ export default function Dashboard() {
   const recentApps = useMemo(() => apps.slice(0, 5), [apps]);
   const cloud = session?.mode === "cloud";
   const cloudReady = session?.cloud?.nextStep === "ready";
-  const createDisabledReason = cloudCreateDisabledReason(session);
+  const createDisabledReason = cloudCreateDisabledReason(session, usage);
 
   async function startCheckout(plan: "student" | "starter" | "pro") {
-    const result = await api<{ url?: string | null }>("/api/cloud/billing/checkout", {
-      method: "POST",
-      body: JSON.stringify({ plan }),
-    });
-    if (result.url) window.location.assign(result.url);
+    setBillingBusy(plan);
+    setBillingMessage(`Opening ${planLabel(plan)} checkout...`);
+    try {
+      const result = await api<{ url?: string | null }>("/api/cloud/billing/checkout", {
+        method: "POST",
+        body: JSON.stringify({ plan }),
+      });
+      if (!result.url) throw new Error("Stripe did not return a checkout URL.");
+      window.location.assign(result.url);
+    } catch (error) {
+      setBillingMessage(error instanceof Error ? error.message : "Checkout could not be opened.");
+      setBillingBusy("");
+    }
   }
 
   return (
@@ -116,17 +131,24 @@ export default function Dashboard() {
                 {!session.cloud.githubInstalled && <a className="button" href="/auth/github/install/start"><GitBranch size={16} />Install GitHub App</a>}
                 {session.cloud.githubInstalled && !session.cloud.billingActive && (
                   <>
-                    <button className="button" onClick={() => startCheckout("starter")}><CreditCard size={16} />Start Starter</button>
-                    <button className="button-secondary" onClick={() => startCheckout("student")}>Student promo</button>
-                    <button className="button-secondary" onClick={() => startCheckout("pro")}>Pro</button>
+                    <button className="button" onClick={() => startCheckout("starter")} disabled={!!billingBusy}><CreditCard size={16} />{billingBusy === "starter" ? "Opening..." : "Start Starter"}</button>
+                    <button className="button-secondary" onClick={() => startCheckout("student")} disabled={!!billingBusy}>{billingBusy === "student" ? "Opening..." : "Student"}</button>
+                    <button className="button-secondary" onClick={() => startCheckout("pro")} disabled={!!billingBusy}>{billingBusy === "pro" ? "Opening..." : "Pro"}</button>
                   </>
                 )}
               </div>
+              {billingMessage && (
+                <Notice
+                  tone={billingMessage.toLowerCase().includes("could not") || billingMessage.toLowerCase().includes("did not") || billingMessage.toLowerCase().includes("failed") ? "danger" : "neutral"}
+                  className="mt-3"
+                  description={billingMessage}
+                />
+              )}
             </Panel>
           )}
 
           <MetricsGrid>
-            <Metric label="Apps" value={String(apps.length)} detail={`${healthyApps} healthy`} icon={Box} />
+            <Metric label="Apps" value={String(apps.length)} detail={cloud && usage ? `${usage.apps.remaining} slots remaining` : `${healthyApps} healthy`} icon={Box} />
             <Metric label="Active deploys" value={String(activeDeploys)} detail="builds, checks, routing" icon={Rocket} />
             <Metric label="Unhealthy apps" value={String(unhealthyApps)} detail="runtime monitor" icon={ShieldCheck} />
             <Metric label="Public apps" value={String(publicApps)} detail={cloud ? "Hostlet Cloud URLs" : "Cloudflare DNS open"} icon={ShieldCheck} />
@@ -176,6 +198,7 @@ export default function Dashboard() {
             </Panel>
 
             <aside className="space-y-6">
+              {cloud && <CloudUsagePanel usage={usage} />}
               <GitHubStatus />
               <Panel>
                 <SectionHeader icon={GitBranch} title="Release state" />
@@ -200,10 +223,15 @@ function isActive(status?: string | null) {
   return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
 }
 
-function cloudCreateDisabledReason(session: SessionPayload | null) {
+function cloudCreateDisabledReason(session: SessionPayload | null, usage?: CloudUsage | null) {
   if (session?.mode !== "cloud") return "";
   if (!session.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
-  if (!session.cloud.billingActive) return "Start a Stripe sandbox subscription before creating cloud apps.";
+  if (!session.cloud.billingActive) return "Choose a Hostlet Cloud plan before creating apps.";
   if (session.cloud.nextStep !== "ready") return "Finish Hostlet Cloud setup before creating apps.";
+  if (usage && usage.apps.limit > 0 && usage.apps.remaining <= 0) return "Your plan app limit is reached. Upgrade before creating another app.";
   return "";
+}
+
+function planLabel(plan: "student" | "starter" | "pro") {
+  return plan === "student" ? "Student" : plan === "starter" ? "Starter" : "Pro";
 }

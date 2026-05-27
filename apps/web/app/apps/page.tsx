@@ -156,7 +156,7 @@ export default function Apps() {
                     <KeyValueItem label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
                     <KeyValueItem label="Runtime health" value={healthSummary(app.health)} />
                     <KeyValueItem label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
-                    <KeyValueItem label="Limits" value={cloud ? `${app.memoryLimitMb || 512} MB · ${app.cpuLimit || 0.5} CPU` : `${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />
+                    {!cloud && <KeyValueItem label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />}
                     {!cloud && <KeyValueItem label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />}
                     {!cloud && <KeyValueItem label="Webhook" value={webhookSummary(app.latestWebhook)} />}
                   </KeyValueGrid>
@@ -272,7 +272,7 @@ function isActiveDeploy(status?: string | null) {
 function cloudCreateDisabledReason(session: SessionPayload | null) {
   if (session?.mode !== "cloud") return "";
   if (!session.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
-  if (!session.cloud.billingActive) return "Start a Stripe sandbox subscription before creating cloud apps.";
+  if (!session.cloud.billingActive) return "Choose a Hostlet Cloud plan before creating cloud apps.";
   if (session.cloud.nextStep !== "ready") return "Finish Hostlet Cloud setup before creating apps.";
   return "";
 }

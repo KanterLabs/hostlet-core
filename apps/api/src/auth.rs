@@ -613,9 +613,11 @@ pub async fn session_status(
         .await
         .ok()
         .flatten();
-        let billing_active = cloud_billing_active_for_cloud_user(&state, cloud_user_id)
+        let subscription = cloud_active_subscription_for_cloud_user(&state, cloud_user_id)
             .await
-            .unwrap_or(false);
+            .ok()
+            .flatten();
+        let billing_active = subscription.is_some();
         let github_installed = cloud_github_installed(&state, cloud_user_id)
             .await
             .unwrap_or(false);
@@ -639,7 +641,9 @@ pub async fn session_status(
             "cloud": {
                 "billingActive": billing_active,
                 "githubInstalled": github_installed,
-                "nextStep": next_step
+                "nextStep": next_step,
+                "planCode": subscription.as_ref().map(|row| row.get::<String, _>("plan_code")),
+                "subscriptionStatus": subscription.as_ref().map(|row| row.get::<String, _>("status"))
             }
         }))
         .into_response();
@@ -1117,17 +1121,29 @@ async fn cloud_billing_active_for_cloud_user(
     state: &AppState,
     cloud_user_id: Uuid,
 ) -> anyhow::Result<bool> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*)
+    Ok(
+        cloud_active_subscription_for_cloud_user(state, cloud_user_id)
+            .await?
+            .is_some(),
+    )
+}
+
+async fn cloud_active_subscription_for_cloud_user(
+    state: &AppState,
+    cloud_user_id: Uuid,
+) -> anyhow::Result<Option<sqlx::postgres::PgRow>> {
+    Ok(sqlx::query(
+        "SELECT plan_code, status
          FROM cloud_subscriptions
          WHERE cloud_user_id=$1
            AND status IN ('active','trialing')
-           AND (current_period_end IS NULL OR current_period_end > now())",
+           AND (current_period_end IS NULL OR current_period_end > now())
+         ORDER BY created_at DESC
+         LIMIT 1",
     )
     .bind(cloud_user_id)
-    .fetch_one(&state.db)
-    .await?;
-    Ok(count > 0)
+    .fetch_optional(&state.db)
+    .await?)
 }
 
 async fn upsert_cloud_installation(
@@ -1674,6 +1690,121 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cloud_db_github_install_callback_rejects_bad_state_before_network() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cloud_db(&state).await;
+        let user_id = insert_app_user(&state, 3030, "install-user").await;
+        let cloud_user_id = insert_cloud_user(&state, 3030, "install-user").await;
+        insert_cloud_session(&state, cloud_user_id, "install-token", false).await;
+
+        let base_headers = cloud_headers(&state, user_id, "install-token");
+        assert_redirect_contains(
+            cloud_github_install_callback(
+                State(state.clone()),
+                base_headers.clone(),
+                Query(GitHubInstallCallbackQuery {
+                    installation_id: Some(1),
+                    setup_action: None,
+                    state: None,
+                }),
+            )
+            .await
+            .into_response(),
+            "missing%20installation%20state",
+        );
+
+        assert_redirect_contains(
+            cloud_github_install_callback(
+                State(state.clone()),
+                base_headers.clone(),
+                Query(GitHubInstallCallbackQuery {
+                    installation_id: Some(1),
+                    setup_action: None,
+                    state: Some("nonce".into()),
+                }),
+            )
+            .await
+            .into_response(),
+            "expired%20installation%20state",
+        );
+
+        let mut mismatched_headers = base_headers.clone();
+        mismatched_headers.insert(
+            header::COOKIE,
+            format!(
+                "{}; {}={}",
+                test_cloud_cookie_header(&state.session_secret, user_id, "install-token"),
+                GITHUB_INSTALL_STATE_COOKIE,
+                signed_value(&state.session_secret, "expected", Duration::minutes(15))
+            )
+            .parse()
+            .unwrap(),
+        );
+        assert_redirect_contains(
+            cloud_github_install_callback(
+                State(state.clone()),
+                mismatched_headers.clone(),
+                Query(GitHubInstallCallbackQuery {
+                    installation_id: Some(1),
+                    setup_action: None,
+                    state: Some("actual".into()),
+                }),
+            )
+            .await
+            .into_response(),
+            "invalid%20installation%20state",
+        );
+
+        assert_redirect_contains(
+            cloud_github_install_callback(
+                State(state),
+                mismatched_headers,
+                Query(GitHubInstallCallbackQuery {
+                    installation_id: None,
+                    setup_action: None,
+                    state: Some("expected".into()),
+                }),
+            )
+            .await
+            .into_response(),
+            "missing%20installation",
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_db_installation_owner_rejects_cross_account_linking() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cloud_db(&state).await;
+        let cloud_a = insert_cloud_user(&state, 4040, "alice").await;
+        let cloud_b = insert_cloud_user(&state, 5050, "bob").await;
+        sqlx::query(
+            "INSERT INTO cloud_github_installations
+               (cloud_user_id, installation_id, account_login, account_type, permissions_json, repository_selection)
+             VALUES ($1,67890,'alice','User','{}'::jsonb,'selected')",
+        )
+        .bind(cloud_a)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let duplicate = ensure_installation_owner(&state, cloud_b, 67890, "bob", "User").await;
+        assert!(duplicate
+            .unwrap_err()
+            .to_string()
+            .contains("already linked"));
+
+        let mismatch = ensure_installation_owner(&state, cloud_b, 98765, "alice", "User").await;
+        assert!(mismatch
+            .unwrap_err()
+            .to_string()
+            .contains("does not belong"));
+    }
+
     async fn reset_cloud_db(state: &AppState) {
         sqlx::query(
             "TRUNCATE cloud_webhook_events, cloud_usage_buckets, cloud_subscriptions,
@@ -1734,5 +1865,18 @@ mod tests {
                 .unwrap(),
         );
         headers
+    }
+
+    fn assert_redirect_contains(response: Response, expected: &str) {
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            location.contains(expected),
+            "redirect location {location:?} did not contain {expected:?}"
+        );
     }
 }

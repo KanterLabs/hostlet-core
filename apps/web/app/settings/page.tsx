@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import { Cloud, CreditCard, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, DataList, DataRow, IconFrame, Notice, PageHeader, Panel, StatusPill } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
+import { CloudUsagePanel, planLabel as cloudPlanLabel, type CloudUsage } from "@/components/CloudUsagePanel";
 
 type StatusPayload = {
   configured?: boolean;
@@ -77,6 +79,8 @@ type SessionPayload = {
     billingActive: boolean;
     githubInstalled: boolean;
     nextStep: "login" | "install_github" | "billing" | "ready";
+    planCode?: string | null;
+    subscriptionStatus?: string | null;
   } | null;
 };
 
@@ -89,8 +93,11 @@ export default function Settings() {
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [cleanup, setCleanup] = useState<CleanupPlan | null>(null);
   const [backup, setBackup] = useState<BackupMetadata | null>(null);
+  const [usage, setUsage] = useState<CloudUsage | null>(null);
   const [updateMessage, setUpdateMessage] = useState("");
   const [operationsMessage, setOperationsMessage] = useState("");
+  const [billingMessage, setBillingMessage] = useState("");
+  const [billingBusy, setBillingBusy] = useState<"student" | "starter" | "pro" | "portal" | "">("");
 
   useEffect(() => {
     refresh();
@@ -111,6 +118,7 @@ export default function Settings() {
     api<AuditEvent[]>("/api/audit-events").then(setAudit).catch(() => setAudit([]));
     api<CleanupPlan>("/api/system/cleanup").then(setCleanup).catch(() => setCleanup(null));
     api<BackupMetadata | undefined>("/api/system/backups/latest").then((value) => setBackup(value || null)).catch(() => setBackup(null));
+    api<CloudUsage>("/api/cloud/usage").then(setUsage).catch(() => setUsage(null));
   }
 
   async function checkForUpdates() {
@@ -146,11 +154,35 @@ export default function Settings() {
   }
 
   async function startCheckout(plan: "student" | "starter" | "pro") {
-    const result = await api<{ url?: string | null }>("/api/cloud/billing/checkout", {
-      method: "POST",
-      body: JSON.stringify({ plan }),
-    });
-    if (result.url) window.location.assign(result.url);
+    setBillingBusy(plan);
+    setBillingMessage(`Opening ${planLabel(plan)} checkout...`);
+    try {
+      const result = await api<{ url?: string | null }>("/api/cloud/billing/checkout", {
+        method: "POST",
+        body: JSON.stringify({ plan }),
+      });
+      if (!result.url) throw new Error("Stripe did not return a checkout URL.");
+      window.location.assign(result.url);
+    } catch (error) {
+      setBillingMessage(error instanceof Error ? error.message : "Checkout could not be opened.");
+      setBillingBusy("");
+    }
+  }
+
+  async function openBillingPortal() {
+    setBillingBusy("portal");
+    setBillingMessage("Opening Stripe customer portal...");
+    try {
+      const result = await api<{ url?: string | null }>("/api/cloud/billing/portal", {
+        method: "POST",
+        body: "{}",
+      });
+      if (!result.url) throw new Error("Stripe did not return a billing portal URL.");
+      window.location.assign(result.url);
+    } catch (error) {
+      setBillingMessage(error instanceof Error ? error.message : "Billing portal could not be opened.");
+      setBillingBusy("");
+    }
   }
 
   const cloud = session?.mode === "cloud";
@@ -171,11 +203,17 @@ export default function Settings() {
               tone="warning"
               className="mb-6"
               title="Finish Hostlet Cloud setup"
-              description="Cloud deploys require GitHub App access and an active Stripe sandbox subscription before compute is available."
+              description="Cloud deploys require GitHub App access and an active Hostlet Cloud subscription before compute is available."
               action={
                 <>
                   {!session.cloud.githubInstalled && <a className="button" href="/auth/github/install/start"><GitBranch size={16} />Install GitHub App</a>}
-                  {session.cloud.githubInstalled && !session.cloud.billingActive && <button onClick={() => startCheckout("starter")}><CreditCard size={16} />Start Starter</button>}
+                  {session.cloud.githubInstalled && !session.cloud.billingActive && (
+                    <>
+                      <button className="button" onClick={() => startCheckout("starter")} disabled={!!billingBusy}><CreditCard size={16} />{billingBusy === "starter" ? "Opening..." : "Start Starter"}</button>
+                      <button className="button-secondary" onClick={() => startCheckout("student")} disabled={!!billingBusy}>Student</button>
+                      <button className="button-secondary" onClick={() => startCheckout("pro")} disabled={!!billingBusy}>Pro</button>
+                    </>
+                  )}
                 </>
               }
             />
@@ -202,18 +240,58 @@ export default function Settings() {
               {cloud && !session?.cloud?.githubInstalled && <a className="button" href="/auth/github/install/start"><GitBranch size={16} />Install GitHub App</a>}
             </div>
             {cloud ? (
-              <StatusCard
-                icon={CreditCard}
-                title="Billing"
-                status={session?.cloud?.billingActive ? "connected" : "needs attention"}
-                message={session?.cloud?.billingActive ? "Stripe sandbox subscription is active." : "Start a Stripe sandbox subscription before creating or mutating cloud apps."}
-                rows={[
-                  ["Billing mode", "Stripe sandbox"],
-                  ["Subscription", session?.cloud?.billingActive ? "active" : "required"],
-                  ["Compute gate", cloudReady ? "ready" : "blocked"],
-                  ["App URLs", "*.hostlet.cloud"],
-                ]}
-              />
+              <Panel>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <IconFrame icon={CreditCard} />
+                    <div>
+                      <h2 className="font-semibold">Billing</h2>
+                      <p className="muted mt-1">
+                        {session?.cloud?.billingActive
+                          ? "Your Hostlet Cloud subscription is active."
+                          : "Choose a plan to unlock Hostlet Cloud deploys."}
+                      </p>
+                    </div>
+                  </div>
+                  <StatusPill status={session?.cloud?.billingActive ? "connected" : "needs attention"} />
+                </div>
+                <DataList className="mt-5">
+                  <DataRow label="Billing mode" value="Stripe live" />
+                  <DataRow label="Plan" value={session?.cloud?.planCode ? cloudPlanLabel(session.cloud.planCode) : "required"} />
+                  <DataRow label="Subscription" value={session?.cloud?.subscriptionStatus || (session?.cloud?.billingActive ? "active" : "required")} />
+                  <DataRow label="App creation" value={cloudReady ? "ready" : "blocked"} />
+                  <DataRow label="App URLs" value="*.hostlet.cloud" />
+                </DataList>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {session?.cloud?.billingActive ? (
+                    <button className="button" onClick={openBillingPortal} disabled={!!billingBusy}>
+                      <CreditCard size={16} />
+                      {billingBusy === "portal" ? "Opening..." : "Manage subscription"}
+                    </button>
+                  ) : (
+                    <>
+                      <button className="button" onClick={() => startCheckout("starter")} disabled={!!billingBusy}>
+                        <CreditCard size={16} />
+                        {billingBusy === "starter" ? "Opening..." : "Start Starter"}
+                      </button>
+                      <Link className="button-secondary" href="/pricing">Compare plans</Link>
+                      <button className="button-secondary" onClick={() => startCheckout("student")} disabled={!!billingBusy}>
+                        {billingBusy === "student" ? "Opening..." : "Student"}
+                      </button>
+                      <button className="button-secondary" onClick={() => startCheckout("pro")} disabled={!!billingBusy}>
+                        {billingBusy === "pro" ? "Opening..." : "Pro"}
+                      </button>
+                    </>
+                  )}
+                </div>
+                {billingMessage && (
+                  <Notice
+                    tone={billingMessage.toLowerCase().includes("could not") || billingMessage.toLowerCase().includes("did not") || billingMessage.toLowerCase().includes("failed") ? "danger" : "neutral"}
+                    className="mt-3"
+                    description={billingMessage}
+                  />
+                )}
+              </Panel>
             ) : (
               <StatusCard
                 icon={Cloud}
@@ -229,6 +307,12 @@ export default function Settings() {
               />
             )}
           </div>
+
+          {cloud && (
+            <div className="mt-6">
+              <CloudUsagePanel usage={usage} onManage={session?.cloud?.billingActive ? openBillingPortal : undefined} />
+            </div>
+          )}
 
           {!cloud && <Panel className="mt-6">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -341,6 +425,10 @@ function formatBackupDate(value: string) {
   const isoLike = value.replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, "$1-$2-$3T$4:$5:$6Z");
   const date = new Date(isoLike);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function planLabel(plan: "student" | "starter" | "pro") {
+  return plan === "student" ? "Student" : plan === "starter" ? "Starter" : "Pro";
 }
 
 function updateMigrationSummary(update?: UpdatePayload | null) {

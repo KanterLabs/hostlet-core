@@ -11,6 +11,7 @@ const baseUrl = `http://127.0.0.1:${port}`;
 const widths = [320, 375, 768, 1024, 1440];
 const routes = [
   ["/", "nav"],
+  ["/pricing", "pricing"],
   ["/apps/new", "create app"],
   ["/apps/smoke-app", "app detail and env editor"],
   ["/settings", "settings"],
@@ -198,10 +199,22 @@ async function installApiMocks(page, mode) {
         mode,
         user: { id: "ci-user", login: "ci-user" },
         cloud: cloud
-          ? { billingActive: true, githubInstalled: true, nextStep: "ready" }
+          ? { billingActive: true, githubInstalled: true, nextStep: "ready", planCode: "starter", subscriptionStatus: "active" }
           : null,
       });
     }
+    if (path === "/api/cloud/usage") {
+      return json({
+        planCode: cloud ? "starter" : null,
+        subscriptionStatus: cloud ? "active" : null,
+        currentPeriodStart: new Date().toISOString(),
+        currentPeriodEnd: new Date().toISOString(),
+        cancelAtPeriodEnd: false,
+        apps: { used: cloud ? 1 : 0, limit: cloud ? 2 : 0, remaining: cloud ? 1 : 0 },
+      });
+    }
+    if (path === "/api/cloud/billing/portal") return json({ url: "https://billing.stripe.test/session" });
+    if (path === "/api/cloud/billing/checkout") return json({ url: "https://checkout.stripe.test/session" });
     if (path === "/api/github/status") return json({ connected: true, mode, cloud: cloud ? { githubInstalled: true } : null });
     if (path === "/api/github/repos") return json([{ full_name: "hostlet-ci/node-hello", private: false, default_branch: "main" }]);
     if (path === "/api/servers") {
