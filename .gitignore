@@ -10,3 +10,4 @@ node_modules/
 hostlet-agent
 data/
 .tmp/
+docs/private/
