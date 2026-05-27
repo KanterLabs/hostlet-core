@@ -4164,7 +4164,9 @@ mod tests {
         let mut custom_resources = public_toggle;
         custom_resources.public_exposure = None;
         custom_resources.memory_limit_mb = Some(Some(1024));
-        assert!(cloud_update_contains_unsupported_settings(&custom_resources));
+        assert!(cloud_update_contains_unsupported_settings(
+            &custom_resources
+        ));
     }
 
     #[test]
