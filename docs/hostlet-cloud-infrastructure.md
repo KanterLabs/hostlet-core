@@ -9,20 +9,20 @@ Hostlet is open source, so this file must be safe to publish. Do not add secret 
 - Service: Hostlet Cloud private beta.
 - Public control plane: `https://hostlet.cloud`.
 - Managed app hosts: `*.hostlet.cloud`.
-- Current production release: `v0.4.0`.
-- Current release commit: `cabc67d`.
+- Current production release: `v0.5.0` after release promotion.
+- Current release commit: record the tagged release commit during deployment.
 - Production runtime model: tagged GHCR images, not build-on-VM containers.
 - Production image registry: `ghcr.io/shanekanterman04`.
-- Production compose project name: `hostlet-release`.
+- Production compose project name: `infra`.
 - Production mode: `HOSTLET_MODE=cloud`.
 
 Current release images:
 
 | Service | Image |
 | --- | --- |
-| API | `ghcr.io/shanekanterman04/hostlet-api:v0.4.0` |
-| Web | `ghcr.io/shanekanterman04/hostlet-web:v0.4.0` |
-| Managed agent | `ghcr.io/shanekanterman04/hostlet-agent:v0.4.0` |
+| API | `ghcr.io/shanekanterman04/hostlet-api:v0.5.0` |
+| Web | `ghcr.io/shanekanterman04/hostlet-web:v0.5.0` |
+| Managed agent | `ghcr.io/shanekanterman04/hostlet-agent:v0.5.0` |
 
 ## Public Topology
 
@@ -62,7 +62,7 @@ That path is gitignored. It should still avoid raw secret values; use presence, 
 
 1. Merge release-ready work to `main`.
 2. Wait for required CI gates to pass.
-3. Create a version tag such as `v0.4.1`.
+3. Create a version tag such as `v0.5.0`.
 4. Ensure the release publishes:
    - CLI binary and checksum.
    - `hostlet-release.json`.
@@ -70,7 +70,7 @@ That path is gitignored. It should still avoid raw secret values; use presence, 
 5. Verify the release manifest includes the intended image tag and non-empty image digests.
 6. On production, set `HOSTLET_IMAGE_TAG` to the new tag in the cloud environment file.
 7. Pull tagged images and restart the image-based production compose stack.
-8. Verify health, pricing, service state, and image tags before considering the deploy complete.
+8. Verify health, pricing, authenticated `/api/system/version`, service state, and image tags before considering the deploy complete.
 
 Production should not build application control-plane images on the VM for normal upgrades. The VM should consume tagged release images.
 
@@ -81,12 +81,18 @@ Run these checks after every cloud infrastructure or release change:
 ```bash
 curl -fsS https://hostlet.cloud/health
 curl -fsSI https://hostlet.cloud/pricing
+# With an operator browser session or copied session cookie:
+curl -fsS -H "cookie: <session-cookie>" https://hostlet.cloud/api/system/version
+# With the production operator token from the secret store:
+curl -fsS -H "x-hostlet-agent-token: <operator-token>" https://hostlet.cloud/api/system/operator-status
 ```
 
 Confirm:
 
 - `/health` returns `ok`.
 - `/pricing` returns HTTP `200`.
+- Authenticated `/api/system/version` reports the expected `currentVersion`.
+- Operator status reports the expected version, runtime mode, image tag/registry, database connectivity, server counts, health counts, and public app route count.
 - API, web, managed agent, Postgres, Caddy, and cloudflared are running.
 - API, web, and managed agent are using the expected `vX.Y.Z` GHCR images.
 - The release manifest image digests match the image refs.
@@ -108,6 +114,8 @@ Record exact backup paths, VM access notes, provider resource IDs, and rollback 
 
 | Date | Change |
 | --- | --- |
+| 2026-05-28 | Planned consolidated `v0.5.0` release includes the build packaging and cloud beta UX work that had been tracked through `0.6.0`. |
+| 2026-05-28 | Production confirmed on the GCP VM and updated to tagged GHCR release images for `v0.4.1`. |
 | 2026-05-27 | Production moved to tagged GHCR release images for `v0.4.0`; release metadata now records non-empty image digests. |
 
 ## Related Docs

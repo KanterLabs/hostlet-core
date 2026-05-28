@@ -4,7 +4,7 @@ import { use, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
 import { api, apiUrl } from "@/lib/api";
-import { AppShell, Notice, PageHeader, Panel, SectionHeader, StatusPill } from "@/components/ui";
+import { AppShell, DataList, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
 
 type Deployment = {
   id: string;
@@ -12,6 +12,17 @@ type Deployment = {
   status: string;
   commitSha?: string | null;
   failure?: string | null;
+  runtimeMetadata?: RuntimeMetadata | null;
+};
+
+type RuntimeMetadata = {
+  packagingStrategy?: string | null;
+  generatedDockerfile?: boolean | null;
+  detectedFramework?: string | null;
+  runtimeKind?: string | null;
+  packageManager?: string | null;
+  buildDurationMs?: number | null;
+  imageSizeBytes?: number | null;
 };
 
 type LogLine = {
@@ -117,6 +128,18 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                 />
               )}
               {deployment?.failure && <Notice tone="danger" description={deployment.failure} />}
+              {deployment?.runtimeMetadata && Object.keys(deployment.runtimeMetadata).length > 0 && (
+                <Panel>
+                  <SectionHeader title="Build metrics" />
+                  <DataList className="mt-4">
+                    <SummaryItem label="Packaging" value={deployment.runtimeMetadata.packagingStrategy || "auto"} />
+                    <SummaryItem label="Framework" value={deployment.runtimeMetadata.detectedFramework || "Repository Dockerfile"} />
+                    <SummaryItem label="Package manager" value={deployment.runtimeMetadata.packageManager || "n/a"} />
+                    <SummaryItem label="Build time" value={formatDuration(deployment.runtimeMetadata.buildDurationMs)} />
+                    <SummaryItem label="Image size" value={formatBytes(deployment.runtimeMetadata.imageSizeBytes)} />
+                  </DataList>
+                </Panel>
+              )}
               {socketMessage && <Notice tone={socketState === "reconnecting" ? "warning" : "neutral"} description={socketMessage} />}
             </aside>
 
@@ -140,6 +163,24 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
           </div>
     </AppShell>
   );
+}
+
+function formatDuration(ms?: number | null) {
+  if (!ms || ms < 0) return "n/a";
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function formatBytes(bytes?: number | null) {
+  if (!bytes || bytes < 0) return "n/a";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
 function socketLabel(state: "connecting" | "connected" | "reconnecting" | "closed") {

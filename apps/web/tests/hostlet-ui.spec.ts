@@ -15,7 +15,7 @@ test("cloud setup gates create actions until GitHub App and billing are ready", 
   await expect(page.getByRole("button", { name: /Create app/i })).toBeDisabled();
 });
 
-test("cloud app forms show managed 0.4.1 automation without editable controls", async ({ page }) => {
+test("cloud app forms show managed automation without editable controls", async ({ page }) => {
   await mockApi(page, { mode: "cloud", githubInstalled: true, billingActive: true });
 
   await page.goto("/apps/new");
@@ -23,6 +23,7 @@ test("cloud app forms show managed 0.4.1 automation without editable controls", 
   await expect(page.getByText(/CPU limit/i)).toHaveCount(0);
   await expect(page.getByText(/Memory limit/i)).toHaveCount(0);
   await expect(page.getByLabel("Runtime")).not.toContainText("Docker Compose");
+  await expect(page.getByLabel("Package with")).toContainText("Hostlet optimized Dockerfile");
   await expect(page.getByText("Publish app URL")).toHaveCount(0);
   await expect(page.getByText("Auto redeploy on push")).toBeVisible();
 
@@ -62,6 +63,7 @@ test("self-hosted app forms expose local controls", async ({ page }) => {
   await expect(page.getByText("Publish app URL")).toBeVisible();
   await expect(page.getByText("Auto redeploy")).toBeVisible();
   await expect(page.getByLabel("Runtime")).toContainText("Docker Compose");
+  await expect(page.getByLabel("Package with")).toContainText("Repository Dockerfile");
 
   await page.goto("/apps/smoke-app");
   await expect(page.getByText("Automation")).toBeVisible();
@@ -75,6 +77,8 @@ test("deployment logs remain readable after success", async ({ page }) => {
 
   await expect(page.getByRole("heading", { name: "Deployment logs" })).toBeVisible();
   await expect(page.getByText("Deployment succeeded. Logs remain available here.")).toBeVisible();
+  await expect(page.getByText("Build metrics")).toBeVisible();
+  await expect(page.getByText("142.5 MB")).toBeVisible();
   await expect(page.locator("pre")).toContainText("stdout: Health check passed.");
 });
 
@@ -106,6 +110,7 @@ async function mockApi(page: Page, options: MockOptions) {
     runtimeKind: "single",
     hostletConfigPath: "hostlet.yml",
     runtimeConfig: {},
+    packagingStrategy: "generated",
     rootDirectory: ".",
     installCommand: null,
     buildCommand: null,
@@ -130,6 +135,15 @@ async function mockApi(page: Page, options: MockOptions) {
       failure: null,
       startedAt: now,
       finishedAt: now,
+      runtimeMetadata: {
+        packagingStrategy: "generated",
+        generatedDockerfile: true,
+        detectedFramework: "Next.js",
+        runtimeKind: "node",
+        packageManager: "pnpm",
+        buildDurationMs: 293000,
+        imageSizeBytes: 149422080,
+      },
     },
     currentDeployment: {
       status: "success",
@@ -223,7 +237,7 @@ async function mockApi(page: Page, options: MockOptions) {
     if (path === "/api/apps/smoke-app/health") return json(app.health);
     if (path === "/api/apps/smoke-app/health/events") return json([]);
     if (path === "/api/deployments/smoke-deployment") {
-      return json({ id: "smoke-deployment", appId: "smoke-app", status: "success", commitSha: "1234567890abcdef", failure: null });
+      return json({ id: "smoke-deployment", appId: "smoke-app", status: "success", commitSha: "1234567890abcdef", failure: null, runtimeMetadata: app.latestDeployment.runtimeMetadata });
     }
     if (path === "/api/deployments/smoke-deployment/logs") {
       return json([
@@ -231,7 +245,7 @@ async function mockApi(page: Page, options: MockOptions) {
         { stream: "stdout", line: "Health check passed." },
       ]);
     }
-    if (path === "/api/system/version") return json({ currentVersion: "0.4.1" });
+    if (path === "/api/system/version") return json({ currentVersion: "0.5.0" });
     if (path === "/api/health/summary") return json({ healthy: 1, degraded: 0, unhealthy: 0, unknown: 0 });
     if (path === "/api/audit-events") return json([]);
     if (path === "/api/agent-jobs") return json([]);

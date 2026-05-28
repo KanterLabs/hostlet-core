@@ -83,6 +83,7 @@ type App = {
   healthPath?: string | null;
   runtimeKind?: string | null;
   hostletConfigPath?: string | null;
+  packagingStrategy?: string | null;
   rootDirectory?: string | null;
   installCommand?: string | null;
   buildCommand?: string | null;
@@ -93,7 +94,7 @@ type App = {
   publicExposure?: boolean | null;
   autoDeploy?: boolean | null;
   server?: { id: string; name: string; kind: string; status: string; publicIp?: string | null; lastSeenAt?: string | null } | null;
-  latestDeployment?: { id: string; status?: string | null; failure?: string | null; commitSha?: string | null; startedAt?: string | null; finishedAt?: string | null } | null;
+  latestDeployment?: { id: string; status?: string | null; failure?: string | null; commitSha?: string | null; startedAt?: string | null; finishedAt?: string | null; runtimeMetadata?: RuntimeMetadata | null } | null;
   currentDeployment?: { status: string; publishedPort?: number | null; finishedAt?: string | null } | null;
   latestWebhook?: {
     status: string;
@@ -116,6 +117,7 @@ type SettingsForm = {
   health_path: string;
   runtime_kind: string;
   hostlet_config_path: string;
+  packaging_strategy: string;
   root_directory: string;
   install_command: string;
   build_command: string;
@@ -125,6 +127,16 @@ type SettingsForm = {
   cpu_limit: string;
   public_exposure: boolean;
   auto_deploy: boolean;
+};
+
+type RuntimeMetadata = {
+  packagingStrategy?: string | null;
+  generatedDockerfile?: boolean | null;
+  detectedFramework?: string | null;
+  runtimeKind?: string | null;
+  packageManager?: string | null;
+  buildDurationMs?: number | null;
+  imageSizeBytes?: number | null;
 };
 
 type SessionPayload = {
@@ -142,6 +154,7 @@ const emptySettings: SettingsForm = {
   health_path: "/",
   runtime_kind: "single",
   hostlet_config_path: "hostlet.yml",
+  packaging_strategy: "auto",
   root_directory: ".",
   install_command: "",
   build_command: "",
@@ -237,6 +250,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
         health_path: loaded.healthPath || "/",
         runtime_kind: loaded.runtimeKind || "single",
         hostlet_config_path: loaded.hostletConfigPath || "hostlet.yml",
+        packaging_strategy: loaded.packagingStrategy || "auto",
         root_directory: loaded.rootDirectory || ".",
         install_command: loaded.installCommand || "",
         build_command: loaded.buildCommand || "",
@@ -320,6 +334,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
       const payload: Record<string, unknown> = {
         health_path: settings.health_path,
         root_directory: settings.root_directory || ".",
+        packaging_strategy: settings.packaging_strategy,
         install_command: settings.install_command.trim() || null,
         build_command: settings.build_command.trim() || null,
         start_command: settings.start_command.trim() || null,
@@ -610,6 +625,11 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   )}
                   {cloud && <SummaryItem label="Runtime" value="Single-service Dockerfile or generated Node app" />}
                   {!cloud && settings.runtime_kind === "compose" && <Field label="Hostlet config" value={settings.hostlet_config_path} onChange={(value) => setSettings({ ...settings, hostlet_config_path: value })} />}
+                  <SelectField label="Package with" value={settings.packaging_strategy} onChange={(value) => setSettings({ ...settings, packaging_strategy: value })}>
+                    <option value="auto">Auto</option>
+                    <option value="dockerfile">Repository Dockerfile</option>
+                    <option value="generated">Hostlet optimized Dockerfile</option>
+                  </SelectField>
                   <Field label="Root directory" value={settings.root_directory} onChange={(value) => setSettings({ ...settings, root_directory: value })} />
                   <Field label="Container port" type="number" value={settings.container_port} onChange={(value) => setSettings({ ...settings, container_port: value })} />
                   <Field label="Install command" value={settings.install_command} onChange={(value) => setSettings({ ...settings, install_command: value })} />
@@ -713,7 +733,7 @@ function isActiveDeploy(status?: string | null) {
 function rollbackDisabledReason(app: App | null, active: boolean) {
   if (!app) return "App details are still loading.";
   if (active) return "Wait for the active deployment to finish before rolling back.";
-  if (app.runtimeKind === "compose") return "Compose rollback is disabled for Hostlet 0.4.1. Redeploy the target revision instead.";
+  if (app.runtimeKind === "compose") return "Compose rollback is disabled for Hostlet 0.5.0. Redeploy the target revision instead.";
   if (!app.currentDeploymentId) return "Deploy this app once before rolling back.";
   return "";
 }

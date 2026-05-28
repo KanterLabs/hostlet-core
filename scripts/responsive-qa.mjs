@@ -142,6 +142,7 @@ async function installApiMocks(page, mode) {
     runtimeKind: "single",
     hostletConfigPath: "hostlet.yml",
     runtimeConfig: {},
+    packagingStrategy: "generated",
     rootDirectory: ".",
     installCommand: null,
     buildCommand: null,
@@ -165,6 +166,15 @@ async function installApiMocks(page, mode) {
       failure: null,
       startedAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
+      runtimeMetadata: {
+        packagingStrategy: "generated",
+        generatedDockerfile: true,
+        detectedFramework: "Next.js",
+        runtimeKind: "node",
+        packageManager: "pnpm",
+        buildDurationMs: 293000,
+        imageSizeBytes: 149422080,
+      },
     },
     currentDeployment: {
       status: "success",
@@ -224,7 +234,7 @@ async function installApiMocks(page, mode) {
           name: "This machine",
           kind: "local",
           status: "online",
-          version: "0.4.1",
+          version: "0.5.0",
           lastSeenAt: new Date().toISOString(),
         },
       ]);
@@ -253,7 +263,7 @@ async function installApiMocks(page, mode) {
     if (path === "/api/apps/smoke-app/health") return json(app.health);
     if (path === "/api/apps/smoke-app/health/events") return json([]);
     if (path === "/api/deployments/smoke-deployment") {
-      return json({ id: "smoke-deployment", appId: "smoke-app", status: "success", commitSha: "1234567890abcdef", failure: null });
+      return json({ id: "smoke-deployment", appId: "smoke-app", status: "success", commitSha: "1234567890abcdef", failure: null, runtimeMetadata: app.latestDeployment.runtimeMetadata });
     }
     if (path === "/api/deployments/smoke-deployment/logs") {
       return json([
@@ -266,10 +276,10 @@ async function installApiMocks(page, mode) {
     if (path === "/api/agent-jobs") return json([]);
     if (path === "/api/system/version") {
       return json({
-        currentVersion: "0.4.1",
+        currentVersion: "0.5.0",
         updateChecksEnabled: true,
         update: {
-          latestVersion: "0.4.1",
+          latestVersion: "0.5.0",
           updateAvailable: false,
           checkedAt: new Date().toISOString(),
         },

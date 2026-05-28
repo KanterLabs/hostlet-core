@@ -64,7 +64,14 @@ pub async fn get_deployment(
     .fetch_optional(&state.db)
     .await;
     match row {
-        Ok(Some(r)) => Json(json!({"id": r.get::<Uuid,_>("id"), "appId": r.get::<Uuid,_>("app_id"), "status": r.get::<String,_>("status"), "commitSha": r.get::<String,_>("commit_sha"), "failure": r.get::<Option<String>,_>("failure_summary")})).into_response(),
+        Ok(Some(r)) => Json(json!({
+            "id": r.get::<Uuid,_>("id"),
+            "appId": r.get::<Uuid,_>("app_id"),
+            "status": r.get::<String,_>("status"),
+            "commitSha": r.get::<String,_>("commit_sha"),
+            "failure": r.get::<Option<String>,_>("failure_summary"),
+            "runtimeMetadata": r.try_get::<serde_json::Value,_>("runtime_metadata").unwrap_or_else(|_| json!({}))
+        })).into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -164,7 +171,7 @@ pub async fn create_and_send_deploy(
 ) -> anyhow::Result<Uuid> {
     cloud_compute_allowed_for_user(state, user_id).await?;
     ensure_no_active_deployment(state, app_id).await?;
-    let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
+    let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
         .bind(app_id).bind(user_id).fetch_one(&state.db).await?;
     let server_id: Uuid = app.get("server_id");
     let runtime_kind = app.get::<String, _>("runtime_kind");
@@ -204,6 +211,7 @@ pub async fn create_and_send_deploy(
         "runtime_kind": runtime_kind,
         "hostlet_config_path": app.get::<String,_>("hostlet_config_path"),
         "runtime_config": app.get::<serde_json::Value,_>("runtime_config"),
+        "packaging_strategy": app.get::<String,_>("packaging_strategy"),
         "root_directory": app.get::<String,_>("root_directory"),
         "install_command": app.get::<Option<String>,_>("install_command"),
         "build_command": app.get::<Option<String>,_>("build_command"),
@@ -233,7 +241,7 @@ async fn create_and_send_rollback(
     ensure_no_active_deployment(state, app_id).await?;
     let app = sqlx::query("SELECT server_id,current_deployment_id,domain,container_port,runtime_kind FROM apps WHERE id=$1 AND user_id=$2").bind(app_id).bind(user_id).fetch_one(&state.db).await?;
     if !rollback_supported_for_runtime(&app.get::<String, _>("runtime_kind")) {
-        anyhow::bail!("Compose rollback is not supported in Hostlet 0.4.1; redeploy the target revision instead");
+        anyhow::bail!("Compose rollback is not supported in Hostlet 0.5.0; redeploy the target revision instead");
     }
     let current: Option<Uuid> = app.get("current_deployment_id");
     let prev = sqlx::query("SELECT id,image_tag,container_name,published_port FROM deployments WHERE app_id=$1 AND status='success' AND ($2::uuid IS NULL OR id <> $2) ORDER BY finished_at DESC LIMIT 1")

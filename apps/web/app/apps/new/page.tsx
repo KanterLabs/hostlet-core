@@ -35,6 +35,11 @@ type RepoInspection = {
   healthPath: string;
   hostletConfigPath: string;
   runtimeConfig: Record<string, unknown>;
+  packagingStrategy?: string;
+  packagingOptions?: string[];
+  recommendedPackagingStrategy?: string;
+  detectedFramework?: string;
+  packageManager?: string;
   env: InspectEnv[];
   warnings: string[];
   summary: string;
@@ -58,6 +63,7 @@ type CreateAppForm = {
   public_exposure: boolean;
   auto_deploy: boolean;
   runtime_config: Record<string, unknown>;
+  packaging_strategy: string;
 };
 
 export default function CreateApp() {
@@ -81,6 +87,7 @@ export default function CreateApp() {
     public_exposure: false,
     auto_deploy: false,
     runtime_config: {} as Record<string, unknown>,
+    packaging_strategy: "auto",
   });
   const [inspection, setInspection] = useState<RepoInspection | null>(null);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
@@ -170,6 +177,7 @@ export default function CreateApp() {
         health_path: result.healthPath || current.health_path,
         hostlet_config_path: result.hostletConfigPath || current.hostlet_config_path,
         runtime_config: result.runtimeConfig || {},
+        packaging_strategy: result.recommendedPackagingStrategy || result.packagingStrategy || current.packaging_strategy,
       }));
       setMessage(result.deployable ? "Review the inferred runtime, then create and deploy." : "Hostlet could not infer a deployable runtime.");
     } catch (error) {
@@ -299,6 +307,12 @@ export default function CreateApp() {
                       {inspection.deployable ? <CheckCircle2 size={16} className="text-action" /> : <AlertTriangle size={16} className="text-red-700" />}
                       {inspection.summary}
                     </div>
+                    {(inspection.detectedFramework || inspection.packageManager) && (
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        <SummaryItem label="Framework" value={inspection.detectedFramework || "Custom Dockerfile"} />
+                        <SummaryItem label="Package manager" value={inspection.packageManager || "n/a"} />
+                      </div>
+                    )}
                     {inspection.warnings.length > 0 && (
                       <div className="mt-3 space-y-2">
                         {inspection.warnings.map((warning) => (
@@ -365,6 +379,11 @@ export default function CreateApp() {
                   <SelectField label="Runtime" value={form.runtime_kind} onChange={(value) => setForm({ ...form, runtime_kind: value })}>
                     <option value="single">Dockerfile or Node</option>
                     {!cloud && <option value="compose">Docker Compose</option>}
+                  </SelectField>
+                  <SelectField label="Package with" value={form.packaging_strategy} onChange={(value) => setForm({ ...form, packaging_strategy: value })}>
+                    <option value="auto">Auto</option>
+                    <option value="dockerfile">Repository Dockerfile</option>
+                    <option value="generated">Hostlet optimized Dockerfile</option>
                   </SelectField>
                   {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setForm({ ...form, hostlet_config_path: value })} placeholder="hostlet.yml" />}
                   {!cloud && (

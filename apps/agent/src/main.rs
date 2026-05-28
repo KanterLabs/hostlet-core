@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::{Output, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -443,20 +443,57 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         .await;
     }
     let build = prepare_build(&cfg, deployment_id, &project_dir, port, &p).await?;
-    run_log(
-        &cfg,
-        deployment_id,
-        "docker",
-        &[
-            "build",
-            "-f",
-            build.dockerfile.to_str().unwrap(),
-            "-t",
+    if build.generated {
+        tokio::fs::write(project_dir.join(".dockerignore"), generated_dockerignore()).await?;
+    }
+    let build_started = Instant::now();
+    if docker_buildx_available().await {
+        let cache_root = cfg.workdir.join("build-cache").join(&app_name);
+        let cache_next = cfg
+            .workdir
+            .join("build-cache")
+            .join(format!("{app_name}-{deployment_id}"));
+        tokio::fs::create_dir_all(&cache_root).await?;
+        tokio::fs::create_dir_all(&cache_next).await?;
+        let cache_from = format!("type=local,src={}", cache_root.to_string_lossy());
+        let cache_to = format!("type=local,dest={},mode=max", cache_next.to_string_lossy());
+        let args = buildx_args(
             &image,
+            build.dockerfile.to_str().unwrap(),
             build.context.to_str().unwrap(),
-        ],
-    )
-    .await?;
+            &cache_from,
+            &cache_to,
+        );
+        run_log(&cfg, deployment_id, "docker", &args).await?;
+        let _ = tokio::fs::remove_dir_all(&cache_root).await;
+        let _ = tokio::fs::rename(&cache_next, &cache_root).await;
+    } else {
+        log(
+            &cfg,
+            deployment_id,
+            "stdout",
+            "Docker BuildKit buildx is unavailable; falling back to docker build without local cache.",
+        )
+        .await;
+        let args = docker_build_args(
+            &image,
+            build.dockerfile.to_str().unwrap(),
+            build.context.to_str().unwrap(),
+        );
+        run_log(&cfg, deployment_id, "docker", &args).await?;
+    }
+    let build_duration_ms = build_started.elapsed().as_millis();
+    let image_size = image_size_bytes(&image).await.ok();
+    if let Some(size) = image_size {
+        log(
+            &cfg,
+            deployment_id,
+            "stdout",
+            &format!("Built image size: {size} bytes."),
+        )
+        .await;
+    }
+    let runtime_metadata = build_runtime_metadata(&build, build_duration_ms, image_size);
     status(&cfg, deployment_id, "starting", None).await;
     let container = format!("hostlet-{app_name}-{deployment_id}");
     let port_map = docker_port_map(port as u16);
@@ -585,6 +622,7 @@ async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
             container: Some(&container),
             local_url: local_url.as_deref(),
             published_port: Some(internal_port),
+            runtime_metadata: Some(runtime_metadata),
             ..StatusDetails::default()
         },
     )
@@ -1211,6 +1249,41 @@ struct BuildPlan {
     context: PathBuf,
     dockerfile: PathBuf,
     generated: bool,
+    packaging_strategy: PackagingStrategy,
+    detected_framework: Option<Framework>,
+    package_manager: Option<PackageManager>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackagingStrategy {
+    Auto,
+    Dockerfile,
+    Generated,
+}
+
+impl PackagingStrategy {
+    fn from_payload(payload: &Value) -> anyhow::Result<Self> {
+        match payload
+            .get("packaging_strategy")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("auto")
+        {
+            "auto" => Ok(Self::Auto),
+            "dockerfile" => Ok(Self::Dockerfile),
+            "generated" => Ok(Self::Generated),
+            _ => bail!("packaging strategy must be auto, dockerfile, or generated"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dockerfile => "dockerfile",
+            Self::Generated => "generated",
+        }
+    }
 }
 
 async fn prepare_build(
@@ -1220,25 +1293,33 @@ async fn prepare_build(
     port: i64,
     payload: &Value,
 ) -> anyhow::Result<BuildPlan> {
+    let packaging_strategy = PackagingStrategy::from_payload(payload)?;
     let root_dockerfile = checkout.join("Dockerfile");
-    if tokio::fs::try_exists(&root_dockerfile).await? {
+    let has_dockerfile = tokio::fs::try_exists(&root_dockerfile).await?;
+    if packaging_strategy == PackagingStrategy::Dockerfile && !has_dockerfile {
+        bail!("packaging strategy dockerfile requires a Dockerfile at the app root");
+    }
+    if has_dockerfile && packaging_strategy != PackagingStrategy::Generated {
         log(
             cfg,
             deployment_id,
             "stdout",
-            "Detected Dockerfile at repo root. Using Docker build mode.",
+            "Detected Dockerfile at app root. Using repository Dockerfile packaging.",
         )
         .await;
         return Ok(BuildPlan {
             context: checkout.to_path_buf(),
             dockerfile: root_dockerfile,
             generated: false,
+            packaging_strategy: PackagingStrategy::Dockerfile,
+            detected_framework: None,
+            package_manager: None,
         });
     }
 
     let package_json = checkout.join("package.json");
     if !tokio::fs::try_exists(&package_json).await? {
-        bail!("No Dockerfile or package.json found");
+        bail!("No usable Dockerfile or package.json found");
     }
 
     let contents = tokio::fs::read_to_string(&package_json).await?;
@@ -1297,7 +1378,7 @@ async fn prepare_build(
         deployment_id,
         "stdout",
         &format!(
-            "No Dockerfile found. Detected {} app. Generating Hostlet Dockerfile with {}.",
+            "Detected {} app. Generating optimized Hostlet Dockerfile with {}.",
             framework.label(),
             package_manager.label()
         ),
@@ -1315,6 +1396,7 @@ async fn prepare_build(
             build_command.as_deref(),
             &start_command,
             port,
+            framework,
         ),
     )
     .await?;
@@ -1322,6 +1404,9 @@ async fn prepare_build(
         context: checkout.to_path_buf(),
         dockerfile,
         generated: true,
+        packaging_strategy: PackagingStrategy::Generated,
+        detected_framework: Some(framework),
+        package_manager: Some(package_manager),
     })
 }
 
@@ -1382,7 +1467,7 @@ impl PackageManager {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Framework {
     Next,
     Vite,
@@ -1403,6 +1488,13 @@ impl Framework {
             Self::Remix => "Remix",
             Self::SvelteKit => "SvelteKit",
             Self::Node => "Node",
+        }
+    }
+
+    fn runtime_kind(self) -> &'static str {
+        match self {
+            Self::Vite | Self::Astro | Self::SvelteKit => "static",
+            Self::Next | Self::Nuxt | Self::Remix | Self::Node => "node",
         }
     }
 }
@@ -1481,38 +1573,186 @@ fn generated_node_dockerfile(
     build_command: Option<&str>,
     start_command: &str,
     port: i64,
+    framework: Framework,
 ) -> String {
     let build_line = build_command
         .map(|command| format!("RUN {command}\n"))
         .unwrap_or_default();
     let install = install_command.unwrap_or_else(|| pm.install_command());
-    let start_line = if start_command == "__hostlet_static" {
-        "CMD [\"npx\", \"serve\", \"-s\", \"dist\", \"-l\", \"tcp://0.0.0.0:${PORT}\"]".to_string()
-    } else {
-        format!(
-            "CMD [\"sh\", \"-lc\", {}]",
-            serde_json::to_string(start_command).expect("string serialization cannot fail")
-        )
+    if start_command == "__hostlet_static" {
+        return format!(
+            "FROM node:22-alpine AS deps\n\
+             WORKDIR /app\n\
+             COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\n\
+             RUN {install}\n\
+             \n\
+             FROM node:22-alpine AS builder\n\
+             WORKDIR /app\n\
+             COPY --from=deps /app/node_modules ./node_modules\n\
+             COPY . .\n\
+             {build_line}\
+             \n\
+             FROM node:22-alpine AS runner\n\
+             WORKDIR /app\n\
+             RUN npm install -g serve@14.2.5 && addgroup -S hostlet && adduser -S hostlet -G hostlet\n\
+             COPY --from=builder --chown=hostlet:hostlet /app/dist ./dist\n\
+             USER hostlet\n\
+             ENV NODE_ENV=production\n\
+             ENV PORT={port}\n\
+             EXPOSE {port}\n\
+             CMD [\"sh\", \"-lc\", \"serve -s dist -l tcp://0.0.0.0:${{PORT}}\"]\n",
+            install = install,
+            port = port,
+            build_line = build_line
+        );
+    }
+    let prune_line = match pm {
+        PackageManager::Npm => "RUN npm prune --omit=dev\n",
+        PackageManager::Pnpm => {
+            "RUN corepack enable && corepack prepare pnpm@10.33.2 --activate && pnpm prune --prod\n"
+        }
+        PackageManager::Yarn => {
+            "RUN corepack enable && yarn install --production --ignore-scripts --prefer-offline\n"
+        }
     };
+    let runner_copy = if framework == Framework::Next {
+        "COPY --from=builder --chown=hostlet:hostlet /app/.next ./.next\n\
+         COPY --from=builder --chown=hostlet:hostlet /app/public ./public\n"
+    } else if framework == Framework::Nuxt {
+        "COPY --from=builder --chown=hostlet:hostlet /app/.output ./.output\n"
+    } else {
+        "COPY --from=builder --chown=hostlet:hostlet /app .\n"
+    };
+    let effective_start = if framework == Framework::Nuxt && start_command == "npm run start" {
+        "node .output/server/index.mjs"
+    } else {
+        start_command
+    };
+    let start_line = format!(
+        "CMD [\"sh\", \"-lc\", {}]",
+        serde_json::to_string(effective_start).expect("string serialization cannot fail")
+    );
     format!(
-        "FROM node:22-alpine\n\
+        "FROM node:22-alpine AS deps\n\
          WORKDIR /app\n\
          COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\n\
          RUN {install}\n\
+         \n\
+         FROM node:22-alpine AS builder\n\
+         WORKDIR /app\n\
+         COPY --from=deps /app/node_modules ./node_modules\n\
          COPY . .\n\
-         RUN addgroup -S hostlet && adduser -S hostlet -G hostlet && chown -R hostlet:hostlet /app\n\
+         {build_line}\
+         RUN mkdir -p public\n\
+         {prune_line}\
+         \n\
+         FROM node:22-alpine AS runner\n\
+         WORKDIR /app\n\
+         RUN addgroup -S hostlet && adduser -S hostlet -G hostlet\n\
+         COPY --from=builder --chown=hostlet:hostlet /app/package.json ./package.json\n\
+         COPY --from=builder --chown=hostlet:hostlet /app/node_modules ./node_modules\n\
+         {runner_copy}\
          USER hostlet\n\
          ENV NODE_ENV=production\n\
          ENV NPM_CONFIG_CACHE=/tmp/.npm\n\
          ENV PORT={port}\n\
-         {build_line}\
          EXPOSE {port}\n\
          {start_line}\n",
         install = install,
         port = port,
         build_line = build_line,
+        prune_line = prune_line,
+        runner_copy = runner_copy,
         start_line = start_line
     )
+}
+
+fn generated_dockerignore() -> &'static str {
+    ".git\n\
+     .next/cache\n\
+     .nuxt\n\
+     .output\n\
+     dist\n\
+     build\n\
+     coverage\n\
+     node_modules\n\
+     npm-debug.log*\n\
+     pnpm-debug.log*\n\
+     yarn-debug.log*\n\
+     .DS_Store\n"
+}
+
+fn buildx_args<'a>(
+    image: &'a str,
+    dockerfile: &'a str,
+    context: &'a str,
+    cache_from: &'a str,
+    cache_to: &'a str,
+) -> Vec<&'a str> {
+    vec![
+        "buildx",
+        "build",
+        "--load",
+        "--cache-from",
+        cache_from,
+        "--cache-to",
+        cache_to,
+        "-f",
+        dockerfile,
+        "-t",
+        image,
+        context,
+    ]
+}
+
+fn docker_build_args<'a>(image: &'a str, dockerfile: &'a str, context: &'a str) -> Vec<&'a str> {
+    vec!["build", "-f", dockerfile, "-t", image, context]
+}
+
+async fn docker_buildx_available() -> bool {
+    command_output("docker", &["buildx", "version"], Duration::from_secs(30))
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+async fn image_size_bytes(image: &str) -> anyhow::Result<i64> {
+    let output = command_output(
+        "docker",
+        &["image", "inspect", "-f", "{{.Size}}", image],
+        Duration::from_secs(120),
+    )
+    .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "docker image inspect exited with {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    let value = String::from_utf8(output.stdout)
+        .context("docker image inspect output was not valid UTF-8")?;
+    value
+        .trim()
+        .parse::<i64>()
+        .context("docker image inspect size was not an integer")
+}
+
+fn build_runtime_metadata(
+    build: &BuildPlan,
+    build_duration_ms: u128,
+    image_size_bytes: Option<i64>,
+) -> Value {
+    json!({
+        "packagingStrategy": build.packaging_strategy.label(),
+        "generatedDockerfile": build.generated,
+        "detectedFramework": build.detected_framework.map(|framework| framework.label()),
+        "runtimeKind": build.detected_framework.map(|framework| framework.runtime_kind()),
+        "packageManager": build.package_manager.map(|pm| pm.label()),
+        "buildDurationMs": build_duration_ms,
+        "imageSizeBytes": image_size_bytes,
+    })
 }
 
 async fn stream_lines<R: tokio::io::AsyncRead + Unpin>(
@@ -2940,10 +3180,56 @@ mod tests {
             Some("npm run build"),
             "npm run start",
             3000,
+            Framework::Next,
         );
         assert!(dockerfile.contains("ENV PORT=3000"));
         assert!(dockerfile.contains("npm run build"));
         assert!(dockerfile.contains("npm run start"));
+        assert!(dockerfile.contains("FROM node:22-alpine AS deps"));
+        assert!(dockerfile.contains("npm prune --omit=dev"));
+    }
+
+    #[test]
+    fn packaging_strategy_defaults_to_auto() {
+        assert!(matches!(
+            PackagingStrategy::from_payload(&serde_json::json!({})).unwrap(),
+            PackagingStrategy::Auto
+        ));
+        assert!(matches!(
+            PackagingStrategy::from_payload(&serde_json::json!({"packaging_strategy":"generated"}))
+                .unwrap(),
+            PackagingStrategy::Generated
+        ));
+    }
+
+    #[test]
+    fn buildx_args_use_local_cache_and_load() {
+        let args = buildx_args(
+            "hostlet/app:test",
+            "/tmp/Dockerfile",
+            "/tmp/app",
+            "type=local,src=/tmp/cache",
+            "type=local,dest=/tmp/cache-next,mode=max",
+        );
+        assert!(args.contains(&"buildx"));
+        assert!(args.contains(&"--load"));
+        assert!(args.contains(&"--cache-from"));
+        assert!(args.contains(&"--cache-to"));
+    }
+
+    #[test]
+    fn generated_static_dockerfile_uses_runtime_stage() {
+        let dockerfile = generated_node_dockerfile(
+            PackageManager::Pnpm,
+            None,
+            Some("pnpm run build"),
+            "__hostlet_static",
+            4173,
+            Framework::Vite,
+        );
+        assert!(dockerfile.contains("FROM node:22-alpine AS runner"));
+        assert!(dockerfile.contains("serve -s dist"));
+        assert!(dockerfile.contains("ENV PORT=4173"));
     }
 
     #[test]

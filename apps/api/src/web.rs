@@ -33,6 +33,7 @@ pub struct CreateApp {
     runtime_kind: Option<String>,
     hostlet_config_path: Option<String>,
     runtime_config: Option<serde_json::Value>,
+    packaging_strategy: Option<String>,
     root_directory: Option<String>,
     install_command: Option<String>,
     build_command: Option<String>,
@@ -57,6 +58,7 @@ pub struct UpdateApp {
     runtime_kind: Option<String>,
     hostlet_config_path: Option<String>,
     runtime_config: Option<serde_json::Value>,
+    packaging_strategy: Option<String>,
     health_path: Option<String>,
     root_directory: Option<String>,
     install_command: Option<Option<String>>,
@@ -609,6 +611,7 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           a.runtime_kind,
           a.hostlet_config_path,
           a.runtime_config,
+          a.packaging_strategy,
           a.install_command,
           a.build_command,
           a.start_command,
@@ -631,6 +634,7 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
           latest.failure_summary AS latest_failure_summary,
           latest.started_at AS latest_started_at,
           latest.finished_at AS latest_finished_at,
+          latest.runtime_metadata AS latest_runtime_metadata,
           current.status AS current_deployment_status,
           current.published_port AS current_published_port,
           current.finished_at AS current_deployment_finished_at,
@@ -652,7 +656,7 @@ pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> imp
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN LATERAL (
-          SELECT id,status,commit_sha,failure_summary,started_at,finished_at
+          SELECT id,status,commit_sha,failure_summary,started_at,finished_at,runtime_metadata
           FROM deployments
           WHERE app_id = a.id
           ORDER BY created_at DESC
@@ -703,6 +707,7 @@ pub async fn get_app(
           a.runtime_kind,
           a.hostlet_config_path,
           a.runtime_config,
+          a.packaging_strategy,
           a.install_command,
           a.build_command,
           a.start_command,
@@ -725,6 +730,7 @@ pub async fn get_app(
           latest.failure_summary AS latest_failure_summary,
           latest.started_at AS latest_started_at,
           latest.finished_at AS latest_finished_at,
+          latest.runtime_metadata AS latest_runtime_metadata,
           current.status AS current_deployment_status,
           current.published_port AS current_published_port,
           current.finished_at AS current_deployment_finished_at,
@@ -746,7 +752,7 @@ pub async fn get_app(
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN LATERAL (
-          SELECT id,status,commit_sha,failure_summary,started_at,finished_at
+          SELECT id,status,commit_sha,failure_summary,started_at,finished_at,runtime_metadata
           FROM deployments
           WHERE app_id = a.id
           ORDER BY created_at DESC
@@ -1790,6 +1796,12 @@ pub async fn operator_status(
     let servers = sqlx::query("SELECT status,count(*) AS count FROM servers GROUP BY status")
         .fetch_all(&state.db)
         .await;
+    let route_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM apps WHERE public_exposure=true AND current_deployment_id IS NOT NULL",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
     let mut server_counts = serde_json::json!({});
     if let Ok(rows) = servers {
         for row in rows {
@@ -1800,6 +1812,19 @@ pub async fn operator_status(
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "mode": state.mode.as_str(),
+        "service": {
+            "imageTag": std::env::var("HOSTLET_IMAGE_TAG").ok(),
+            "revision": std::env::var("HOSTLET_IMAGE_REVISION")
+                .ok()
+                .or_else(|| option_env!("HOSTLET_BUILD_REVISION").map(str::to_string)),
+            "registry": std::env::var("HOSTLET_IMAGE_REGISTRY").ok(),
+        },
+        "database": {
+            "connected": true,
+        },
+        "routing": {
+            "publicAppRouteCount": route_count,
+        },
         "health": health,
         "servers": server_counts,
     }))
@@ -2034,6 +2059,10 @@ pub async fn create_app(
     if let Err(message) = clean_runtime_config(&runtime_config) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
+    let packaging_strategy = match clean_packaging_strategy(body.packaging_strategy.as_deref()) {
+        Ok(value) => value,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
     let server_id = if state.mode == HostletMode::Cloud {
         Uuid::parse_str(
             &std::env::var("LOCAL_SERVER_ID")
@@ -2154,9 +2183,9 @@ pub async fn create_app(
                 .into_response();
         }
     }
-    let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id")
+    let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id")
         .bind(user_id).bind(server_id).bind(app_name).bind(repo_full_name).bind(branch).bind(body.container_port).bind(health_path).bind(&domain)
-        .bind(runtime_kind).bind(hostlet_config_path).bind(runtime_config).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
+        .bind(runtime_kind).bind(hostlet_config_path).bind(runtime_config).bind(packaging_strategy).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
         .bind(if state.mode == HostletMode::Cloud { Some(512) } else { body.memory_limit_mb })
         .bind(if state.mode == HostletMode::Cloud { Some(0.5) } else { body.cpu_limit })
         .bind(public_exposure).bind(auto_deploy)
@@ -2368,6 +2397,13 @@ pub async fn update_app(
         }
         None => None,
     };
+    let packaging_strategy = match body.packaging_strategy.as_deref() {
+        Some(value) => Some(match clean_packaging_strategy(Some(value)) {
+            Ok(value) => value,
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        }),
+        None => None,
+    };
     let install_command = match body.install_command {
         Some(command) => Some(match command {
             Some(value) => match clean_command(Some(value)) {
@@ -2509,6 +2545,13 @@ pub async fn update_app(
         if let Some(runtime_config) = runtime_config {
             sqlx::query("UPDATE apps SET runtime_config=$1, updated_at=now() WHERE id=$2")
                 .bind(runtime_config)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(packaging_strategy) = packaging_strategy {
+            sqlx::query("UPDATE apps SET packaging_strategy=$1, updated_at=now() WHERE id=$2")
+                .bind(packaging_strategy)
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
@@ -3470,6 +3513,7 @@ fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
         "runtimeKind": r.try_get::<String,_>("runtime_kind").unwrap_or_else(|_| "single".into()),
         "hostletConfigPath": r.try_get::<String,_>("hostlet_config_path").unwrap_or_else(|_| "hostlet.yml".into()),
         "runtimeConfig": r.try_get::<serde_json::Value,_>("runtime_config").unwrap_or_else(|_| serde_json::json!({})),
+        "packagingStrategy": r.try_get::<String,_>("packaging_strategy").unwrap_or_else(|_| "auto".into()),
         "rootDirectory": r.try_get::<String,_>("root_directory").unwrap_or_else(|_| ".".into()),
         "installCommand": r.try_get::<Option<String>,_>("install_command").unwrap_or(None),
         "buildCommand": r.try_get::<Option<String>,_>("build_command").unwrap_or(None),
@@ -3495,7 +3539,8 @@ fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
             "commitSha": r.try_get::<Option<String>,_>("latest_commit_sha").unwrap_or(None),
             "failure": r.try_get::<Option<String>,_>("latest_failure_summary").unwrap_or(None),
             "startedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_started_at").unwrap_or(None),
-            "finishedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_finished_at").unwrap_or(None)
+            "finishedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_finished_at").unwrap_or(None),
+            "runtimeMetadata": r.try_get::<Option<serde_json::Value>,_>("latest_runtime_metadata").unwrap_or(None).unwrap_or_else(|| serde_json::json!({}))
         })),
         "currentDeployment": r.try_get::<Option<String>,_>("current_deployment_status").unwrap_or(None).map(|status| serde_json::json!({
             "status": status,
@@ -3590,6 +3635,17 @@ fn clean_runtime_kind(value: Option<&str>) -> Result<String, &'static str> {
     match value {
         "single" | "compose" => Ok(value.to_string()),
         _ => Err("runtime kind must be single or compose"),
+    }
+}
+
+fn clean_packaging_strategy(value: Option<&str>) -> Result<String, &'static str> {
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("auto");
+    match value {
+        "auto" | "dockerfile" | "generated" => Ok(value.to_string()),
+        _ => Err("packaging strategy must be auto, dockerfile, or generated"),
     }
 }
 
@@ -4108,6 +4164,7 @@ mod tests {
             runtime_kind: Some("single".into()),
             hostlet_config_path: None,
             runtime_config: None,
+            packaging_strategy: None,
             root_directory: None,
             install_command: None,
             build_command: None,
@@ -4150,6 +4207,7 @@ mod tests {
             runtime_kind: Some("single".into()),
             hostlet_config_path: None,
             runtime_config: None,
+            packaging_strategy: None,
             health_path: Some("/health".into()),
             root_directory: None,
             install_command: None,
@@ -4800,6 +4858,7 @@ mod tests {
             runtime_kind: Some("single".into()),
             hostlet_config_path: None,
             runtime_config: None,
+            packaging_strategy: None,
             root_directory: Some(".".into()),
             install_command: None,
             build_command: None,
@@ -4819,6 +4878,7 @@ mod tests {
             runtime_kind: None,
             hostlet_config_path: None,
             runtime_config: None,
+            packaging_strategy: None,
             health_path: Some("/ready".into()),
             root_directory: None,
             install_command: None,

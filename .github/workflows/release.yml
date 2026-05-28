@@ -81,7 +81,11 @@ jobs:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
           for image in hostlet-api hostlet-web hostlet-agent; do
-            digest="$(docker buildx imagetools inspect "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" --raw | sha256sum | awk '{print "sha256:"$1}')"
+            digest="$(docker buildx imagetools inspect "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" --format '{{.Manifest.Digest}}')"
+            if [[ ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "failed to capture registry digest for ${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}: ${digest}" >&2
+              exit 1
+            fi
             key="$(printf '%s' "${image}" | tr '[:lower:]-' '[:upper:]_')"
             echo "${key}_DIGEST=${digest}" >> "$GITHUB_ENV"
           done
@@ -126,6 +130,17 @@ jobs:
             "notes_url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
           }
           EOF
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            node -e '
+              const fs = require("fs");
+              const manifest = JSON.parse(fs.readFileSync("hostlet-release.json", "utf8"));
+              for (const [name, image] of Object.entries(manifest.images)) {
+                if (!/^sha256:[a-f0-9]{64}$/.test(image.digest || "")) {
+                  throw new Error(`missing valid digest for ${name}`);
+                }
+              }
+            '
+          fi
       - name: Sign checksum
         if: env.HOSTLET_RELEASE_GPG_PRIVATE_KEY != ''
         env:

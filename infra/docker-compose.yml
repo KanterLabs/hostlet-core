@@ -16,6 +16,8 @@ services:
     command: bash -lc "/usr/local/cargo/bin/cargo run --manifest-path apps/api/Cargo.toml"
     environment:
       HOSTLET_MODE: ${HOSTLET_MODE:-self_hosted}
+      HOSTLET_IMAGE_TAG: ${HOSTLET_IMAGE_TAG:-dev}
+      HOSTLET_IMAGE_REGISTRY: ${HOSTLET_IMAGE_REGISTRY:-local}
       DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
       BIND_ADDR: 0.0.0.0:8080
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}

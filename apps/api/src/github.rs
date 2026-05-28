@@ -361,6 +361,9 @@ async fn inspect_repo(
             "healthPath": "/",
             "hostletConfigPath": "hostlet.yml",
             "runtimeConfig": {},
+            "packagingStrategy": "auto",
+            "packagingOptions": ["auto", "dockerfile", "generated"],
+            "recommendedPackagingStrategy": "auto",
             "env": inference.env,
             "warnings": inference.warnings,
             "summary": "Dockerfile detected. Hostlet inferred a single-container runtime.",
@@ -368,10 +371,17 @@ async fn inspect_repo(
         }));
     }
 
-    if github_file_text(state, repo, branch, "package.json", token)
-        .await?
-        .is_some()
+    if let Some(package_text) = github_file_text(state, repo, branch, "package.json", token).await?
     {
+        let inference = infer_package_json(
+            &package_text,
+            github_file_text(state, repo, branch, "pnpm-lock.yaml", token)
+                .await?
+                .is_some(),
+            github_file_text(state, repo, branch, "yarn.lock", token)
+                .await?
+                .is_some(),
+        );
         return Ok(json!({
             "repoFullName": repo,
             "defaultBranch": default_branch,
@@ -384,9 +394,14 @@ async fn inspect_repo(
             "healthPath": "/",
             "hostletConfigPath": "hostlet.yml",
             "runtimeConfig": {},
+            "packagingStrategy": "auto",
+            "packagingOptions": ["auto", "generated"],
+            "recommendedPackagingStrategy": "generated",
+            "detectedFramework": inference.framework,
+            "packageManager": inference.package_manager,
             "env": [],
             "warnings": ["Node app detected. Hostlet will infer install/build/start commands during deployment; set custom commands if the preview is incomplete."],
-            "summary": "package.json detected. Hostlet will use generated Node runtime support.",
+            "summary": format!("{} app detected. Hostlet will use optimized generated Docker with {}.", inference.framework, inference.package_manager),
             "autoDeployAvailable": false
         }));
     }
@@ -403,6 +418,9 @@ async fn inspect_repo(
         "healthPath": "/",
         "hostletConfigPath": "hostlet.yml",
         "runtimeConfig": {},
+        "packagingStrategy": "auto",
+        "packagingOptions": ["auto"],
+        "recommendedPackagingStrategy": "auto",
         "env": [],
         "warnings": ["No root Dockerfile or package.json was found. Add a Dockerfile, package.json, or Hostlet Compose manifest before deploying."],
         "summary": "Hostlet could not infer a runnable app shape.",
@@ -454,6 +472,51 @@ struct DockerfileInference {
     port: Option<i32>,
     env: Vec<Value>,
     warnings: Vec<String>,
+}
+
+struct PackageInference {
+    framework: &'static str,
+    package_manager: &'static str,
+}
+
+fn infer_package_json(
+    contents: &str,
+    has_pnpm_lock: bool,
+    has_yarn_lock: bool,
+) -> PackageInference {
+    let package: Value = serde_json::from_str(contents).unwrap_or_else(|_| json!({}));
+    let mut deps = std::collections::HashSet::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(map) = package.get(key).and_then(|value| value.as_object()) {
+            deps.extend(map.keys().map(String::as_str));
+        }
+    }
+    let framework = if deps.contains("next") {
+        "Next.js"
+    } else if deps.contains("astro") {
+        "Astro"
+    } else if deps.contains("nuxt") {
+        "Nuxt"
+    } else if deps.contains("@remix-run/node") || deps.contains("@remix-run/react") {
+        "Remix"
+    } else if deps.contains("@sveltejs/kit") {
+        "SvelteKit"
+    } else if deps.contains("vite") {
+        "Vite"
+    } else {
+        "Node"
+    };
+    let package_manager = if has_pnpm_lock {
+        "pnpm"
+    } else if has_yarn_lock {
+        "yarn"
+    } else {
+        "npm"
+    };
+    PackageInference {
+        framework,
+        package_manager,
+    }
 }
 
 fn infer_dockerfile(contents: &str) -> DockerfileInference {
@@ -530,6 +593,9 @@ fn gitea_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
                 "compose": "services:\n  server:\n    image: docker.gitea.com/gitea:latest-rootless\n    restart: unless-stopped\n    environment:\n      GITEA__server__DOMAIN: localhost\n      GITEA__server__HTTP_PORT: \"3000\"\n      GITEA__database__DB_TYPE: sqlite3\n    volumes:\n      - gitea-data:/var/lib/gitea\n      - gitea-config:/etc/gitea\nvolumes:\n  gitea-data:\n  gitea-config:\n"
             }
         },
+        "packagingStrategy": "auto",
+        "packagingOptions": ["auto"],
+        "recommendedPackagingStrategy": "auto",
         "env": [],
         "warnings": ["Gitea SSH Git access is not exposed in Hostlet 0.3.9; use HTTPS Git through the web route.", "The generated Gitea default uses SQLite and named Docker volumes for the simplest self-hosted setup."],
         "summary": "Gitea detected. Hostlet will use the official rootless image with SQLite and persistent named volumes.",
@@ -883,7 +949,9 @@ fn valid_commit_sha(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{gitea_inspection, infer_dockerfile, parse_github_repo, valid_commit_sha};
+    use super::{
+        gitea_inspection, infer_dockerfile, infer_package_json, parse_github_repo, valid_commit_sha,
+    };
 
     #[test]
     fn rejects_branch_delete_zero_sha() {
@@ -948,5 +1016,16 @@ VOLUME ["/data"]
             .unwrap()
             .iter()
             .any(|warning| warning.as_str().unwrap().contains("SSH Git access")));
+    }
+
+    #[test]
+    fn package_json_inference_detects_framework_and_package_manager() {
+        let inference = infer_package_json(
+            r#"{"dependencies":{"next":"16.0.0"},"devDependencies":{}}"#,
+            true,
+            false,
+        );
+        assert_eq!(inference.framework, "Next.js");
+        assert_eq!(inference.package_manager, "pnpm");
     }
 }
