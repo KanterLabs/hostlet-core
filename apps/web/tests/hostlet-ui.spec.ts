@@ -15,7 +15,7 @@ test("cloud setup gates create actions until GitHub App and billing are ready", 
   await expect(page.getByRole("button", { name: /Create app/i })).toBeDisabled();
 });
 
-test("cloud app forms hide unsupported 0.4.0 controls", async ({ page }) => {
+test("cloud app forms show managed 0.4.1 automation without editable controls", async ({ page }) => {
   await mockApi(page, { mode: "cloud", githubInstalled: true, billingActive: true });
 
   await page.goto("/apps/new");
@@ -24,11 +24,13 @@ test("cloud app forms hide unsupported 0.4.0 controls", async ({ page }) => {
   await expect(page.getByText(/Memory limit/i)).toHaveCount(0);
   await expect(page.getByLabel("Runtime")).not.toContainText("Docker Compose");
   await expect(page.getByText("Publish app URL")).toHaveCount(0);
-  await expect(page.getByText("Auto redeploy")).toHaveCount(0);
+  await expect(page.getByText("Auto redeploy on push")).toBeVisible();
 
   await page.goto("/apps/smoke-app");
   await expect(page.getByText("Managed cloud settings")).toBeVisible();
-  await expect(page.locator(".eyebrow", { hasText: "Hostlet Cloud URL" })).toBeVisible();
+  await expect(page.getByText("Managed auto redeploy")).toBeVisible();
+  await expect(page.getByText("managed on push")).toBeVisible();
+  await expect(page.locator(".eyebrow", { hasText: "Hostlet Cloud URL" }).first()).toBeVisible();
   await expect(page.getByText("Public URL")).toHaveCount(0);
   await expect(page.getByText("Auto redeploy on branch push")).toHaveCount(0);
 });
@@ -113,7 +115,7 @@ async function mockApi(page: Page, options: MockOptions) {
     memoryLimitMb: cloud ? 512 : 1024,
     cpuLimit: cloud ? 0.5 : 1,
     publicExposure: true,
-    autoDeploy: !cloud,
+    autoDeploy: true,
     server: {
       id: "00000000-0000-0000-0000-000000000001",
       name: "This machine",
@@ -229,7 +231,7 @@ async function mockApi(page: Page, options: MockOptions) {
         { stream: "stdout", line: "Health check passed." },
       ]);
     }
-    if (path === "/api/system/version") return json({ currentVersion: "0.4.0" });
+    if (path === "/api/system/version") return json({ currentVersion: "0.4.1" });
     if (path === "/api/health/summary") return json({ healthy: 1, degraded: 0, unhealthy: 0, unknown: 0 });
     if (path === "/api/audit-events") return json([]);
     if (path === "/api/agent-jobs") return json([]);

@@ -157,8 +157,8 @@ export default function Apps() {
                     <KeyValueItem label="Runtime health" value={healthSummary(app.health)} />
                     <KeyValueItem label="Commit" value={shortSha(app.latestDeployment?.commitSha)} />
                     {!cloud && <KeyValueItem label="Limits" value={`${app.memoryLimitMb ? `${app.memoryLimitMb} MB` : "no memory cap"} · ${app.cpuLimit ? `${app.cpuLimit} CPU` : "no CPU cap"}`} />}
-                    {!cloud && <KeyValueItem label="Auto redeploy" value={app.autoDeploy ? "enabled" : "disabled"} />}
-                    {!cloud && <KeyValueItem label="Webhook" value={webhookSummary(app.latestWebhook)} />}
+                    <KeyValueItem label="Auto redeploy" value={cloud ? "managed on push" : app.autoDeploy ? "enabled" : "disabled"} />
+                    <KeyValueItem label={cloud ? "Latest push" : "Webhook"} value={webhookSummary(app.latestWebhook)} />
                   </KeyValueGrid>
 
                   {app.latestDeployment?.failure && (

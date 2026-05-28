@@ -402,7 +402,7 @@ export default function CreateApp() {
                   <SummaryItem label={cloud ? "Worker" : "Machine"} value={cloud ? "Hostlet Cloud managed worker" : selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
                   <SummaryItem label="Route" value={cloud ? `${routePreview} if available` : routePreview} />
                   <SummaryItem label="Runtime" value={`${form.runtime_kind === "compose" ? "Compose" : "Single"} · :${form.container_port}${form.health_path}`} />
-                  <SummaryItem label="Automation" value={cloud ? "manual deploy · public Hostlet URL" : `${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
+                  <SummaryItem label="Automation" value={cloud ? "Auto redeploy on push · Hostlet Cloud URL" : `${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
                 </DataList>
                 <button className="mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
                   <Plus size={16} />

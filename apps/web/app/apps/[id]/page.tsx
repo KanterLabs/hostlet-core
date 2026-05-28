@@ -453,6 +453,14 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
           </div>
 
           {!cloud && <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />}
+          {cloud && (
+            <Notice
+              tone="neutral"
+              className="mb-6"
+              title="Managed auto redeploy"
+              description="Hostlet Cloud redeploys this app after pushes to the selected branch."
+            />
+          )}
 
           <Panel className="mb-6">
             <SectionHeader title="App actions" description={cloud ? "Deploy and operate this app on the managed Hostlet Cloud worker." : "Deploy, operate, publish, and remove this self-hosted app."} />
@@ -663,20 +671,20 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 </div>
               </Panel>
 
-              {!cloud && (
-                <Panel>
-                  <SectionHeader title="Automation" />
-                  <DataList className="mt-4">
-                    <SummaryItem label="Auto redeploy" value={app?.autoDeploy ? "enabled" : "disabled"} />
-                    <SummaryItem label="Public URL" value={app?.publicExposure ? "published" : "private"} />
-                    <SummaryItem label="Latest webhook" value={webhookSummary(app?.latestWebhook)} />
-                  </DataList>
+              <Panel>
+                <SectionHeader title="Automation" />
+                <DataList className="mt-4">
+                  <SummaryItem label="Auto redeploy" value={cloud ? "managed on push" : app?.autoDeploy ? "enabled" : "disabled"} />
+                  <SummaryItem label={cloud ? "Hostlet Cloud URL" : "Public URL"} value={cloud ? "published" : app?.publicExposure ? "published" : "private"} />
+                  <SummaryItem label={cloud ? "Latest push" : "Latest webhook"} value={webhookSummary(app?.latestWebhook)} />
+                </DataList>
+                {!cloud && (
                   <div className="mt-4 rounded-md border border-line bg-surface-alt p-3 text-sm">
                     <div className="font-medium">GitHub webhook</div>
                     <div className="mt-2 break-all font-mono text-xs">{webhook.webhookUrl}</div>
                   </div>
-                </Panel>
-              )}
+                )}
+              </Panel>
 
               {visitHref && (
                 <a className="button-secondary w-full" href={visitHref} target="_blank" rel="noreferrer">
@@ -705,7 +713,7 @@ function isActiveDeploy(status?: string | null) {
 function rollbackDisabledReason(app: App | null, active: boolean) {
   if (!app) return "App details are still loading.";
   if (active) return "Wait for the active deployment to finish before rolling back.";
-  if (app.runtimeKind === "compose") return "Compose rollback is disabled for Hostlet 0.4.0. Redeploy the target revision instead.";
+  if (app.runtimeKind === "compose") return "Compose rollback is disabled for Hostlet 0.4.1. Redeploy the target revision instead.";
   if (!app.currentDeploymentId) return "Deploy this app once before rolling back.";
   return "";
 }

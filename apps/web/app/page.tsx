@@ -175,8 +175,8 @@ export default function Dashboard() {
                         <div className="mt-1 truncate">{cloud ? "Hostlet Cloud" : app.server?.name || "Unknown"}</div>
                       </div>
                       <div className="text-sm">
-                        <div className="eyebrow">Exposure</div>
-                        <div className="mt-1">{app.publicExposure ? "Public" : "Private"}</div>
+                        <div className="eyebrow">{cloud ? "Automation" : "Exposure"}</div>
+                        <div className="mt-1">{cloud ? "Auto redeploy" : app.publicExposure ? "Public" : "Private"}</div>
                       </div>
                     </Link>
                   ))}

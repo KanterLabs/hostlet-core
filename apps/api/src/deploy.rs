@@ -233,7 +233,7 @@ async fn create_and_send_rollback(
     ensure_no_active_deployment(state, app_id).await?;
     let app = sqlx::query("SELECT server_id,current_deployment_id,domain,container_port,runtime_kind FROM apps WHERE id=$1 AND user_id=$2").bind(app_id).bind(user_id).fetch_one(&state.db).await?;
     if !rollback_supported_for_runtime(&app.get::<String, _>("runtime_kind")) {
-        anyhow::bail!("Compose rollback is not supported in Hostlet 0.4.0; redeploy the target revision instead");
+        anyhow::bail!("Compose rollback is not supported in Hostlet 0.4.1; redeploy the target revision instead");
     }
     let current: Option<Uuid> = app.get("current_deployment_id");
     let prev = sqlx::query("SELECT id,image_tag,container_name,published_port FROM deployments WHERE app_id=$1 AND status='success' AND ($2::uuid IS NULL OR id <> $2) ORDER BY finished_at DESC LIMIT 1")

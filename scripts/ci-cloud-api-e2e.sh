@@ -192,12 +192,15 @@ expect_status 402 -H "cookie: ${REVOKED_COOKIE}" -H "origin: ${ORIGIN}" -H "x-ho
 
 expect_status 400 -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "$(printf '%s' "${create_payload}" | node -e 'let s=""; process.stdin.on("data", d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); j.runtime_kind="compose"; process.stdout.write(JSON.stringify(j));})')"
 
-allowed_payload="$(printf '%s' "${create_payload}" | node -e 'let s=""; process.stdin.on("data", d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); delete j.public_exposure; delete j.auto_deploy; process.stdout.write(JSON.stringify(j));})')"
-app_payload="$(curl -fsS -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "${allowed_payload}")"
+app_payload="$(curl -fsS -H "cookie: ${COOKIE_HEADER}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "${create_payload}")"
 app_id="$(printf '%s' "${app_payload}" | json_get id)"
 app_detail="$(curl -fsS -H "cookie: ${COOKIE_HEADER}" "${BASE_URL}/api/apps/${app_id}")"
 if [ "$(printf '%s' "${app_detail}" | json_get memoryLimitMb)" != "512" ] || [ "$(printf '%s' "${app_detail}" | json_get cpuLimit)" != "0.5" ]; then
   echo "cloud app did not receive fixed plan resources" >&2
+  exit 1
+fi
+if [ "$(printf '%s' "${app_detail}" | json_get publicExposure)" != "true" ] || [ "$(printf '%s' "${app_detail}" | json_get autoDeploy)" != "true" ]; then
+  echo "cloud app did not receive managed exposure and auto-redeploy defaults" >&2
   exit 1
 fi
 

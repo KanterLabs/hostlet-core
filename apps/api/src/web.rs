@@ -2139,7 +2139,11 @@ pub async fn create_app(
         Ok(tx) => tx,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let auto_deploy = body.auto_deploy.unwrap_or(false);
+    let auto_deploy = if state.mode == HostletMode::Cloud {
+        true
+    } else {
+        body.auto_deploy.unwrap_or(false)
+    };
     if auto_deploy && state.mode != HostletMode::Cloud {
         if let Err(err) = github::ensure_repo_webhook(&state, user_id, repo_full_name).await {
             tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
@@ -3591,8 +3595,6 @@ fn clean_runtime_kind(value: Option<&str>) -> Result<String, &'static str> {
 
 fn cloud_create_contains_unsupported_settings(body: &CreateApp) -> bool {
     !body.domain.trim().is_empty()
-        || body.public_exposure == Some(false)
-        || body.auto_deploy == Some(true)
 }
 
 fn cloud_update_contains_unsupported_settings(body: &UpdateApp) -> bool {
@@ -4094,7 +4096,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_create_rejects_customer_controlled_runtime_settings() {
+    fn cloud_create_ignores_managed_exposure_and_auto_deploy_inputs() {
         let base = CreateApp {
             name: "Demo".into(),
             repo_full_name: "owner/repo".into(),
@@ -4129,6 +4131,16 @@ mod tests {
         assert!(!cloud_create_contains_unsupported_settings(
             &custom_resources
         ));
+
+        let mut managed_false = custom_resources;
+        managed_false.public_exposure = Some(false);
+        managed_false.auto_deploy = Some(false);
+        assert!(!cloud_create_contains_unsupported_settings(&managed_false));
+
+        let mut managed_true = managed_false;
+        managed_true.public_exposure = Some(true);
+        managed_true.auto_deploy = Some(true);
+        assert!(!cloud_create_contains_unsupported_settings(&managed_true));
     }
 
     #[test]
