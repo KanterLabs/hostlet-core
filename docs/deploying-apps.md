@@ -33,7 +33,7 @@ Allowed Compose behavior focuses on app services and named volumes. Hostlet reje
 - host bind mounts
 - `container_name`
 
-Cloud Compose apps are not supported in the current Hostlet Cloud beta.
+Docker Compose apps are supported only in self-hosted installs that meet the local safety checks.
 
 ## Runtime Health
 

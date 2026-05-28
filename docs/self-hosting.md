@@ -67,8 +67,6 @@ With tunnel profile:
 docker compose --env-file .env -f infra/docker-compose.prod.yml --profile tunnel -p hostlet-release up -d --no-build
 ```
 
-Use the same tagged release images for self-hosted production and Hostlet Cloud.
-
 ## Public App URLs
 
 Public app exposure should go through Caddy and Cloudflare Tunnel or another trusted reverse proxy. Raw Docker app ports bind to loopback and should not be exposed directly.

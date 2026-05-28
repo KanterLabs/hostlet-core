@@ -3,7 +3,6 @@ mod auth;
 mod crypto;
 mod deploy;
 mod github;
-mod github_app;
 mod rate_limit;
 mod state;
 mod web;
@@ -79,19 +78,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/auth/github/device/start", post(auth::github_device_start))
         .route("/auth/github/device/poll", post(auth::github_device_poll))
-        .route("/auth/github/oauth/start", get(auth::github_oauth_start))
-        .route(
-            "/auth/github/oauth/callback",
-            get(auth::github_oauth_callback),
-        )
-        .route(
-            "/auth/github/install/start",
-            get(auth::cloud_github_install_start),
-        )
-        .route(
-            "/auth/github/install/callback",
-            get(auth::cloud_github_install_callback),
-        )
         .route("/api/session", get(auth::session_status))
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", post(auth::setup_password))
@@ -102,17 +88,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/github/repos", get(github::repos))
         .route("/api/github/repo-inspect", post(github::repo_inspect))
         .route("/api/cloudflare/status", get(web::cloudflare_status))
-        .route("/api/cloud/status", get(web::cloud_status))
-        .route("/api/cloud/usage", get(web::cloud_usage))
-        .route(
-            "/api/cloud/billing/checkout",
-            post(web::cloud_billing_checkout),
-        )
-        .route("/api/cloud/billing/portal", post(web::cloud_billing_portal))
-        .route(
-            "/api/cloud/billing/webhook",
-            post(web::cloud_billing_webhook),
-        )
         .route("/api/system/version", get(web::system_version))
         .route("/api/system/backups/latest", get(web::backup_metadata))
         .route("/api/system/update-check", post(web::system_update_check))
@@ -246,7 +221,6 @@ fn requires_browser_origin(method: &Method, path: &str) -> bool {
         && path != "/api/setup"
         && path != "/api/system/operator-cleanup"
         && path != "/webhooks/github"
-        && path != "/api/cloud/billing/webhook"
 }
 
 fn request_origin(headers: &HeaderMap) -> Option<String> {
@@ -308,10 +282,6 @@ mod tests {
     #[test]
     fn machine_webhooks_skip_browser_origin_guard() {
         assert!(!requires_browser_origin(&Method::POST, "/webhooks/github"));
-        assert!(!requires_browser_origin(
-            &Method::POST,
-            "/api/cloud/billing/webhook"
-        ));
     }
 
     #[test]

@@ -15,7 +15,6 @@ services:
     working_dir: /repo
     command: bash -lc "/usr/local/cargo/bin/cargo run --manifest-path apps/api/Cargo.toml"
     environment:
-      HOSTLET_MODE: ${HOSTLET_MODE:-self_hosted}
       HOSTLET_IMAGE_TAG: ${HOSTLET_IMAGE_TAG:-dev}
       HOSTLET_IMAGE_REGISTRY: ${HOSTLET_IMAGE_REGISTRY:-local}
       DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
@@ -42,18 +41,6 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?Run hostlet init first}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
-      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
-      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
-      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
-      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
-      GITHUB_APP_PRIVATE_KEY_PEM: ${GITHUB_APP_PRIVATE_KEY_PEM:-}
-      GITHUB_APP_WEBHOOK_SECRET: ${GITHUB_APP_WEBHOOK_SECRET:-}
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
-      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
-      STRIPE_PRICE_STUDENT: ${STRIPE_PRICE_STUDENT:-}
-      STRIPE_PRICE_STARTER: ${STRIPE_PRICE_STARTER:-}
-      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO:-}
     ports:
       - "8080:8080"
     volumes:
@@ -92,7 +79,7 @@ services:
     command: caddy run --config /etc/caddy/Caddyfile
     environment:
       HOSTLET_CONTROL_PLANE_HOST: ${HOSTLET_CONTROL_PLANE_HOST:-localhost}
-      HOSTLET_APPS_HOST: ${HOSTLET_BASE_DOMAIN:-hostlet.cloud}
+      HOSTLET_APPS_HOST: ${HOSTLET_BASE_DOMAIN:-localhost}
     volumes:
       - ${HOSTLET_CADDYFILE:-./Caddyfile.tunnel}:/etc/caddy/Caddyfile:ro
       - hostlet-agent:/var/lib/hostlet

@@ -11,13 +11,11 @@ const baseUrl = `http://127.0.0.1:${port}`;
 const widths = [320, 375, 768, 1024, 1440];
 const routes = [
   ["/", "nav"],
-  ["/pricing", "pricing"],
   ["/apps/new", "create app"],
   ["/apps/smoke-app", "app detail and env editor"],
   ["/settings", "settings"],
   ["/deployments/smoke-deployment", "deployment logs"],
 ];
-const modes = ["self_hosted", "cloud"];
 
 await mkdir("/tmp/hostlet-responsive-qa", { recursive: true });
 
@@ -48,7 +46,6 @@ try {
   const browser = await chromium.launch();
   try {
     for (const width of widths) {
-      for (const mode of modes) {
         const page = await browser.newPage({ viewport: { width, height: 900 } });
         const errors = [];
         page.on("console", (message) => {
@@ -58,11 +55,11 @@ try {
           errors.push(text);
         });
         page.on("pageerror", (error) => errors.push(error.message));
-        await installApiMocks(page, mode);
+        await installApiMocks(page);
         for (const [route, label] of routes) {
           await page.goto(`${baseUrl}${route}`, { waitUntil: "networkidle" });
           await page.screenshot({
-            path: `/tmp/hostlet-responsive-qa/${width}-${mode}-${safeName(label)}.png`,
+            path: `/tmp/hostlet-responsive-qa/${width}-${safeName(label)}.png`,
             fullPage: true,
           });
           const result = await page.evaluate(() => {
@@ -85,22 +82,21 @@ try {
             };
           });
           if (errors.length) {
-            throw new Error(`${label} at ${width}px in ${mode} logged browser errors: ${errors.slice(0, 3).join(" | ")}`);
+            throw new Error(`${label} at ${width}px logged browser errors: ${errors.slice(0, 3).join(" | ")}`);
           }
           if (result.mainTextLength < 20) {
-            throw new Error(`${label} at ${width}px in ${mode} rendered blank primary content`);
+            throw new Error(`${label} at ${width}px rendered blank primary content`);
           }
           if (result.overflow > 2) {
-            throw new Error(`${label} at ${width}px in ${mode} has horizontal overflow of ${result.overflow}px`);
+            throw new Error(`${label} at ${width}px has horizontal overflow of ${result.overflow}px`);
           }
           if (result.badTextContainers.length) {
             throw new Error(
-              `${label} at ${width}px in ${mode} has clipped control text: ${result.badTextContainers.join(", ")}`,
+              `${label} at ${width}px has clipped control text: ${result.badTextContainers.join(", ")}`,
             );
           }
         }
         await page.close();
-      }
     }
   } finally {
     await browser.close();
@@ -130,14 +126,13 @@ function safeName(value) {
   return value.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase();
 }
 
-async function installApiMocks(page, mode) {
-  const cloud = mode === "cloud";
+async function installApiMocks(page) {
   const app = {
     id: "smoke-app",
     name: "Smoke App",
     repoFullName: "hostlet-ci/node-hello",
     branch: "main",
-    domain: cloud ? "smoke.hostlet.cloud" : "localhost:23000",
+    domain: "localhost:23000",
     currentDeploymentId: "smoke-deployment",
     runtimeKind: "single",
     hostletConfigPath: "hostlet.yml",
@@ -149,10 +144,10 @@ async function installApiMocks(page, mode) {
     startCommand: null,
     containerPort: 3000,
     healthPath: "/health",
-    memoryLimitMb: cloud ? 512 : 1024,
-    cpuLimit: cloud ? 0.5 : 1,
+    memoryLimitMb: 1024,
+    cpuLimit: 1,
     publicExposure: true,
-    autoDeploy: !cloud,
+    autoDeploy: true,
     server: {
       id: "00000000-0000-0000-0000-000000000001",
       name: "This machine",
@@ -203,29 +198,14 @@ async function installApiMocks(page, mode) {
         body: JSON.stringify(body),
       });
 
-    if (path === "/api/setup/status") return json({ mode, setupRequired: false, unlocked: true });
+    if (path === "/api/setup/status") return json({ mode: "self_hosted", setupRequired: false, unlocked: true });
     if (path === "/api/session") {
       return json({
-        mode,
+        mode: "self_hosted",
         user: { id: "ci-user", login: "ci-user" },
-        cloud: cloud
-          ? { billingActive: true, githubInstalled: true, nextStep: "ready", planCode: "starter", subscriptionStatus: "active" }
-          : null,
       });
     }
-    if (path === "/api/cloud/usage") {
-      return json({
-        planCode: cloud ? "starter" : null,
-        subscriptionStatus: cloud ? "active" : null,
-        currentPeriodStart: new Date().toISOString(),
-        currentPeriodEnd: new Date().toISOString(),
-        cancelAtPeriodEnd: false,
-        apps: { used: cloud ? 1 : 0, limit: cloud ? 2 : 0, remaining: cloud ? 1 : 0 },
-      });
-    }
-    if (path === "/api/cloud/billing/portal") return json({ url: "https://billing.stripe.test/session" });
-    if (path === "/api/cloud/billing/checkout") return json({ url: "https://checkout.stripe.test/session" });
-    if (path === "/api/github/status") return json({ connected: true, mode, cloud: cloud ? { githubInstalled: true } : null });
+    if (path === "/api/github/status") return json({ oauthConfigured: true, webhookConfigured: true, authenticated: true, tokenValid: true, login: "ci-user", message: "GitHub connected." });
     if (path === "/api/github/repos") return json([{ full_name: "hostlet-ci/node-hello", private: false, default_branch: "main" }]);
     if (path === "/api/servers") {
       return json([
@@ -241,9 +221,9 @@ async function installApiMocks(page, mode) {
     }
     if (path === "/api/cloudflare/status") {
       return json({
-        configured: !cloud,
-        baseDomain: cloud ? "hostlet.cloud" : "example.test",
-        defaultDomainPattern: cloud ? "*.hostlet.cloud" : "hostlet-*.example.test",
+        configured: true,
+        baseDomain: "example.test",
+        defaultDomainPattern: "hostlet-*.example.test",
       });
     }
     if (path === "/api/apps") return json([app]);
@@ -298,7 +278,7 @@ async function installApiMocks(page, mode) {
         docker: {
           keepContainers: 1,
           keepImages: 1,
-          jobWillRun: !cloud,
+          jobWillRun: true,
         },
       });
     }

@@ -1,11 +1,6 @@
 # Architecture
 
-Hostlet is a deployment control plane with two runtime modes.
-
-```text
-HOSTLET_MODE=self_hosted
-HOSTLET_MODE=cloud
-```
+Hostlet is a self-hosted deployment control plane.
 
 ## Components
 
@@ -30,29 +25,17 @@ Browser -> Web UI -> API -> Postgres
 
 Self-hosted Hostlet runs one local agent on the same machine as the UI/API. The agent uses Docker socket access and host routing privileges to build apps, start containers, probe health, update Caddy, and report status.
 
-## Hostlet Cloud Layout
-
-```text
-Cloudflare edge -> Hostlet Cloud ingress -> Caddy -> Web/API
-                                                |
-                                                v
-                                          Managed app routes
-```
-
-Hostlet Cloud runs the hosted web/API, database, Caddy, managed agent, and customer app containers on Hostlet-operated infrastructure. The managed agent is privileged infrastructure; customer apps are untrusted.
-
 ## Data Model
 
 Core state includes:
 
 - users and sessions
-- GitHub account/install state
+- GitHub account state
 - app configuration
 - encrypted app environment variables
 - deployments and deployment logs
 - agent jobs and runtime health
 - Cloudflare-owned app DNS records
-- cloud user, subscription, entitlement, usage, and webhook state
 
 ## Deployment Flow
 
@@ -74,6 +57,4 @@ Failed deployments preserve the previous working app route.
 - API to agent: authenticated and signed jobs.
 - Agent to Docker/Caddy: privileged host operations.
 - App containers: untrusted customer code.
-- API to providers: GitHub, Stripe, and Cloudflare calls over HTTPS.
-
-Hostlet Cloud adds cloud session, GitHub App, billing, and tenant isolation checks before managed compute actions.
+- API to providers: GitHub and Cloudflare calls over HTTPS.

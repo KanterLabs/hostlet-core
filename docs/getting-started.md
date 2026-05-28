@@ -9,7 +9,7 @@ This guide gets self-hosted Hostlet running on a Linux server with Docker.
 - A GitHub OAuth App with Device Flow enabled.
 - A GitHub account that will own the Hostlet install.
 
-Hostlet Cloud is not required for self-hosted use.
+The hosted-service layer is not required for self-hosted use.
 
 ## Install
 

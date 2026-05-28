@@ -1,8 +1,4 @@
-use crate::{
-    auth::{cloud_compute_allowed_for_context, cloud_compute_allowed_for_user, request_context},
-    github_app,
-    state::AppState,
-};
+use crate::{auth::request_context, state::AppState};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -38,9 +34,6 @@ pub async fn manual_deploy(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    }
     match create_and_send_deploy(&state, context.user_id, app_id, "HEAD").await {
         Ok(id) => Json(json!({"deploymentId": id})).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
@@ -154,9 +147,6 @@ pub async fn rollback(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    }
     match create_and_send_rollback(&state, context.user_id, app_id).await {
         Ok(id) => Json(json!({"rollbackDeploymentId": id})).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
@@ -169,7 +159,6 @@ pub async fn create_and_send_deploy(
     app_id: Uuid,
     commit_sha: &str,
 ) -> anyhow::Result<Uuid> {
-    cloud_compute_allowed_for_user(state, user_id).await?;
     ensure_no_active_deployment(state, app_id).await?;
     let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
         .bind(app_id).bind(user_id).fetch_one(&state.db).await?;
@@ -452,12 +441,8 @@ async fn github_access_token(state: &AppState, user_id: Uuid) -> anyhow::Result<
 async fn github_token_for_deploy(
     state: &AppState,
     user_id: Uuid,
-    repo_full_name: &str,
+    _repo_full_name: &str,
 ) -> anyhow::Result<Option<String>> {
-    if state.mode == crate::state::HostletMode::Cloud {
-        return github_app::installation_token_for_app_user(state, user_id, Some(repo_full_name))
-            .await;
-    }
     github_access_token(state, user_id).await
 }
 

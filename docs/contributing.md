@@ -1,6 +1,6 @@
 # Contributing
 
-Hostlet is open source and also powers Hostlet Cloud. Contributions should preserve both self-hosted behavior and cloud-mode safety.
+Hostlet Core is open source self-hosted infrastructure. Contributions should preserve self-hosted behavior and keep hosted-service code out of the public repo.
 
 ## Local Checks
 
@@ -20,11 +20,10 @@ Use narrower checks for small docs-only changes, but always run link and secret 
 ## Docs Rules
 
 - Keep docs plain Markdown.
-- Use **Hostlet** for the open-source self-hostable product.
-- Use **Hostlet Cloud** for the managed SaaS app-hosting service.
+- Use **Hostlet** or **Hostlet Core** for the open-source self-hostable product.
 - Do not add historical plans or versioned validation files back into `docs/`.
-- Do not document secret values, internal-only IPs, provider IDs, private backup paths, or raw env files in tracked docs.
-- Keep exact Hostlet Cloud production inventory in `docs/private/`, which is ignored.
+- Do not document secret values, internal-only IPs, provider IDs, private backup paths, billing config, private deployment config, or raw env files in tracked docs.
+- Keep hosted-service production inventory in the private hosted-service repo, not here.
 
 ## Release Expectations
 
@@ -34,16 +33,13 @@ Production releases are tagged `vX.Y.Z` and publish:
 - `hostlet-release.json`
 - GHCR images for API, web, and agent
 
-Hostlet Cloud and self-hosted production should consume the same tagged release images.
-
 ## Security Review Expectations
 
 Review carefully when touching:
 
 - auth and session handling
-- GitHub OAuth/App code
-- Stripe billing and webhooks
+- GitHub OAuth code
 - encryption and secret handling
 - API-to-agent job signing
 - Docker/Caddy agent code
-- database migrations that affect tenancy or billing
+- database migrations

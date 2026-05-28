@@ -5,9 +5,7 @@ Use this index for current Hostlet documentation. Historical plans, versioned va
 ## Start Here
 
 - [Getting Started](getting-started.md): fastest path to a working self-hosted install.
-- [Hostlet vs Hostlet Cloud](hostlet-vs-hostlet-cloud.md): product boundaries, shared codebase, and current limits.
 - [Self-Hosting](self-hosting.md): setup, access modes, GitHub Device Flow, and production Compose.
-- [Hostlet Cloud](hostlet-cloud.md): managed SaaS behavior, billing gates, GitHub App auth, and cloud limits.
 
 ## Using Hostlet
 
@@ -18,9 +16,8 @@ Use this index for current Hostlet documentation. Historical plans, versioned va
 
 - [Architecture](architecture.md): services, data flow, deployment flow, and runtime boundaries.
 - [Security](security.md): controls, threat model, secret handling, and remaining risks.
-- [Hostlet Cloud Infrastructure](hostlet-cloud-infrastructure.md): public-safe SaaS infrastructure runbook.
-- [Hostlet Cloud Private Tracker Template](hostlet-cloud-infrastructure-private.example.md): template for the ignored private ops tracker.
 
 ## Project
 
 - [Contributing](contributing.md): local checks, docs rules, release expectations, and security review expectations.
+- [Cloud Migration](../CLOUD_MIGRATION.md): what belongs in the private hosted-service repo.

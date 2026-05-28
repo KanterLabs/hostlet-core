@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_db_agent_jobs_claim_complete_and_ingest_events() {
+    async fn db_agent_jobs_claim_complete_and_ingest_events() {
         let Some(state) = crate::state::db_test_state_from_env().await else {
             return;
         };
@@ -934,7 +934,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_db_expired_agent_jobs_retry_then_fail_at_max_attempts() {
+    async fn db_expired_agent_jobs_retry_then_fail_at_max_attempts() {
         let Some(state) = crate::state::db_test_state_from_env().await else {
             return;
         };
@@ -979,9 +979,7 @@ mod tests {
     async fn reset_agent_db(state: &AppState) {
         sqlx::query(
             "TRUNCATE deployment_logs, app_health_events, app_health_snapshots, agent_jobs,
-             deployments, app_env_vars, apps, cloud_webhook_events, cloud_usage_buckets,
-             cloud_subscriptions, cloud_stripe_customers, cloud_github_installations,
-             cloud_sessions, cloud_users, users CASCADE",
+             deployments, app_env_vars, apps, users CASCADE",
         )
         .execute(&state.db)
         .await
@@ -1002,7 +1000,7 @@ mod tests {
         sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO apps
                (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,root_directory,public_exposure,auto_deploy)
-             VALUES ($1,'00000000-0000-0000-0000-000000000001','agent-app','hostlet-ci/node-hello','main',3000,'/health','agent.hostlet.cloud','single','.',true,false)
+	             VALUES ($1,'00000000-0000-0000-0000-000000000001','agent-app','hostlet-ci/node-hello','main',3000,'/health','agent.example.test','single','.',true,false)
              RETURNING id",
         )
         .bind(user_id)

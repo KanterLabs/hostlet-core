@@ -6,7 +6,7 @@ import { apiUrl } from "@/lib/api";
 import { IconFrame, Notice, Panel } from "@/components/ui";
 
 type SetupStatus = {
-  mode?: "self_hosted" | "cloud";
+  mode?: "self_hosted";
   setupRequired: boolean;
   unlocked: boolean;
 };
@@ -64,7 +64,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     await refresh().catch(() => undefined);
   }
 
-  if (status?.mode === "cloud" || status?.unlocked || locallyUnlocked) return <>{children}</>;
+  if (status?.unlocked || locallyUnlocked) return <>{children}</>;
 
   if (!status) {
     return (

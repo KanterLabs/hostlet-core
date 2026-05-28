@@ -1,6 +1,6 @@
 # Operations
 
-This guide covers current operational workflows for self-hosted Hostlet and public-safe Hostlet Cloud operations.
+This guide covers current operational workflows for self-hosted Hostlet.
 
 ## Self-Hosted Commands
 
@@ -32,23 +32,6 @@ Then pull and restart with `--no-build`.
 Backups include a Postgres dump and agent state volume when available. They intentionally do not copy `.env`, `.env.prod`, raw secret values, private keys, or app environment values.
 
 Restores require the original `ENCRYPTION_KEY`. Without it, encrypted GitHub tokens and app environment variables cannot be decrypted.
-
-## Hostlet Cloud Release Checks
-
-For public Hostlet Cloud checks:
-
-```bash
-curl -fsS https://hostlet.cloud/health
-curl -fsSI https://hostlet.cloud/pricing
-```
-
-Also confirm:
-
-- API, web, managed agent, Postgres, Caddy, and cloudflared are running.
-- API, web, and managed agent use the intended `vX.Y.Z` images.
-- raw app ports, Postgres, Docker, Caddy admin, and internal control surfaces are not exposed publicly.
-
-Do not put exact production inventory, private VM paths, provider IDs, or secret values in tracked docs.
 
 ## Troubleshooting
 

@@ -2,7 +2,6 @@ use crate::{
     auth::{current_user_id, request_context},
     crypto::verify_signature,
     deploy::create_and_send_deploy,
-    github_app,
     state::AppState,
 };
 use axum::{
@@ -25,81 +24,19 @@ pub struct RepoInspectRequest {
 }
 
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let cloud_missing = github_app::missing_cloud_github_app_config(&state);
-    let oauth_configured = if state.mode == crate::state::HostletMode::Cloud {
-        cloud_missing.is_empty()
-    } else {
-        !state.github_client_id.trim().is_empty()
-    };
+    let oauth_configured = !state.github_client_id.trim().is_empty();
     let webhook_configured = !state.github_webhook_secret.trim().is_empty();
 
     let Some(user_id) = current_user_id(&headers, &state) else {
         return Json(serde_json::json!({
             "oauthConfigured": oauth_configured,
             "webhookConfigured": webhook_configured,
-            "missingCloudConfig": cloud_missing,
             "authenticated": false,
             "tokenValid": null,
             "login": null,
-            "message": if state.mode == crate::state::HostletMode::Cloud {
-                if oauth_configured { "GitHub App OAuth is configured. Sign in with GitHub to continue." } else { "GitHub App cloud configuration is incomplete." }
-            } else if oauth_configured { "GitHub Device Flow is configured. Connect GitHub to verify your account token." } else { "GitHub Device Flow is missing GITHUB_CLIENT_ID." }
+            "message": if oauth_configured { "GitHub Device Flow is configured. Connect GitHub to verify your account token." } else { "GitHub Device Flow is missing GITHUB_CLIENT_ID." }
         })).into_response();
     };
-
-    if state.mode == crate::state::HostletMode::Cloud {
-        if !oauth_configured {
-            return Json(serde_json::json!({
-                "oauthConfigured": false,
-                "webhookConfigured": webhook_configured,
-                "missingCloudConfig": cloud_missing,
-                "authenticated": true,
-                "tokenValid": false,
-                "login": null,
-                "message": "GitHub App cloud configuration is incomplete."
-            }))
-            .into_response();
-        }
-        match github_app::installation_token_for_app_user(&state, user_id, None).await {
-            Ok(Some(_)) => {
-                return Json(serde_json::json!({
-                    "oauthConfigured": true,
-                    "webhookConfigured": webhook_configured,
-                    "missingCloudConfig": [],
-                    "authenticated": true,
-                    "tokenValid": true,
-                    "login": null,
-                    "message": "GitHub App installation is connected."
-                }))
-                .into_response();
-            }
-            Ok(None) => {
-                return Json(serde_json::json!({
-                    "oauthConfigured": true,
-                    "webhookConfigured": webhook_configured,
-                    "missingCloudConfig": [],
-                    "authenticated": true,
-                    "tokenValid": false,
-                    "login": null,
-                    "message": "Install the Hostlet GitHub App before importing repos."
-                }))
-                .into_response();
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "GitHub App installation status check failed");
-                return Json(serde_json::json!({
-                    "oauthConfigured": true,
-                    "webhookConfigured": webhook_configured,
-                    "missingCloudConfig": [],
-                    "authenticated": true,
-                    "tokenValid": false,
-                    "login": null,
-                    "message": "GitHub App installation check failed. Try again or reinstall the app."
-                }))
-                .into_response();
-            }
-        }
-    }
 
     let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1")
         .bind(user_id)
@@ -177,36 +114,6 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let user_id = context.user_id;
-    if state.mode == crate::state::HostletMode::Cloud {
-        let missing = github_app::missing_cloud_github_app_config(&state);
-        if !missing.is_empty() {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "GitHub App cloud configuration is incomplete: {}",
-                    missing.join(", ")
-                ),
-            )
-                .into_response();
-        }
-        return match github_app::repositories_for_user(&state, user_id).await {
-            Ok(value) => {
-                let items = value
-                    .get("repositories")
-                    .cloned()
-                    .unwrap_or_else(|| Value::Array(Vec::new()));
-                Json(items).into_response()
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "GitHub App repository listing failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "GitHub repositories could not be loaded",
-                )
-                    .into_response()
-            }
-        };
-    }
     let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1").bind(user_id).fetch_optional(&state.db).await;
     let Ok(Some(row)) = row else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -277,31 +184,7 @@ pub async fn repo_inspect(
         )
             .into_response();
     };
-    if state.mode == crate::state::HostletMode::Cloud {
-        let missing = github_app::missing_cloud_github_app_config(&state);
-        if !missing.is_empty() {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "GitHub App cloud configuration is incomplete: {}",
-                    missing.join(", ")
-                ),
-            )
-                .into_response();
-        }
-    }
-    let token =
-        match github_app::installation_token_for_app_user(&state, user_id, Some(&repo)).await {
-            Ok(token) => token,
-            Err(err) => {
-                tracing::warn!(error = %err, repo, "GitHub App installation token lookup failed");
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    "GitHub repository access could not be verified",
-                )
-                    .into_response();
-            }
-        };
+    let token = github_access_token_for_user(&state, user_id).await;
     match inspect_repo(&state, &repo, body.branch.as_deref(), token.as_deref()).await {
         Ok(value) => Json(value).into_response(),
         Err(err) => {
@@ -313,6 +196,19 @@ pub async fn repo_inspect(
                 .into_response()
         }
     }
+}
+
+async fn github_access_token_for_user(state: &AppState, user_id: Uuid) -> Option<String> {
+    let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()?;
+    state
+        .crypto
+        .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
+        .ok()
 }
 
 async fn inspect_repo(
@@ -755,14 +651,7 @@ pub async fn webhook(
         .get("x-hub-signature-256")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let webhook_secret = if state.mode == crate::state::HostletMode::Cloud {
-        state
-            .github_app_webhook_secret
-            .as_deref()
-            .unwrap_or(&state.github_webhook_secret)
-    } else {
-        &state.github_webhook_secret
-    };
+    let webhook_secret = &state.github_webhook_secret;
     if !verify_signature(webhook_secret, &body, sig) {
         return StatusCode::UNAUTHORIZED.into_response();
     }

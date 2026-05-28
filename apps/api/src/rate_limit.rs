@@ -131,11 +131,6 @@ fn rule_for(method: &Method, path: &str) -> Option<Rule> {
             max: 120,
             window: Duration::from_secs(60),
         }),
-        (&Method::POST, "/api/cloud/billing/webhook") => Some(Rule {
-            name: "stripe-webhook",
-            max: 240,
-            window: Duration::from_secs(60),
-        }),
         _ => None,
     }
 }

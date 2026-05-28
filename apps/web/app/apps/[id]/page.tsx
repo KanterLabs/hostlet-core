@@ -139,16 +139,6 @@ type RuntimeMetadata = {
   imageSizeBytes?: number | null;
 };
 
-type SessionPayload = {
-  mode: "self_hosted" | "cloud";
-  authenticated: boolean;
-  cloud?: {
-    billingActive: boolean;
-    githubInstalled: boolean;
-    nextStep: "login" | "install_github" | "billing" | "ready";
-  } | null;
-};
-
 const emptySettings: SettingsForm = {
   domain: "",
   health_path: "/",
@@ -170,7 +160,6 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const { id } = use(params);
   const router = useRouter();
   const [app, setApp] = useState<App | null>(null);
-  const [session, setSession] = useState<SessionPayload | null>(null);
   const [settings, setSettings] = useState<SettingsForm>(emptySettings);
   const [resources, setResources] = useState<ResourceStats | null>(null);
   const [health, setHealth] = useState<RuntimeHealth | null>(null);
@@ -185,7 +174,6 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
   useEffect(() => {
     refreshApp();
-    api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
     api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
   }, [id]);
 
@@ -340,15 +328,13 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
         start_command: settings.start_command.trim() || null,
         container_port: Number(settings.container_port),
       };
-      if (!cloud) {
-        payload.domain = settings.domain;
-        payload.runtime_kind = settings.runtime_kind;
-        payload.hostlet_config_path = settings.hostlet_config_path || "hostlet.yml";
-        payload.memory_limit_mb = settings.memory_limit_mb ? Number(settings.memory_limit_mb) : null;
-        payload.cpu_limit = settings.cpu_limit ? Number(settings.cpu_limit) : null;
-        payload.public_exposure = settings.public_exposure;
-        payload.auto_deploy = settings.auto_deploy;
-      }
+      payload.domain = settings.domain;
+      payload.runtime_kind = settings.runtime_kind;
+      payload.hostlet_config_path = settings.hostlet_config_path || "hostlet.yml";
+      payload.memory_limit_mb = settings.memory_limit_mb ? Number(settings.memory_limit_mb) : null;
+      payload.cpu_limit = settings.cpu_limit ? Number(settings.cpu_limit) : null;
+      payload.public_exposure = settings.public_exposure;
+      payload.auto_deploy = settings.auto_deploy;
       await api(`/api/apps/${id}`, {
         method: "PATCH",
         body: JSON.stringify(payload),
@@ -430,12 +416,10 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const cpu = cpuDisplay(resources?.cpuPercent || "0.00%");
   const webhook = webhookReadiness();
   const rollbackReason = rollbackDisabledReason(app, active);
-  const cloud = session?.mode === "cloud";
-  const visitHref = appVisitHref(app, cloud);
-  const visitLabel = app ? appVisitLabel(app, cloud) : "No route";
-  const targetLabel = cloud ? "Worker" : "Machine";
-  const targetValue = cloud ? "Hostlet Cloud" : app?.server?.name || "Unknown";
-  const targetStatusLabel = `${cloud ? "worker" : "machine"} ${app?.server?.status || "offline"}`;
+  const visitHref = appVisitHref(app);
+  const visitLabel = app ? appVisitLabel(app) : "No route";
+  const targetValue = app?.server?.name || "Unknown";
+  const targetStatusLabel = `machine ${app?.server?.status || "offline"}`;
 
   return (
     <AppShell>
@@ -456,29 +440,21 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
           <MetricsGrid>
             <Metric label="Deployment" value={deploymentStatus.replaceAll("_", " ")} detail={shortSha(app?.latestDeployment?.commitSha)} icon={Activity} />
             <Metric label="Runtime health" value={health?.status || "unknown"} detail={healthMetricDetail(health)} icon={AlertTriangle} />
-            <Metric label={targetLabel} value={targetValue} detail={app?.server?.status || "offline"} icon={Box} />
-            <Metric label={cloud ? "Cloud URL" : "Exposure"} value={cloud ? "managed" : app?.publicExposure ? "public" : "private"} detail={visitLabel} icon={Globe2} />
+            <Metric label="Machine" value={targetValue} detail={app?.server?.status || "offline"} icon={Box} />
+            <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={visitLabel} icon={Globe2} />
           </MetricsGrid>
 
           <div className="mb-6 flex flex-wrap gap-2">
             <StatusPill status={deploymentStatus} />
             <StatusPill status={health?.status || "unknown"} label={`health ${health?.status || "unknown"}`} />
             <StatusPill status={app?.server?.status || "offline"} label={targetStatusLabel} />
-            <StatusPill status={app?.publicExposure ? "open" : "closed"} label={cloud ? "Hostlet Cloud URL" : app?.publicExposure ? "public URL" : "private app"} />
+            <StatusPill status={app?.publicExposure ? "open" : "closed"} label={app?.publicExposure ? "public URL" : "private app"} />
           </div>
 
-          {!cloud && <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />}
-          {cloud && (
-            <Notice
-              tone="neutral"
-              className="mb-6"
-              title="Managed auto redeploy"
-              description="Hostlet Cloud redeploys this app after pushes to the selected branch."
-            />
-          )}
+          <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />
 
           <Panel className="mb-6">
-            <SectionHeader title="App actions" description={cloud ? "Deploy and operate this app on the managed Hostlet Cloud worker." : "Deploy, operate, publish, and remove this self-hosted app."} />
+            <SectionHeader title="App actions" description="Deploy, operate, publish, and remove this self-hosted app." />
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <div>
                 <div className="eyebrow mb-2">Deploy</div>
@@ -502,9 +478,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               </div>
               <div>
                 <div className="eyebrow mb-2">Settings</div>
-                {cloud ? (
-                  <p className="muted text-sm">Cloud URL, exposure, and runtime kind are managed by Hostlet Cloud.</p>
-                ) : app ? (
+                {app ? (
                   <button disabled={!!busyAction} className="button-secondary" onClick={toggleExposure}>
                     <Globe2 size={16} />
                     {busyAction === "exposure" ? "Updating..." : app.publicExposure ? "Make private" : "Publish URL"}
@@ -604,27 +578,15 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               </section>
 
               <Panel>
-                <SectionHeader icon={Settings} title="App settings" description={cloud ? "Cloud apps keep managed URL, runtime, and exposure settings managed by Hostlet." : undefined} />
-                {cloud && (
-                  <Notice
-                    tone="neutral"
-                    className="mb-4"
-                    title="Managed cloud settings"
-                    description="Hostlet Cloud assigns the URL, keeps apps publicly reachable at that URL, and uses the single-service runtime."
-                  />
-                )}
+                <SectionHeader icon={Settings} title="App settings" />
                 <div className="grid gap-4 md:grid-cols-2">
-                  {!cloud && <Field label="Domain" value={settings.domain} onChange={(value) => setSettings({ ...settings, domain: value })} />}
-                  {cloud && <SummaryItem label="Hostlet Cloud URL" value={displayDomain(settings.domain)} />}
+                  <Field label="Domain" value={settings.domain} onChange={(value) => setSettings({ ...settings, domain: value })} />
                   <Field label="Health path" value={settings.health_path} onChange={(value) => setSettings({ ...settings, health_path: value })} />
-                  {!cloud && (
-                    <SelectField label="Runtime" value={settings.runtime_kind} onChange={(value) => setSettings({ ...settings, runtime_kind: value })}>
-                      <option value="single">Dockerfile or Node</option>
-                      <option value="compose">Docker Compose</option>
-                    </SelectField>
-                  )}
-                  {cloud && <SummaryItem label="Runtime" value="Single-service Dockerfile or generated Node app" />}
-                  {!cloud && settings.runtime_kind === "compose" && <Field label="Hostlet config" value={settings.hostlet_config_path} onChange={(value) => setSettings({ ...settings, hostlet_config_path: value })} />}
+                  <SelectField label="Runtime" value={settings.runtime_kind} onChange={(value) => setSettings({ ...settings, runtime_kind: value })}>
+                    <option value="single">Dockerfile or Node</option>
+                    <option value="compose">Docker Compose</option>
+                  </SelectField>
+                  {settings.runtime_kind === "compose" && <Field label="Hostlet config" value={settings.hostlet_config_path} onChange={(value) => setSettings({ ...settings, hostlet_config_path: value })} />}
                   <SelectField label="Package with" value={settings.packaging_strategy} onChange={(value) => setSettings({ ...settings, packaging_strategy: value })}>
                     <option value="auto">Auto</option>
                     <option value="dockerfile">Repository Dockerfile</option>
@@ -635,33 +597,29 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <Field label="Install command" value={settings.install_command} onChange={(value) => setSettings({ ...settings, install_command: value })} />
                   <Field label="Build command" value={settings.build_command} onChange={(value) => setSettings({ ...settings, build_command: value })} />
                   <Field label="Start command" value={settings.start_command} onChange={(value) => setSettings({ ...settings, start_command: value })} />
-                  {!cloud && (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <SelectField label="Memory" value={settings.memory_limit_mb} onChange={(value) => setSettings({ ...settings, memory_limit_mb: value })}>
-                        <option value="">No cap</option>
-                        <option value="256">256 MB</option>
-                        <option value="512">512 MB</option>
-                        <option value="1024">1 GB</option>
-                        <option value="2048">2 GB</option>
-                        <option value="4096">4 GB</option>
-                      </SelectField>
-                      <SelectField label="CPU" value={settings.cpu_limit} onChange={(value) => setSettings({ ...settings, cpu_limit: value })}>
-                        <option value="">No cap</option>
-                        <option value="0.25">0.25 CPU</option>
-                        <option value="0.5">0.5 CPU</option>
-                        <option value="1">1 CPU</option>
-                        <option value="2">2 CPUs</option>
-                        <option value="4">4 CPUs</option>
-                      </SelectField>
-                    </div>
-                  )}
-                </div>
-                {!cloud && (
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <ToggleCard checked={settings.public_exposure} onChange={(value) => setSettings({ ...settings, public_exposure: value })} icon={Globe2} label="Public URL" />
-                    <ToggleCard checked={settings.auto_deploy} onChange={(value) => setSettings({ ...settings, auto_deploy: value })} icon={GitBranch} label="Auto redeploy on branch push" />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <SelectField label="Memory" value={settings.memory_limit_mb} onChange={(value) => setSettings({ ...settings, memory_limit_mb: value })}>
+                      <option value="">No cap</option>
+                      <option value="256">256 MB</option>
+                      <option value="512">512 MB</option>
+                      <option value="1024">1 GB</option>
+                      <option value="2048">2 GB</option>
+                      <option value="4096">4 GB</option>
+                    </SelectField>
+                    <SelectField label="CPU" value={settings.cpu_limit} onChange={(value) => setSettings({ ...settings, cpu_limit: value })}>
+                      <option value="">No cap</option>
+                      <option value="0.25">0.25 CPU</option>
+                      <option value="0.5">0.5 CPU</option>
+                      <option value="1">1 CPU</option>
+                      <option value="2">2 CPUs</option>
+                      <option value="4">4 CPUs</option>
+                    </SelectField>
                   </div>
-                )}
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <ToggleCard checked={settings.public_exposure} onChange={(value) => setSettings({ ...settings, public_exposure: value })} icon={Globe2} label="Public URL" />
+                  <ToggleCard checked={settings.auto_deploy} onChange={(value) => setSettings({ ...settings, auto_deploy: value })} icon={GitBranch} label="Auto redeploy on branch push" />
+                </div>
                 <button className="mt-4" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
               </Panel>
             </div>
@@ -694,22 +652,20 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               <Panel>
                 <SectionHeader title="Automation" />
                 <DataList className="mt-4">
-                  <SummaryItem label="Auto redeploy" value={cloud ? "managed on push" : app?.autoDeploy ? "enabled" : "disabled"} />
-                  <SummaryItem label={cloud ? "Hostlet Cloud URL" : "Public URL"} value={cloud ? "published" : app?.publicExposure ? "published" : "private"} />
-                  <SummaryItem label={cloud ? "Latest push" : "Latest webhook"} value={webhookSummary(app?.latestWebhook)} />
+                  <SummaryItem label="Auto redeploy" value={app?.autoDeploy ? "enabled" : "disabled"} />
+                  <SummaryItem label="Public URL" value={app?.publicExposure ? "published" : "private"} />
+                  <SummaryItem label="Latest webhook" value={webhookSummary(app?.latestWebhook)} />
                 </DataList>
-                {!cloud && (
-                  <div className="mt-4 rounded-md border border-line bg-surface-alt p-3 text-sm">
-                    <div className="font-medium">GitHub webhook</div>
-                    <div className="mt-2 break-all font-mono text-xs">{webhook.webhookUrl}</div>
-                  </div>
-                )}
+                <div className="mt-4 rounded-md border border-line bg-surface-alt p-3 text-sm">
+                  <div className="font-medium">GitHub webhook</div>
+                  <div className="mt-2 break-all font-mono text-xs">{webhook.webhookUrl}</div>
+                </div>
               </Panel>
 
               {visitHref && (
                 <a className="button-secondary w-full" href={visitHref} target="_blank" rel="noreferrer">
                   <ExternalLink size={16} />
-                  Open {cloud ? "Hostlet Cloud URL" : app?.publicExposure ? "public URL" : "private URL"}
+                  Open {app?.publicExposure ? "public URL" : "private URL"}
                 </a>
               )}
             </aside>
@@ -796,13 +752,8 @@ function displayDomain(domain: string) {
   return domain;
 }
 
-function appVisitHref(app?: App | null, cloud = false) {
+function appVisitHref(app?: App | null) {
   if (!app?.currentDeploymentId) return null;
-  if (cloud) {
-    const display = displayDomain(app.domain);
-    if (!display) return null;
-    return display.startsWith("http://") || display.startsWith("https://") ? display : `https://${display}`;
-  }
   if (!app.publicExposure) {
     const port = app.currentDeployment?.publishedPort;
     const host = privateAppHost(app);
@@ -822,8 +773,7 @@ function appVisitHref(app?: App | null, cloud = false) {
   return `https://${display}`;
 }
 
-function appVisitLabel(app: App, cloud = false) {
-  if (cloud) return displayDomain(app.domain) || "No Hostlet Cloud URL";
+function appVisitLabel(app: App) {
   if (app.publicExposure) return displayDomain(app.domain) || "No public URL";
   const port = app.currentDeployment?.publishedPort;
   const host = privateAppHost(app);

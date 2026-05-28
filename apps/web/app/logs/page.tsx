@@ -13,18 +13,8 @@ type App = {
   latestDeployment?: { id: string; status?: string | null; finishedAt?: string | null; startedAt?: string | null } | null;
 };
 
-type SessionPayload = {
-  mode: "self_hosted" | "cloud";
-  cloud?: {
-    billingActive: boolean;
-    githubInstalled: boolean;
-    nextStep: "login" | "install_github" | "billing" | "ready";
-  } | null;
-};
-
 export default function Logs() {
   const [apps, setApps] = useState<App[]>([]);
-  const [session, setSession] = useState<SessionPayload | null>(null);
   const [message, setMessage] = useState("Loading deployments...");
 
   useEffect(() => {
@@ -35,19 +25,15 @@ export default function Logs() {
         setMessage(withDeploys.length ? "" : "No deployment logs yet.");
       })
       .catch((error) => setMessage(`Could not load logs. ${error instanceof Error ? error.message : "Sign in again."}`));
-    api<SessionPayload>("/api/session").then(setSession).catch(() => setSession(null));
   }, []);
-
-  const cloud = session?.mode === "cloud";
-  const createDisabledReason = cloudCreateDisabledReason(session);
 
   return (
     <AppShell>
           <PageHeader
             eyebrow="Deployments"
             title="Logs"
-            description={cloud ? "Review the latest Hostlet Cloud deployment output for each app." : "Jump into the latest deployment output for each self-hosted app."}
-            actions={createDisabledReason ? <button className="button" disabled title={createDisabledReason}><Plus size={16} />Create app</button> : <Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
+            description="Jump into the latest deployment output for each self-hosted app."
+            actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
           />
 
           {apps.length > 0 ? (
@@ -76,21 +62,13 @@ export default function Logs() {
             <EmptyState
               icon={ScrollText}
               title={message}
-              description={cloud ? "Deploy a cloud app to generate build, health check, routing, and runtime logs." : "Deploy an app on this machine to generate build, health check, routing, and runtime logs."}
+              description="Deploy an app on this machine to generate build, health check, routing, and runtime logs."
               actionHref="/apps"
               actionLabel="View apps"
             />
           )}
     </AppShell>
   );
-}
-
-function cloudCreateDisabledReason(session: SessionPayload | null) {
-  if (session?.mode !== "cloud") return "";
-  if (!session.cloud?.githubInstalled) return "Install the Hostlet GitHub App before creating cloud apps.";
-  if (!session.cloud.billingActive) return "Choose a Hostlet Cloud plan before creating cloud apps.";
-  if (session.cloud.nextStep !== "ready") return "Finish Hostlet Cloud setup before creating apps.";
-  return "";
 }
 
 function formatTime(value?: string | null) {

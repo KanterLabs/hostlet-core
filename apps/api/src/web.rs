@@ -1,22 +1,16 @@
 use crate::{
-    auth::{
-        cloud_compute_allowed_for_context, cloud_request_ready, current_cloud_user_id,
-        current_user_id, request_context, RequestContext,
-    },
+    auth::{current_user_id, request_context, RequestContext},
     crypto::verify_token,
     deploy, github,
-    state::{AppState, HostletMode},
+    state::AppState,
 };
 use axum::{
-    body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use sqlx::Row;
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -75,11 +69,6 @@ pub struct UpdateApp {
 #[derive(Deserialize)]
 pub struct EnvValue {
     value: String,
-}
-
-#[derive(Deserialize)]
-pub struct BillingPlanRequest {
-    plan: String,
 }
 
 async fn customer_context(
@@ -191,8 +180,8 @@ pub async fn cleanup_preview(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let user_id = match cloud_request_ready(&headers, &state).await {
-        Ok(user_id) => user_id,
+    let user_id = match request_context(&headers, &state).await {
+        Ok(context) => context.user_id,
         Err(err) if err.to_string() == "sign in required" => {
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -215,13 +204,6 @@ pub async fn run_cleanup(State(state): State<AppState>, headers: HeaderMap) -> i
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if state.mode == HostletMode::Cloud {
-        return (
-            StatusCode::FORBIDDEN,
-            "cloud users cannot run global cleanup",
-        )
-            .into_response();
-    }
     run_cleanup_inner(&state, Some(context.user_id)).await
 }
 
@@ -888,9 +870,6 @@ pub async fn check_app_health_now(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    };
     let row = sqlx::query(
         r#"
         SELECT a.server_id,
@@ -962,9 +941,6 @@ pub async fn restart_app_container(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    }
     let row = sqlx::query(
         r#"
         SELECT a.server_id,
@@ -1127,284 +1103,6 @@ fn health_counts_json(rows: Vec<sqlx::postgres::PgRow>) -> serde_json::Value {
     counts
 }
 
-fn stripe_price_for_plan<'a>(state: &'a AppState, plan: &str) -> Option<&'a str> {
-    match plan.trim().to_ascii_lowercase().as_str() {
-        "student" => state.stripe_price_student.as_deref(),
-        "starter" => state.stripe_price_starter.as_deref(),
-        "pro" => state.stripe_price_pro.as_deref(),
-        _ => None,
-    }
-}
-
-async fn ensure_stripe_customer(
-    state: &AppState,
-    secret_key: &str,
-    cloud_user_id: Uuid,
-) -> anyhow::Result<String> {
-    if let Some(customer_id) = sqlx::query_scalar::<_, String>(
-        "SELECT stripe_customer_id FROM cloud_stripe_customers WHERE cloud_user_id=$1",
-    )
-    .bind(cloud_user_id)
-    .fetch_optional(&state.db)
-    .await?
-    {
-        return Ok(customer_id);
-    }
-    let row = sqlx::query("SELECT login, email FROM cloud_users WHERE id=$1")
-        .bind(cloud_user_id)
-        .fetch_one(&state.db)
-        .await?;
-    let login = row.get::<String, _>("login");
-    let email = row.get::<Option<String>, _>("email");
-    let mut form = vec![
-        ("name", login.as_str()),
-        ("metadata[cloud_user_id]", ""),
-        ("metadata[github_login]", login.as_str()),
-    ];
-    let cloud_user_id_string = cloud_user_id.to_string();
-    form[1] = ("metadata[cloud_user_id]", cloud_user_id_string.as_str());
-    if let Some(email) = email.as_deref() {
-        form.push(("email", email));
-    }
-    let payload = state
-        .http
-        .post("https://api.stripe.com/v1/customers")
-        .bearer_auth(secret_key)
-        .form(&form)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<serde_json::Value>()
-        .await?;
-    let customer_id = payload
-        .get("id")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Stripe customer response was missing id"))?
-        .to_string();
-    sqlx::query(
-        "INSERT INTO cloud_stripe_customers (cloud_user_id, stripe_customer_id)
-         VALUES ($1,$2)
-         ON CONFLICT (cloud_user_id) DO UPDATE SET
-           stripe_customer_id=EXCLUDED.stripe_customer_id,
-           updated_at=now()",
-    )
-    .bind(cloud_user_id)
-    .bind(&customer_id)
-    .execute(&state.db)
-    .await?;
-    Ok(customer_id)
-}
-
-fn valid_stripe_signature(headers: &HeaderMap, body: &[u8], webhook_secret: &str) -> bool {
-    let Some(signature) = headers
-        .get("stripe-signature")
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    let mut timestamp = None;
-    let mut signatures = Vec::new();
-    for part in signature.split(',') {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        match key {
-            "t" => timestamp = Some(value),
-            "v1" => signatures.push(value),
-            _ => {}
-        }
-    }
-    let Some(timestamp) = timestamp else {
-        return false;
-    };
-    let Ok(timestamp_seconds) = timestamp.parse::<i64>() else {
-        return false;
-    };
-    let age_seconds = (chrono::Utc::now().timestamp() - timestamp_seconds).abs();
-    if age_seconds > 300 {
-        return false;
-    }
-    let signed_payload = [timestamp.as_bytes(), b".", body].concat();
-    let mut mac = Hmac::<Sha256>::new_from_slice(webhook_secret.as_bytes())
-        .expect("HMAC accepts any key length");
-    mac.update(&signed_payload);
-    let expected = hex_bytes(&mac.finalize().into_bytes());
-    signatures
-        .iter()
-        .any(|candidate| crate::crypto::constant_time_eq(candidate.as_bytes(), expected.as_bytes()))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StripeWebhookAction {
-    CheckoutCompleted,
-    SubscriptionChanged,
-    Ignore,
-}
-
-fn stripe_webhook_action(event_type: &str) -> StripeWebhookAction {
-    match event_type {
-        "checkout.session.completed" => StripeWebhookAction::CheckoutCompleted,
-        "customer.subscription.created"
-        | "customer.subscription.updated"
-        | "customer.subscription.deleted" => StripeWebhookAction::SubscriptionChanged,
-        _ => StripeWebhookAction::Ignore,
-    }
-}
-
-async fn handle_checkout_completed(
-    state: &AppState,
-    payload: &serde_json::Value,
-) -> anyhow::Result<()> {
-    let object = payload
-        .get("data")
-        .and_then(|value| value.get("object"))
-        .ok_or_else(|| anyhow::anyhow!("Stripe checkout event missing object"))?;
-    let cloud_user_id = stripe_cloud_user_id(object)?;
-    let customer_id = object
-        .get("customer")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    if !customer_id.is_empty() {
-        sqlx::query(
-            "INSERT INTO cloud_stripe_customers (cloud_user_id, stripe_customer_id)
-             VALUES ($1,$2)
-             ON CONFLICT (cloud_user_id) DO UPDATE SET
-               stripe_customer_id=EXCLUDED.stripe_customer_id,
-               updated_at=now()",
-        )
-        .bind(cloud_user_id)
-        .bind(customer_id)
-        .execute(&state.db)
-        .await?;
-    }
-    let subscription_id = stripe_checkout_subscription_id(object)?;
-    let plan = stripe_plan_code(object)?;
-    sqlx::query(
-        "INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
-         VALUES ($1,$2,$3,'pending')
-         ON CONFLICT (stripe_subscription_id) DO UPDATE SET
-           plan_code=EXCLUDED.plan_code,
-           status=CASE
-             WHEN cloud_subscriptions.status IN ('active','trialing') THEN cloud_subscriptions.status
-             ELSE 'pending'
-           END,
-           updated_at=now()",
-    )
-    .bind(cloud_user_id)
-    .bind(subscription_id)
-    .bind(plan)
-    .execute(&state.db)
-    .await?;
-    Ok(())
-}
-
-async fn handle_subscription_event(
-    state: &AppState,
-    payload: &serde_json::Value,
-) -> anyhow::Result<()> {
-    let object = payload
-        .get("data")
-        .and_then(|value| value.get("object"))
-        .ok_or_else(|| anyhow::anyhow!("Stripe subscription event missing object"))?;
-    let subscription_id = object
-        .get("id")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Stripe subscription missing id"))?;
-    let cloud_user_id = match stripe_cloud_user_id(object) {
-        Ok(id) => id,
-        Err(_) => {
-            let customer_id = object
-                .get("customer")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Stripe subscription missing customer"))?;
-            sqlx::query_scalar::<_, Uuid>(
-                "SELECT cloud_user_id FROM cloud_stripe_customers WHERE stripe_customer_id=$1",
-            )
-            .bind(customer_id)
-            .fetch_one(&state.db)
-            .await?
-        }
-    };
-    let status = object
-        .get("status")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-    let plan = stripe_plan_code(object)?;
-    let current_period_start = stripe_timestamp(object, "current_period_start");
-    let current_period_end = stripe_timestamp(object, "current_period_end");
-    let cancel_at_period_end = object
-        .get("cancel_at_period_end")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    sqlx::query(
-        "INSERT INTO cloud_subscriptions
-           (cloud_user_id, stripe_subscription_id, plan_code, status, current_period_start, current_period_end, cancel_at_period_end)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (stripe_subscription_id) DO UPDATE SET
-           plan_code=EXCLUDED.plan_code,
-           status=EXCLUDED.status,
-           current_period_start=EXCLUDED.current_period_start,
-           current_period_end=EXCLUDED.current_period_end,
-           cancel_at_period_end=EXCLUDED.cancel_at_period_end,
-           updated_at=now()",
-    )
-    .bind(cloud_user_id)
-    .bind(subscription_id)
-    .bind(plan)
-    .bind(status)
-    .bind(current_period_start)
-    .bind(current_period_end)
-    .bind(cancel_at_period_end)
-    .execute(&state.db)
-    .await?;
-    Ok(())
-}
-
-fn stripe_cloud_user_id(object: &serde_json::Value) -> anyhow::Result<Uuid> {
-    let value = object
-        .get("metadata")
-        .and_then(|value| value.get("cloud_user_id"))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Stripe object missing cloud_user_id metadata"))?;
-    Ok(Uuid::parse_str(value)?)
-}
-
-fn stripe_checkout_subscription_id(object: &serde_json::Value) -> anyhow::Result<&str> {
-    object
-        .get("subscription")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Stripe checkout session missing subscription id"))
-}
-
-fn stripe_plan_code(object: &serde_json::Value) -> anyhow::Result<&str> {
-    let plan = object
-        .get("metadata")
-        .and_then(|value| value.get("plan"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .ok_or_else(|| anyhow::anyhow!("Stripe object missing plan metadata"))?;
-    if matches!(plan, "student" | "starter" | "pro") {
-        Ok(plan)
-    } else {
-        anyhow::bail!("Stripe object contains unsupported plan metadata")
-    }
-}
-
-fn stripe_timestamp(
-    object: &serde_json::Value,
-    key: &str,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    object
-        .get(key)
-        .and_then(|value| value.as_i64())
-        .and_then(|timestamp| chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0))
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 pub async fn system_version(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1420,349 +1118,6 @@ pub async fn system_version(
         "update": update,
     }))
     .into_response()
-}
-
-pub async fn cloud_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(_user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    Json(serde_json::json!({
-        "mode": state.mode.as_str(),
-        "enabled": state.mode == crate::state::HostletMode::Cloud,
-        "publicWebUrl": state.public_web_url,
-        "publicApiUrl": state.public_api_url,
-        "baseDomain": state.base_domain.as_deref(),
-        "githubOAuth": {
-            "clientIdConfigured": !state.github_client_id.trim().is_empty(),
-            "clientSecretConfigured": state.github_client_secret.is_some()
-        },
-        "githubApp": {
-            "appIdConfigured": state.github_app_id.is_some(),
-            "slugConfigured": state.github_app_slug.is_some(),
-            "clientIdConfigured": state.github_app_client_id.is_some(),
-            "clientSecretConfigured": state.github_app_client_secret.is_some(),
-            "privateKeyConfigured": state.github_app_private_key_pem.is_some(),
-            "webhookSecretConfigured": state.github_app_webhook_secret.is_some()
-        },
-        "stripe": {
-            "secretKeyConfigured": state.stripe_secret_key.is_some(),
-            "publishableKeyConfigured": state.stripe_publishable_key.is_some(),
-            "webhookSecretConfigured": state.stripe_webhook_secret.is_some(),
-            "studentPriceConfigured": state.stripe_price_student.is_some(),
-            "starterPriceConfigured": state.stripe_price_starter.is_some(),
-            "proPriceConfigured": state.stripe_price_pro.is_some()
-        }
-    }))
-    .into_response()
-}
-
-pub async fn cloud_usage(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if state.mode != HostletMode::Cloud {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let context = match customer_context(&headers, &state).await {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
-    let app_count: i64 = match sqlx::query_scalar("SELECT count(*) FROM apps WHERE user_id=$1")
-        .bind(context.user_id)
-        .fetch_one(&state.db)
-        .await
-    {
-        Ok(count) => count,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to load cloud app usage");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let subscription = match context.cloud_user_id {
-        Some(cloud_user_id) => {
-            sqlx::query(
-                r#"
-            SELECT s.plan_code,
-                   s.status,
-                   s.current_period_start,
-                   s.current_period_end,
-                   s.cancel_at_period_end,
-                   e.app_limit
-            FROM cloud_subscriptions s
-            JOIN cloud_plan_entitlements e ON e.plan_code=s.plan_code
-            WHERE s.cloud_user_id=$1
-              AND s.status IN ('active','trialing')
-              AND (s.current_period_end IS NULL OR s.current_period_end > now())
-            ORDER BY s.created_at DESC
-            LIMIT 1
-            "#,
-            )
-            .bind(cloud_user_id)
-            .fetch_optional(&state.db)
-            .await
-        }
-        None => Ok(None),
-    };
-    let subscription = match subscription {
-        Ok(row) => row,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to load cloud usage subscription");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let app_limit = subscription
-        .as_ref()
-        .map(|row| row.get::<i32, _>("app_limit"))
-        .unwrap_or(0);
-    Json(serde_json::json!({
-        "planCode": subscription.as_ref().map(|row| row.get::<String, _>("plan_code")),
-        "subscriptionStatus": subscription.as_ref().map(|row| row.get::<String, _>("status")),
-        "currentPeriodStart": subscription.as_ref().and_then(|row| row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("current_period_start")),
-        "currentPeriodEnd": subscription.as_ref().and_then(|row| row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("current_period_end")),
-        "cancelAtPeriodEnd": subscription.as_ref().map(|row| row.get::<bool, _>("cancel_at_period_end")).unwrap_or(false),
-        "apps": {
-            "used": app_count,
-            "limit": app_limit,
-            "remaining": (i64::from(app_limit) - app_count).max(0)
-        }
-    }))
-    .into_response()
-}
-
-pub async fn cloud_billing_checkout(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<BillingPlanRequest>,
-) -> impl IntoResponse {
-    if state.mode != HostletMode::Cloud {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let Some(cloud_user_id) = current_cloud_user_id(&headers, &state).await else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let Some(secret_key) = state.stripe_secret_key.as_deref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Stripe secret key is not configured",
-        )
-            .into_response();
-    };
-    let Some(price_id) = stripe_price_for_plan(&state, &body.plan) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "unknown plan or missing Stripe price",
-        )
-            .into_response();
-    };
-    let customer_id = match ensure_stripe_customer(&state, secret_key, cloud_user_id).await {
-        Ok(id) => id,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to prepare Stripe customer");
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
-    };
-    let success_url = format!(
-        "{}/?billing=success",
-        state.public_web_url.trim_end_matches('/')
-    );
-    let cancel_url = format!(
-        "{}/?billing=cancelled",
-        state.public_web_url.trim_end_matches('/')
-    );
-    let res = state
-        .http
-        .post("https://api.stripe.com/v1/checkout/sessions")
-        .bearer_auth(secret_key)
-        .form(&[
-            ("mode", "subscription"),
-            ("customer", customer_id.as_str()),
-            ("line_items[0][price]", price_id),
-            ("line_items[0][quantity]", "1"),
-            ("success_url", success_url.as_str()),
-            ("cancel_url", cancel_url.as_str()),
-            ("client_reference_id", &cloud_user_id.to_string()),
-            ("metadata[cloud_user_id]", &cloud_user_id.to_string()),
-            ("metadata[plan]", body.plan.as_str()),
-            (
-                "subscription_data[metadata][cloud_user_id]",
-                &cloud_user_id.to_string(),
-            ),
-            ("subscription_data[metadata][plan]", body.plan.as_str()),
-        ])
-        .send()
-        .await;
-    match res {
-        Ok(resp) => match resp.error_for_status() {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(value) => Json(serde_json::json!({
-                    "url": value.get("url").and_then(|value| value.as_str())
-                }))
-                .into_response(),
-                Err(err) => {
-                    tracing::warn!(error = %err, "Stripe checkout response was not valid JSON");
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        "Stripe checkout could not be started",
-                    )
-                        .into_response()
-                }
-            },
-            Err(err) => {
-                tracing::warn!(error = %err, "Stripe checkout request failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "Stripe checkout could not be started",
-                )
-                    .into_response()
-            }
-        },
-        Err(err) => {
-            tracing::warn!(error = %err, "Stripe checkout request could not be sent");
-            (
-                StatusCode::BAD_GATEWAY,
-                "Stripe checkout could not be started",
-            )
-                .into_response()
-        }
-    }
-}
-
-pub async fn cloud_billing_portal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if state.mode != HostletMode::Cloud {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let Some(cloud_user_id) = current_cloud_user_id(&headers, &state).await else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let Some(secret_key) = state.stripe_secret_key.as_deref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Stripe secret key is not configured",
-        )
-            .into_response();
-    };
-    let customer_id: Option<String> = sqlx::query_scalar(
-        "SELECT stripe_customer_id FROM cloud_stripe_customers WHERE cloud_user_id=$1",
-    )
-    .bind(cloud_user_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-    let Some(customer_id) = customer_id else {
-        return (
-            StatusCode::PRECONDITION_REQUIRED,
-            "Stripe customer is missing",
-        )
-            .into_response();
-    };
-    let return_url = format!("{}/", state.public_web_url.trim_end_matches('/'));
-    let res = state
-        .http
-        .post("https://api.stripe.com/v1/billing_portal/sessions")
-        .bearer_auth(secret_key)
-        .form(&[
-            ("customer", customer_id.as_str()),
-            ("return_url", return_url.as_str()),
-        ])
-        .send()
-        .await;
-    match res {
-        Ok(resp) => match resp.error_for_status() {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(value) => Json(serde_json::json!({
-                    "url": value.get("url").and_then(|value| value.as_str())
-                }))
-                .into_response(),
-                Err(err) => {
-                    tracing::warn!(error = %err, "Stripe portal response was not valid JSON");
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        "Stripe billing portal could not be opened",
-                    )
-                        .into_response()
-                }
-            },
-            Err(err) => {
-                tracing::warn!(error = %err, "Stripe portal request failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "Stripe billing portal could not be opened",
-                )
-                    .into_response()
-            }
-        },
-        Err(err) => {
-            tracing::warn!(error = %err, "Stripe portal request could not be sent");
-            (
-                StatusCode::BAD_GATEWAY,
-                "Stripe billing portal could not be opened",
-            )
-                .into_response()
-        }
-    }
-}
-
-pub async fn cloud_billing_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let Some(webhook_secret) = state.stripe_webhook_secret.as_deref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Stripe webhook secret is not configured",
-        )
-            .into_response();
-    };
-    if !valid_stripe_signature(&headers, &body, webhook_secret) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-    };
-    let event_id = payload
-        .get("id")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-    let event_type = payload
-        .get("type")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-    let inserted = sqlx::query(
-        "INSERT INTO cloud_webhook_events (provider, provider_event_id, payload)
-         VALUES ('stripe',$1,$2)
-         ON CONFLICT (provider, provider_event_id) DO NOTHING",
-    )
-    .bind(event_id)
-    .bind(&payload)
-    .execute(&state.db)
-    .await;
-    let Ok(done) = inserted else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    if done.rows_affected() == 0 {
-        return StatusCode::NO_CONTENT.into_response();
-    }
-    let result = match stripe_webhook_action(event_type) {
-        StripeWebhookAction::CheckoutCompleted => handle_checkout_completed(&state, &payload).await,
-        StripeWebhookAction::SubscriptionChanged => {
-            handle_subscription_event(&state, &payload).await
-        }
-        StripeWebhookAction::Ignore => Ok(()),
-    };
-    if let Err(err) = result {
-        tracing::warn!(error = %err, event_id, event_type, "failed to process Stripe webhook");
-        return StatusCode::BAD_GATEWAY.into_response();
-    }
-    let _ = sqlx::query(
-        "UPDATE cloud_webhook_events SET processed_at=now() WHERE provider='stripe' AND provider_event_id=$1",
-    )
-    .bind(event_id)
-    .execute(&state.db)
-    .await;
-    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn system_update_check(
@@ -1980,9 +1335,6 @@ pub async fn create_app(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    };
     let user_id = context.user_id;
     let app_name = body.name.trim();
     let repo_full_name = body.repo_full_name.trim();
@@ -2019,14 +1371,14 @@ pub async fn create_app(
         )
             .into_response();
     }
-    if state.mode != HostletMode::Cloud && !valid_memory_limit(body.memory_limit_mb) {
+    if !valid_memory_limit(body.memory_limit_mb) {
         return (
             StatusCode::BAD_REQUEST,
             "memory limit must be between 64 and 262144 MB",
         )
             .into_response();
     }
-    if state.mode != HostletMode::Cloud && !valid_cpu_limit(body.cpu_limit) {
+    if !valid_cpu_limit(body.cpu_limit) {
         return (
             StatusCode::BAD_REQUEST,
             "CPU limit must be between 0.1 and 128",
@@ -2037,20 +1389,6 @@ pub async fn create_app(
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    if state.mode == HostletMode::Cloud && runtime_kind == "compose" {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Docker Compose is not supported on Hostlet Cloud yet",
-        )
-            .into_response();
-    }
-    if state.mode == HostletMode::Cloud && cloud_create_contains_unsupported_settings(&body) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "unsupported Hostlet Cloud app setting",
-        )
-            .into_response();
-    }
     let hostlet_config_path = match clean_hostlet_config_path(body.hostlet_config_path.as_deref()) {
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
@@ -2063,21 +1401,13 @@ pub async fn create_app(
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    let server_id = if state.mode == HostletMode::Cloud {
-        Uuid::parse_str(
+    let server_id = match body.server_id {
+        Some(id) => id,
+        None => Uuid::parse_str(
             &std::env::var("LOCAL_SERVER_ID")
                 .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000001".into()),
         )
-        .unwrap()
-    } else {
-        match body.server_id {
-            Some(id) => id,
-            None => Uuid::parse_str(
-                &std::env::var("LOCAL_SERVER_ID")
-                    .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000001".into()),
-            )
-            .unwrap(),
-        }
+        .unwrap(),
     };
     let server = sqlx::query("SELECT id FROM servers WHERE id=$1 AND kind='local'")
         .bind(server_id)
@@ -2086,12 +1416,7 @@ pub async fn create_app(
     let Ok(Some(_)) = server else {
         return (StatusCode::BAD_REQUEST, "server is not available").into_response();
     };
-    let domain = if state.mode == HostletMode::Cloud {
-        match cloud_app_domain(&state, app_name).await {
-            Ok(domain) => domain,
-            Err((status, message)) => return (status, message).into_response(),
-        }
-    } else if body.domain.trim().is_empty() {
+    let domain = if body.domain.trim().is_empty() {
         match &state.base_domain {
             Some(base_domain) => format!("{}.{}", app_slug(app_name), base_domain),
             None => format!("localhost:{}", 20000 + (body.container_port as u16 % 20000)),
@@ -2113,12 +1438,8 @@ pub async fn create_app(
         )
             .into_response();
     }
-    let public_exposure = if state.mode == HostletMode::Cloud {
-        true
-    } else {
-        body.public_exposure.unwrap_or(false)
-    };
-    if public_exposure && state.mode != HostletMode::Cloud {
+    let public_exposure = body.public_exposure.unwrap_or(false);
+    if public_exposure {
         if let Err(err) = hostlet_public_cloudflare_host(&state, &domain) {
             return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
         }
@@ -2161,19 +1482,12 @@ pub async fn create_app(
     if let Err(message) = validate_env_vars(&body.env) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
-    if let Err(err) = enforce_cloud_app_entitlements(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    }
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let auto_deploy = if state.mode == HostletMode::Cloud {
-        true
-    } else {
-        body.auto_deploy.unwrap_or(false)
-    };
-    if auto_deploy && state.mode != HostletMode::Cloud {
+    let auto_deploy = body.auto_deploy.unwrap_or(false);
+    if auto_deploy {
         if let Err(err) = github::ensure_repo_webhook(&state, user_id, repo_full_name).await {
             tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
             return (
@@ -2186,8 +1500,8 @@ pub async fn create_app(
     let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id")
         .bind(user_id).bind(server_id).bind(app_name).bind(repo_full_name).bind(branch).bind(body.container_port).bind(health_path).bind(&domain)
         .bind(runtime_kind).bind(hostlet_config_path).bind(runtime_config).bind(packaging_strategy).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
-        .bind(if state.mode == HostletMode::Cloud { Some(512) } else { body.memory_limit_mb })
-        .bind(if state.mode == HostletMode::Cloud { Some(0.5) } else { body.cpu_limit })
+        .bind(body.memory_limit_mb)
+        .bind(body.cpu_limit)
         .bind(public_exposure).bind(auto_deploy)
         .fetch_one(&mut *tx).await;
     let Ok(row) = row else {
@@ -2213,7 +1527,7 @@ pub async fn create_app(
     if tx.commit().await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    if public_exposure && state.mode != HostletMode::Cloud {
+    if public_exposure {
         if let Err(err) = ensure_cloudflare_app_dns(&state, app_id, &domain).await {
             tracing::warn!(error = %err, domain = %domain, "failed to open public tunnel");
             delete_created_app_row(&state, app_id).await;
@@ -2291,17 +1605,7 @@ pub async fn update_app(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    };
     let user_id = context.user_id;
-    if state.mode == HostletMode::Cloud && cloud_update_contains_unsupported_settings(&body) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "unsupported Hostlet Cloud app setting",
-        )
-            .into_response();
-    }
     let row = sqlx::query(
         "SELECT id, domain, public_exposure, repo_full_name, auto_deploy FROM apps WHERE id=$1 AND user_id=$2",
     )
@@ -2439,24 +1743,22 @@ pub async fn update_app(
             return (StatusCode::BAD_REQUEST, "container port must be 1-65535").into_response();
         }
     }
-    if state.mode != HostletMode::Cloud {
-        if let Some(memory_limit_mb) = body.memory_limit_mb {
-            if !valid_memory_limit(memory_limit_mb) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "memory limit must be between 64 and 262144 MB",
-                )
-                    .into_response();
-            }
+    if let Some(memory_limit_mb) = body.memory_limit_mb {
+        if !valid_memory_limit(memory_limit_mb) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "memory limit must be between 64 and 262144 MB",
+            )
+                .into_response();
         }
-        if let Some(cpu_limit) = body.cpu_limit {
-            if !valid_cpu_limit(cpu_limit) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "CPU limit must be between 0.1 and 128",
-                )
-                    .into_response();
-            }
+    }
+    if let Some(cpu_limit) = body.cpu_limit {
+        if !valid_cpu_limit(cpu_limit) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "CPU limit must be between 0.1 and 128",
+            )
+                .into_response();
         }
     }
     if let Some(env) = &body.env {
@@ -2584,21 +1886,19 @@ pub async fn update_app(
                 .execute(&mut *tx)
                 .await?;
         }
-        if state.mode != HostletMode::Cloud {
-            if let Some(memory_limit_mb) = body.memory_limit_mb {
-                sqlx::query("UPDATE apps SET memory_limit_mb=$1, updated_at=now() WHERE id=$2")
-                    .bind(memory_limit_mb)
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            if let Some(cpu_limit) = body.cpu_limit {
-                sqlx::query("UPDATE apps SET cpu_limit=$1, updated_at=now() WHERE id=$2")
-                    .bind(cpu_limit)
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+        if let Some(memory_limit_mb) = body.memory_limit_mb {
+            sqlx::query("UPDATE apps SET memory_limit_mb=$1, updated_at=now() WHERE id=$2")
+                .bind(memory_limit_mb)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(cpu_limit) = body.cpu_limit {
+            sqlx::query("UPDATE apps SET cpu_limit=$1, updated_at=now() WHERE id=$2")
+                .bind(cpu_limit)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
         }
         if let Some(env) = body.env {
             sqlx::query("DELETE FROM app_env_vars WHERE app_id=$1")
@@ -2729,9 +2029,6 @@ pub async fn set_app_env_var(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    };
     let user_id = context.user_id;
     if !app_belongs_to_user(&state, id, user_id).await {
         return StatusCode::NOT_FOUND.into_response();
@@ -2787,9 +2084,6 @@ pub async fn delete_app_env_var(
             return StatusCode::UNAUTHORIZED.into_response();
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
-    };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
     };
     let user_id = context.user_id;
     if !app_belongs_to_user(&state, id, user_id).await {
@@ -2858,7 +2152,7 @@ pub async fn agent_job_status(
     )
     .bind(id)
     .bind(user_id)
-    .bind(state.mode == HostletMode::Cloud)
+    .bind(false)
     .fetch_optional(&state.db)
     .await;
     match row {
@@ -2926,7 +2220,7 @@ pub async fn list_agent_jobs(
         "#,
     )
     .bind(user_id)
-    .bind(state.mode == HostletMode::Cloud)
+    .bind(false)
     .fetch_all(&state.db)
     .await;
     match rows {
@@ -2967,9 +2261,6 @@ pub async fn retry_agent_job(
         Ok(context) => context,
         Err(response) => return response,
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    }
     let user_id = context.user_id;
     let result = sqlx::query(
         r#"
@@ -3006,7 +2297,7 @@ pub async fn retry_agent_job(
     )
     .bind(id)
     .bind(user_id)
-    .bind(state.mode == HostletMode::Cloud)
+    .bind(false)
     .fetch_optional(&state.db)
     .await;
     match result {
@@ -3043,9 +2334,6 @@ pub async fn cancel_agent_job(
         Ok(context) => context,
         Err(response) => return response,
     };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
-    }
     let user_id = context.user_id;
     let result = sqlx::query(
         r#"
@@ -3078,7 +2366,7 @@ pub async fn cancel_agent_job(
     )
     .bind(id)
     .bind(user_id)
-    .bind(state.mode == HostletMode::Cloud)
+    .bind(false)
     .fetch_optional(&state.db)
     .await;
     match result {
@@ -3117,9 +2405,6 @@ pub async fn delete_app(
             return StatusCode::UNAUTHORIZED.into_response();
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
-    };
-    if let Err(err) = cloud_compute_allowed_for_context(&state, context).await {
-        return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response();
     };
     let user_id = context.user_id;
     let app =
@@ -3389,80 +2674,6 @@ async fn app_domain_in_use(state: &AppState, domain: &str, except_app_id: Option
     }
 }
 
-async fn enforce_cloud_app_entitlements(
-    state: &AppState,
-    context: RequestContext,
-) -> anyhow::Result<()> {
-    if state.mode != HostletMode::Cloud {
-        return Ok(());
-    }
-    let Some(cloud_user_id) = context.cloud_user_id else {
-        anyhow::bail!("Hostlet Cloud session is required");
-    };
-    let entitlement = sqlx::query(
-        r#"
-        SELECT e.app_limit
-        FROM cloud_subscriptions s
-        JOIN cloud_plan_entitlements e ON e.plan_code=s.plan_code
-        WHERE s.cloud_user_id=$1
-          AND s.status IN ('active','trialing')
-          AND (s.current_period_end IS NULL OR s.current_period_end > now())
-        ORDER BY s.created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(cloud_user_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some(entitlement) = entitlement else {
-        anyhow::bail!("An active Hostlet Cloud subscription is required before creating apps");
-    };
-    let active_apps: i64 = sqlx::query_scalar("SELECT count(*) FROM apps WHERE user_id=$1")
-        .bind(context.user_id)
-        .fetch_one(&state.db)
-        .await?;
-    if active_apps >= i64::from(entitlement.get::<i32, _>("app_limit")) {
-        anyhow::bail!("Hostlet Cloud app limit reached for this plan");
-    }
-    Ok(())
-}
-
-async fn cloud_app_domain(
-    state: &AppState,
-    app_name: &str,
-) -> Result<String, (StatusCode, &'static str)> {
-    let Some(base_domain) = state.base_domain.as_ref() else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "HOSTLET_BASE_DOMAIN is required in cloud mode",
-        ));
-    };
-    let slug = cloud_app_domain_label(app_name);
-    let clean = format!("{slug}.{base_domain}");
-    if !reserved_public_domain_label(&slug) && !app_domain_in_use(state, &clean, None).await {
-        return Ok(clean);
-    }
-    for _ in 0..10 {
-        let label = format!(
-            "{}-{}",
-            slug,
-            crate::crypto::random_token(6).to_ascii_lowercase()
-        );
-        let domain = format!("{label}.{base_domain}");
-        if !app_domain_in_use(state, &domain, None).await {
-            return Ok(domain);
-        }
-    }
-    Err((
-        StatusCode::CONFLICT,
-        "could not allocate a unique app domain",
-    ))
-}
-
-fn cloud_app_domain_label(app_name: &str) -> String {
-    app_slug(app_name)
-}
-
 async fn delete_created_app_row(state: &AppState, app_id: Uuid) {
     let _ = sqlx::query("DELETE FROM apps WHERE id=$1")
         .bind(app_id)
@@ -3504,69 +2715,6 @@ async fn mark_agent_job_failed(state: &AppState, job_id: Uuid, failure: &str) {
     .bind(failure)
     .execute(&state.db)
     .await;
-}
-
-fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
-    serde_json::json!({
-        "id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("name"), "repoFullName": r.get::<String,_>("repo_full_name"),
-        "branch": r.get::<String,_>("branch"), "domain": r.get::<String,_>("domain"), "currentDeploymentId": r.get::<Option<Uuid>,_>("current_deployment_id"),
-        "runtimeKind": r.try_get::<String,_>("runtime_kind").unwrap_or_else(|_| "single".into()),
-        "hostletConfigPath": r.try_get::<String,_>("hostlet_config_path").unwrap_or_else(|_| "hostlet.yml".into()),
-        "runtimeConfig": r.try_get::<serde_json::Value,_>("runtime_config").unwrap_or_else(|_| serde_json::json!({})),
-        "packagingStrategy": r.try_get::<String,_>("packaging_strategy").unwrap_or_else(|_| "auto".into()),
-        "rootDirectory": r.try_get::<String,_>("root_directory").unwrap_or_else(|_| ".".into()),
-        "installCommand": r.try_get::<Option<String>,_>("install_command").unwrap_or(None),
-        "buildCommand": r.try_get::<Option<String>,_>("build_command").unwrap_or(None),
-        "startCommand": r.try_get::<Option<String>,_>("start_command").unwrap_or(None),
-        "containerPort": r.try_get::<i32,_>("container_port").ok(),
-        "healthPath": r.try_get::<String,_>("health_path").ok(),
-        "memoryLimitMb": r.try_get::<Option<i32>,_>("memory_limit_mb").unwrap_or(None),
-        "cpuLimit": r.try_get::<Option<f64>,_>("cpu_limit").unwrap_or(None),
-        "publicExposure": r.try_get::<bool,_>("public_exposure").unwrap_or(false),
-        "autoDeploy": r.try_get::<bool,_>("auto_deploy").unwrap_or(false),
-        "createdAt": r.try_get::<chrono::DateTime<chrono::Utc>,_>("created_at").ok(),
-        "server": r.try_get::<Uuid,_>("server_id").ok().map(|id| serde_json::json!({
-            "id": id,
-            "name": r.try_get::<String,_>("server_name").unwrap_or_else(|_| "Server".into()),
-            "publicIp": r.try_get::<Option<String>,_>("server_public_ip").unwrap_or(None),
-            "kind": r.try_get::<String,_>("server_kind").unwrap_or_else(|_| "remote".into()),
-            "status": r.try_get::<String,_>("server_status").unwrap_or_else(|_| "offline".into()),
-            "lastSeenAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("server_last_seen_at").unwrap_or(None)
-        })),
-        "latestDeployment": r.try_get::<Option<Uuid>,_>("latest_deployment_id").unwrap_or(None).map(|id| serde_json::json!({
-            "id": id,
-            "status": r.try_get::<Option<String>,_>("latest_deployment_status").unwrap_or(None),
-            "commitSha": r.try_get::<Option<String>,_>("latest_commit_sha").unwrap_or(None),
-            "failure": r.try_get::<Option<String>,_>("latest_failure_summary").unwrap_or(None),
-            "startedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_started_at").unwrap_or(None),
-            "finishedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_finished_at").unwrap_or(None),
-            "runtimeMetadata": r.try_get::<Option<serde_json::Value>,_>("latest_runtime_metadata").unwrap_or(None).unwrap_or_else(|| serde_json::json!({}))
-        })),
-        "currentDeployment": r.try_get::<Option<String>,_>("current_deployment_status").unwrap_or(None).map(|status| serde_json::json!({
-            "status": status,
-            "publishedPort": r.try_get::<Option<i32>,_>("current_published_port").unwrap_or(None),
-            "finishedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("current_deployment_finished_at").unwrap_or(None)
-        })),
-        "latestWebhook": r.try_get::<Option<String>,_>("latest_webhook_status").unwrap_or(None).map(|status| serde_json::json!({
-            "status": status,
-            "ignoredReason": r.try_get::<Option<String>,_>("latest_webhook_ignored_reason").unwrap_or(None),
-            "commitSha": r.try_get::<Option<String>,_>("latest_webhook_commit_sha").unwrap_or(None),
-            "branch": r.try_get::<Option<String>,_>("latest_webhook_branch").unwrap_or(None),
-            "deploymentId": r.try_get::<Option<Uuid>,_>("latest_webhook_deployment_id").unwrap_or(None),
-            "createdAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_webhook_created_at").unwrap_or(None)
-        })),
-        "health": r.try_get::<Option<String>,_>("health_status").unwrap_or(None).map(|status| serde_json::json!({
-            "status": status,
-            "httpStatus": r.try_get::<Option<i32>,_>("health_http_status").unwrap_or(None),
-            "latencyMs": r.try_get::<Option<i32>,_>("health_latency_ms").unwrap_or(None),
-            "failureCount": r.try_get::<Option<i32>,_>("health_failure_count").unwrap_or(None).unwrap_or(0),
-            "successCount": r.try_get::<Option<i32>,_>("health_success_count").unwrap_or(None).unwrap_or(0),
-            "lastError": r.try_get::<Option<String>,_>("health_last_error").unwrap_or(None),
-            "lastCheckedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_last_checked_at").unwrap_or(None),
-            "lastHealthyAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_last_healthy_at").unwrap_or(None),
-            "updatedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_updated_at").unwrap_or(None)
-        }))
-    })
 }
 
 fn health_json(row: sqlx::postgres::PgRow) -> serde_json::Value {
@@ -3649,22 +2797,6 @@ fn clean_packaging_strategy(value: Option<&str>) -> Result<String, &'static str>
     }
 }
 
-fn cloud_create_contains_unsupported_settings(body: &CreateApp) -> bool {
-    !body.domain.trim().is_empty()
-}
-
-fn cloud_update_contains_unsupported_settings(body: &UpdateApp) -> bool {
-    body.domain.is_some()
-        || body.public_exposure.is_some()
-        || body.auto_deploy.is_some()
-        || body.memory_limit_mb.is_some()
-        || body.cpu_limit.is_some()
-        || body
-            .runtime_kind
-            .as_deref()
-            .is_some_and(|value| value.trim() == "compose")
-}
-
 fn clean_hostlet_config_path(value: Option<&str>) -> Result<String, &'static str> {
     let value = value
         .map(str::trim)
@@ -3706,6 +2838,69 @@ fn app_slug(value: &str) -> String {
     } else {
         slug
     }
+}
+
+fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
+    serde_json::json!({
+        "id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("name"), "repoFullName": r.get::<String,_>("repo_full_name"),
+        "branch": r.get::<String,_>("branch"), "domain": r.get::<String,_>("domain"), "currentDeploymentId": r.get::<Option<Uuid>,_>("current_deployment_id"),
+        "runtimeKind": r.try_get::<String,_>("runtime_kind").unwrap_or_else(|_| "single".into()),
+        "hostletConfigPath": r.try_get::<String,_>("hostlet_config_path").unwrap_or_else(|_| "hostlet.yml".into()),
+        "runtimeConfig": r.try_get::<serde_json::Value,_>("runtime_config").unwrap_or_else(|_| serde_json::json!({})),
+        "packagingStrategy": r.try_get::<String,_>("packaging_strategy").unwrap_or_else(|_| "auto".into()),
+        "rootDirectory": r.try_get::<String,_>("root_directory").unwrap_or_else(|_| ".".into()),
+        "installCommand": r.try_get::<Option<String>,_>("install_command").unwrap_or(None),
+        "buildCommand": r.try_get::<Option<String>,_>("build_command").unwrap_or(None),
+        "startCommand": r.try_get::<Option<String>,_>("start_command").unwrap_or(None),
+        "containerPort": r.try_get::<i32,_>("container_port").ok(),
+        "healthPath": r.try_get::<String,_>("health_path").ok(),
+        "memoryLimitMb": r.try_get::<Option<i32>,_>("memory_limit_mb").unwrap_or(None),
+        "cpuLimit": r.try_get::<Option<f64>,_>("cpu_limit").unwrap_or(None),
+        "publicExposure": r.try_get::<bool,_>("public_exposure").unwrap_or(false),
+        "autoDeploy": r.try_get::<bool,_>("auto_deploy").unwrap_or(false),
+        "createdAt": r.try_get::<chrono::DateTime<chrono::Utc>,_>("created_at").ok(),
+        "server": r.try_get::<Uuid,_>("server_id").ok().map(|id| serde_json::json!({
+            "id": id,
+            "name": r.try_get::<String,_>("server_name").unwrap_or_else(|_| "Server".into()),
+            "publicIp": r.try_get::<Option<String>,_>("server_public_ip").unwrap_or(None),
+            "kind": r.try_get::<String,_>("server_kind").unwrap_or_else(|_| "remote".into()),
+            "status": r.try_get::<String,_>("server_status").unwrap_or_else(|_| "offline".into()),
+            "lastSeenAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("server_last_seen_at").unwrap_or(None)
+        })),
+        "latestDeployment": r.try_get::<Option<Uuid>,_>("latest_deployment_id").unwrap_or(None).map(|id| serde_json::json!({
+            "id": id,
+            "status": r.try_get::<Option<String>,_>("latest_deployment_status").unwrap_or(None),
+            "commitSha": r.try_get::<Option<String>,_>("latest_commit_sha").unwrap_or(None),
+            "failure": r.try_get::<Option<String>,_>("latest_failure_summary").unwrap_or(None),
+            "startedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_started_at").unwrap_or(None),
+            "finishedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_finished_at").unwrap_or(None),
+            "runtimeMetadata": r.try_get::<Option<serde_json::Value>,_>("latest_runtime_metadata").unwrap_or(None).unwrap_or_else(|| serde_json::json!({}))
+        })),
+        "currentDeployment": r.try_get::<Option<String>,_>("current_deployment_status").unwrap_or(None).map(|status| serde_json::json!({
+            "status": status,
+            "publishedPort": r.try_get::<Option<i32>,_>("current_published_port").unwrap_or(None),
+            "finishedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("current_deployment_finished_at").unwrap_or(None)
+        })),
+        "latestWebhook": r.try_get::<Option<String>,_>("latest_webhook_status").unwrap_or(None).map(|status| serde_json::json!({
+            "status": status,
+            "ignoredReason": r.try_get::<Option<String>,_>("latest_webhook_ignored_reason").unwrap_or(None),
+            "commitSha": r.try_get::<Option<String>,_>("latest_webhook_commit_sha").unwrap_or(None),
+            "branch": r.try_get::<Option<String>,_>("latest_webhook_branch").unwrap_or(None),
+            "deploymentId": r.try_get::<Option<Uuid>,_>("latest_webhook_deployment_id").unwrap_or(None),
+            "createdAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("latest_webhook_created_at").unwrap_or(None)
+        })),
+        "health": r.try_get::<Option<String>,_>("health_status").unwrap_or(None).map(|status| serde_json::json!({
+            "status": status,
+            "httpStatus": r.try_get::<Option<i32>,_>("health_http_status").unwrap_or(None),
+            "latencyMs": r.try_get::<Option<i32>,_>("health_latency_ms").unwrap_or(None),
+            "failureCount": r.try_get::<Option<i32>,_>("health_failure_count").unwrap_or(None).unwrap_or(0),
+            "successCount": r.try_get::<Option<i32>,_>("health_success_count").unwrap_or(None).unwrap_or(0),
+            "lastError": r.try_get::<Option<String>,_>("health_last_error").unwrap_or(None),
+            "lastCheckedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_last_checked_at").unwrap_or(None),
+            "lastHealthyAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_last_healthy_at").unwrap_or(None),
+            "updatedAt": r.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("health_updated_at").unwrap_or(None)
+        }))
+    })
 }
 
 fn valid_app_name(value: &str) -> bool {
@@ -4113,800 +3308,6 @@ fn reserved_public_domain_label(label: &str) -> bool {
             | "support"
             | "www"
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        app_env_vars, app_slug, cancel_agent_job, check_app_health_now, cloud_app_domain_label,
-        cloud_billing_webhook, cloud_create_contains_unsupported_settings,
-        cloud_update_contains_unsupported_settings, create_app, delete_app, delete_app_env_var,
-        get_app, reserved_public_domain_label, restart_app_container, retry_agent_job, run_cleanup,
-        set_app_env_var, stripe_checkout_subscription_id, stripe_plan_code, stripe_webhook_action,
-        update_app, valid_stripe_signature, AppState, Bytes, CreateApp, EnvValue, State,
-        StatusCode, StripeWebhookAction, UpdateApp, Uuid,
-    };
-    use axum::{extract::Path, http::HeaderMap, response::IntoResponse, Json};
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    #[test]
-    fn cloud_domain_label_prefers_clean_app_slug() {
-        assert_eq!(cloud_app_domain_label("RunComp"), "runcomp");
-        assert_eq!(
-            cloud_app_domain_label("My Class Project"),
-            "my-class-project"
-        );
-    }
-
-    #[test]
-    fn cloud_domain_label_preserves_reserved_detection_for_fallback() {
-        let label = cloud_app_domain_label("Status");
-        assert_eq!(label, "status");
-        assert!(reserved_public_domain_label(&label));
-    }
-
-    #[test]
-    fn app_slug_falls_back_for_empty_names() {
-        assert_eq!(app_slug("!!!"), "app");
-    }
-
-    #[test]
-    fn cloud_create_ignores_managed_exposure_and_auto_deploy_inputs() {
-        let base = CreateApp {
-            name: "Demo".into(),
-            repo_full_name: "owner/repo".into(),
-            branch: "main".into(),
-            server_id: None,
-            container_port: 3000,
-            health_path: "/".into(),
-            domain: "".into(),
-            runtime_kind: Some("single".into()),
-            hostlet_config_path: None,
-            runtime_config: None,
-            packaging_strategy: None,
-            root_directory: None,
-            install_command: None,
-            build_command: None,
-            start_command: None,
-            memory_limit_mb: None,
-            cpu_limit: None,
-            public_exposure: None,
-            auto_deploy: None,
-            deploy_after_create: None,
-            env: vec![],
-        };
-        assert!(!cloud_create_contains_unsupported_settings(&base));
-
-        let mut custom_domain = base;
-        custom_domain.domain = "demo.example.com".into();
-        assert!(cloud_create_contains_unsupported_settings(&custom_domain));
-
-        let mut custom_resources = custom_domain;
-        custom_resources.domain = "".into();
-        custom_resources.memory_limit_mb = Some(1024);
-        assert!(!cloud_create_contains_unsupported_settings(
-            &custom_resources
-        ));
-
-        let mut managed_false = custom_resources;
-        managed_false.public_exposure = Some(false);
-        managed_false.auto_deploy = Some(false);
-        assert!(!cloud_create_contains_unsupported_settings(&managed_false));
-
-        let mut managed_true = managed_false;
-        managed_true.public_exposure = Some(true);
-        managed_true.auto_deploy = Some(true);
-        assert!(!cloud_create_contains_unsupported_settings(&managed_true));
-    }
-
-    #[test]
-    fn cloud_update_rejects_cloud_restricted_settings() {
-        let allowed = UpdateApp {
-            domain: None,
-            runtime_kind: Some("single".into()),
-            hostlet_config_path: None,
-            runtime_config: None,
-            packaging_strategy: None,
-            health_path: Some("/health".into()),
-            root_directory: None,
-            install_command: None,
-            build_command: None,
-            start_command: None,
-            container_port: Some(3000),
-            memory_limit_mb: None,
-            cpu_limit: None,
-            public_exposure: None,
-            auto_deploy: None,
-            env: None,
-        };
-        assert!(!cloud_update_contains_unsupported_settings(&allowed));
-
-        let mut compose = allowed;
-        compose.runtime_kind = Some(" compose ".into());
-        assert!(cloud_update_contains_unsupported_settings(&compose));
-
-        let mut public_toggle = compose;
-        public_toggle.runtime_kind = None;
-        public_toggle.public_exposure = Some(false);
-        assert!(cloud_update_contains_unsupported_settings(&public_toggle));
-
-        let mut custom_resources = public_toggle;
-        custom_resources.public_exposure = None;
-        custom_resources.memory_limit_mb = Some(Some(1024));
-        assert!(cloud_update_contains_unsupported_settings(
-            &custom_resources
-        ));
-    }
-
-    #[test]
-    fn checkout_completion_requires_subscription_before_pending_record() {
-        let object = serde_json::json!({
-            "metadata": {
-                "cloud_user_id": "00000000-0000-0000-0000-000000000001",
-                "plan": "starter"
-            }
-        });
-        assert!(stripe_checkout_subscription_id(&object).is_err());
-
-        let object = serde_json::json!({
-            "subscription": "sub_123",
-            "metadata": {
-                "cloud_user_id": "00000000-0000-0000-0000-000000000001",
-                "plan": "starter"
-            }
-        });
-        assert_eq!(stripe_checkout_subscription_id(&object).unwrap(), "sub_123");
-    }
-
-    #[test]
-    fn stripe_plan_metadata_is_required_and_known() {
-        assert_eq!(
-            stripe_plan_code(&serde_json::json!({"metadata": {"plan": "pro"}})).unwrap(),
-            "pro"
-        );
-        assert!(stripe_plan_code(&serde_json::json!({"metadata": {}})).is_err());
-        assert!(
-            stripe_plan_code(&serde_json::json!({"metadata": {"plan": "enterprise"}})).is_err()
-        );
-    }
-
-    #[test]
-    fn stripe_signature_requires_recent_valid_v1_signature() {
-        let body = br#"{"id":"evt_123"}"#;
-        let secret = "whsec_test";
-        let timestamp = chrono::Utc::now().timestamp();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "stripe-signature",
-            stripe_signature_header(body, secret, timestamp)
-                .parse()
-                .unwrap(),
-        );
-        assert!(valid_stripe_signature(&headers, body, secret));
-
-        headers.insert(
-            "stripe-signature",
-            stripe_signature_header(body, secret, timestamp - 301)
-                .parse()
-                .unwrap(),
-        );
-        assert!(!valid_stripe_signature(&headers, body, secret));
-    }
-
-    #[test]
-    fn stripe_signature_is_provider_auth_not_browser_origin() {
-        let body = br#"{"id":"evt_123"}"#;
-        let secret = "whsec_test";
-        let timestamp = chrono::Utc::now().timestamp();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "stripe-signature",
-            stripe_signature_header(body, secret, timestamp)
-                .parse()
-                .unwrap(),
-        );
-        assert!(valid_stripe_signature(&headers, body, secret));
-
-        headers.insert("origin", "https://hostlet.cloud".parse().unwrap());
-        headers.insert("stripe-signature", "t=1,v1=bad".parse().unwrap());
-        assert!(!valid_stripe_signature(&headers, body, secret));
-    }
-
-    #[test]
-    fn stripe_webhook_routes_all_subscription_lifecycle_events() {
-        assert_eq!(
-            stripe_webhook_action("checkout.session.completed"),
-            StripeWebhookAction::CheckoutCompleted
-        );
-        for event_type in [
-            "customer.subscription.created",
-            "customer.subscription.updated",
-            "customer.subscription.deleted",
-        ] {
-            assert_eq!(
-                stripe_webhook_action(event_type),
-                StripeWebhookAction::SubscriptionChanged
-            );
-        }
-        assert_eq!(
-            stripe_webhook_action("invoice.paid"),
-            StripeWebhookAction::Ignore
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_db_stripe_webhooks_dedupe_and_update_subscription_lifecycle() {
-        let Some(state) = crate::state::db_test_state_from_env().await else {
-            return;
-        };
-        reset_cloud_db(&state).await;
-        let cloud_user_id = insert_cloud_user(&state, 303, "stripe-user").await;
-        let secret = state.stripe_webhook_secret.as_deref().unwrap();
-
-        let checkout = stripe_event(
-            "evt_checkout",
-            "checkout.session.completed",
-            serde_json::json!({
-                "id": "cs_test_1",
-                "customer": "cus_test_1",
-                "subscription": "sub_test_1",
-                "metadata": {
-                    "cloud_user_id": cloud_user_id.to_string(),
-                    "plan": "starter"
-                }
-            }),
-        );
-        assert_eq!(
-            post_stripe_webhook(&state, secret, checkout.clone()).await,
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            post_stripe_webhook(&state, secret, checkout).await,
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM cloud_webhook_events WHERE provider='stripe' AND provider_event_id='evt_checkout'",
-            )
-            .fetch_one(&state.db)
-            .await
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            subscription_status(&state, "sub_test_1").await.as_deref(),
-            Some("pending")
-        );
-
-        for (event_id, event_type, status) in [
-            (
-                "evt_sub_created",
-                "customer.subscription.created",
-                "trialing",
-            ),
-            ("evt_sub_updated", "customer.subscription.updated", "active"),
-            (
-                "evt_sub_deleted",
-                "customer.subscription.deleted",
-                "canceled",
-            ),
-        ] {
-            let payload = stripe_event(
-                event_id,
-                event_type,
-                serde_json::json!({
-                    "id": "sub_test_1",
-                    "customer": "cus_test_1",
-                    "status": status,
-                    "metadata": {
-                        "plan": "starter"
-                    },
-                    "current_period_start": 1_700_000_000i64,
-                    "current_period_end": 1_700_086_400i64,
-                    "cancel_at_period_end": status == "canceled"
-                }),
-            );
-            assert_eq!(
-                post_stripe_webhook(&state, secret, payload).await,
-                StatusCode::NO_CONTENT
-            );
-            assert_eq!(
-                subscription_status(&state, "sub_test_1").await.as_deref(),
-                Some(status)
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn cloud_db_stripe_webhook_rejects_missing_metadata_without_activating() {
-        let Some(state) = crate::state::db_test_state_from_env().await else {
-            return;
-        };
-        reset_cloud_db(&state).await;
-        let cloud_user_id = insert_cloud_user(&state, 404, "stripe-missing").await;
-        let secret = state.stripe_webhook_secret.as_deref().unwrap();
-
-        let missing_subscription = stripe_event(
-            "evt_missing_subscription",
-            "checkout.session.completed",
-            serde_json::json!({
-                "id": "cs_missing_sub",
-                "customer": "cus_missing_sub",
-                "metadata": {
-                    "cloud_user_id": cloud_user_id.to_string(),
-                    "plan": "starter"
-                }
-            }),
-        );
-        assert_eq!(
-            post_stripe_webhook(&state, secret, missing_subscription).await,
-            StatusCode::BAD_GATEWAY
-        );
-
-        let missing_plan = stripe_event(
-            "evt_missing_plan",
-            "customer.subscription.updated",
-            serde_json::json!({
-                "id": "sub_missing_plan",
-                "customer": "cus_missing_sub",
-                "status": "active",
-                "metadata": {
-                    "cloud_user_id": cloud_user_id.to_string()
-                }
-            }),
-        );
-        assert_eq!(
-            post_stripe_webhook(&state, secret, missing_plan).await,
-            StatusCode::BAD_GATEWAY
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM cloud_subscriptions WHERE cloud_user_id=$1 AND status IN ('active','trialing')",
-            )
-            .bind(cloud_user_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap(),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_db_operator_cleanup_rejects_cloud_customer_session() {
-        let Some(state) = crate::state::db_test_state_from_env().await else {
-            return;
-        };
-        reset_cloud_db(&state).await;
-        let user_id = insert_app_user(&state, 505, "cleanup-user").await;
-        let cloud_user_id = insert_cloud_user(&state, 505, "cleanup-user").await;
-        insert_cloud_session(&state, cloud_user_id, "cleanup-token").await;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "cookie",
-            crate::auth::test_cloud_cookie_header(&state.session_secret, user_id, "cleanup-token")
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(
-            run_cleanup(State(state), headers)
-                .await
-                .into_response()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_db_compute_mutations_require_ready_account() {
-        let Some(state) = crate::state::db_test_state_from_env().await else {
-            return;
-        };
-        reset_cloud_db(&state).await;
-        let user_id = insert_app_user(&state, 606, "gated-user").await;
-        let cloud_user_id = insert_cloud_user(&state, 606, "gated-user").await;
-        insert_cloud_session(&state, cloud_user_id, "gated-token").await;
-        let headers = cloud_headers(&state, user_id, "gated-token");
-        let app_id = insert_cloud_app(&state, user_id, "gated-app").await;
-        let deployment_id = insert_successful_deployment(&state, app_id).await;
-        let job_id = insert_agent_job(&state, app_id, Some(deployment_id), "failed").await;
-
-        for status in [
-            create_app(
-                State(state.clone()),
-                headers.clone(),
-                Json(create_app_payload("blocked-create")),
-            )
-            .await
-            .into_response()
-            .status(),
-            update_app(
-                State(state.clone()),
-                headers.clone(),
-                Path(app_id),
-                Json(update_app_payload()),
-            )
-            .await
-            .into_response()
-            .status(),
-            set_app_env_var(
-                State(state.clone()),
-                headers.clone(),
-                Path((app_id, "SECRET".to_string())),
-                Json(EnvValue {
-                    value: "blocked".into(),
-                }),
-            )
-            .await
-            .into_response()
-            .status(),
-            delete_app_env_var(
-                State(state.clone()),
-                headers.clone(),
-                Path((app_id, "SECRET".to_string())),
-            )
-            .await
-            .into_response()
-            .status(),
-            check_app_health_now(State(state.clone()), headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-            restart_app_container(State(state.clone()), headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-            retry_agent_job(State(state.clone()), headers.clone(), Path(job_id))
-                .await
-                .into_response()
-                .status(),
-            cancel_agent_job(State(state.clone()), headers.clone(), Path(job_id))
-                .await
-                .into_response()
-                .status(),
-            delete_app(State(state.clone()), headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-        ] {
-            assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
-        }
-
-        activate_cloud_account(&state, cloud_user_id).await;
-        assert_eq!(
-            check_app_health_now(State(state.clone()), headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-            StatusCode::ACCEPTED
-        );
-        assert_eq!(
-            restart_app_container(State(state.clone()), headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-            StatusCode::ACCEPTED
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_db_customer_data_is_isolated_by_user() {
-        let Some(state) = crate::state::db_test_state_from_env().await else {
-            return;
-        };
-        reset_cloud_db(&state).await;
-        let owner_user = insert_app_user(&state, 707, "owner-user").await;
-        let other_user = insert_app_user(&state, 808, "other-user").await;
-        let owner_cloud = insert_cloud_user(&state, 707, "owner-user").await;
-        let other_cloud = insert_cloud_user(&state, 808, "other-user").await;
-        insert_cloud_session(&state, owner_cloud, "owner-token").await;
-        insert_cloud_session(&state, other_cloud, "other-token").await;
-        activate_cloud_account(&state, owner_cloud).await;
-        activate_cloud_account(&state, other_cloud).await;
-
-        let app_id = insert_cloud_app(&state, owner_user, "owner-app").await;
-        let deployment_id = insert_successful_deployment(&state, app_id).await;
-        insert_env_var(&state, app_id, "OWNER_SECRET", "secret").await;
-        let job_id = insert_agent_job(&state, app_id, Some(deployment_id), "failed").await;
-        let owner_headers = cloud_headers(&state, owner_user, "owner-token");
-        let other_headers = cloud_headers(&state, other_user, "other-token");
-
-        assert_eq!(
-            get_app(State(state.clone()), owner_headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-            StatusCode::OK
-        );
-        for status in [
-            get_app(State(state.clone()), other_headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-            app_env_vars(State(state.clone()), other_headers.clone(), Path(app_id))
-                .await
-                .into_response()
-                .status(),
-            crate::deploy::get_deployment(
-                State(state.clone()),
-                other_headers.clone(),
-                Path(deployment_id),
-            )
-            .await
-            .into_response()
-            .status(),
-            crate::deploy::deployment_logs(
-                State(state.clone()),
-                other_headers.clone(),
-                Path(deployment_id),
-            )
-            .await
-            .into_response()
-            .status(),
-            retry_agent_job(State(state.clone()), other_headers.clone(), Path(job_id))
-                .await
-                .into_response()
-                .status(),
-            cancel_agent_job(State(state.clone()), other_headers.clone(), Path(job_id))
-                .await
-                .into_response()
-                .status(),
-        ] {
-            assert_eq!(status, StatusCode::NOT_FOUND);
-        }
-    }
-
-    fn stripe_signature_header(body: &[u8], secret: &str, timestamp: i64) -> String {
-        let timestamp = timestamp.to_string();
-        let signed_payload = [timestamp.as_bytes(), b".", body].concat();
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(&signed_payload);
-        let signature = super::hex_bytes(&mac.finalize().into_bytes());
-        format!("t={timestamp},v1={signature}")
-    }
-
-    async fn post_stripe_webhook(
-        state: &AppState,
-        secret: &str,
-        payload: serde_json::Value,
-    ) -> StatusCode {
-        let body = serde_json::to_vec(&payload).unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "stripe-signature",
-            stripe_signature_header(&body, secret, chrono::Utc::now().timestamp())
-                .parse()
-                .unwrap(),
-        );
-        cloud_billing_webhook(State(state.clone()), headers, Bytes::from(body))
-            .await
-            .into_response()
-            .status()
-    }
-
-    fn stripe_event(id: &str, event_type: &str, object: serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "type": event_type,
-            "data": {
-                "object": object
-            }
-        })
-    }
-
-    async fn reset_cloud_db(state: &AppState) {
-        sqlx::query(
-            "TRUNCATE cloud_webhook_events, cloud_usage_buckets, cloud_subscriptions,
-             cloud_stripe_customers, cloud_github_installations, cloud_sessions,
-             cloud_users, users CASCADE",
-        )
-        .execute(&state.db)
-        .await
-        .unwrap();
-    }
-
-    async fn insert_cloud_user(state: &AppState, github_id: i64, login: &str) -> Uuid {
-        sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO cloud_users (github_id, login) VALUES ($1,$2) RETURNING id",
-        )
-        .bind(github_id)
-        .bind(login)
-        .fetch_one(&state.db)
-        .await
-        .unwrap()
-    }
-
-    async fn insert_app_user(state: &AppState, github_id: i64, login: &str) -> Uuid {
-        sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (github_id, login) VALUES ($1,$2) RETURNING id",
-        )
-        .bind(github_id)
-        .bind(login)
-        .fetch_one(&state.db)
-        .await
-        .unwrap()
-    }
-
-    async fn insert_cloud_session(state: &AppState, cloud_user_id: Uuid, token: &str) {
-        sqlx::query(
-            "INSERT INTO cloud_sessions (cloud_user_id, token_hash, expires_at)
-             VALUES ($1,$2,now() + interval '1 hour')",
-        )
-        .bind(cloud_user_id)
-        .bind(crate::crypto::hash_token(token))
-        .execute(&state.db)
-        .await
-        .unwrap();
-    }
-
-    fn cloud_headers(state: &AppState, user_id: Uuid, cloud_token: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "cookie",
-            crate::auth::test_cloud_cookie_header(&state.session_secret, user_id, cloud_token)
-                .parse()
-                .unwrap(),
-        );
-        headers
-    }
-
-    async fn activate_cloud_account(state: &AppState, cloud_user_id: Uuid) {
-        sqlx::query(
-            "INSERT INTO cloud_github_installations
-               (cloud_user_id, installation_id, account_login, account_type, permissions_json, repository_selection)
-             VALUES ($1,$2,'ci-user','User','{}'::jsonb,'selected')",
-        )
-        .bind(cloud_user_id)
-        .bind(rand_installation_id())
-        .execute(&state.db)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO cloud_subscriptions (cloud_user_id, stripe_subscription_id, plan_code, status)
-             VALUES ($1,$2,'starter','active')",
-        )
-        .bind(cloud_user_id)
-        .bind(format!("sub_{}", Uuid::new_v4().simple()))
-        .execute(&state.db)
-        .await
-        .unwrap();
-    }
-
-    async fn insert_cloud_app(state: &AppState, user_id: Uuid, name: &str) -> Uuid {
-        sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO apps
-               (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,root_directory,memory_limit_mb,cpu_limit,public_exposure,auto_deploy)
-             VALUES ($1,'00000000-0000-0000-0000-000000000001',$2,'hostlet-ci/node-hello','main',3000,'/health',$3,'single','.',512,0.5,true,false)
-             RETURNING id",
-        )
-        .bind(user_id)
-        .bind(name)
-        .bind(format!("{name}.hostlet.cloud"))
-        .fetch_one(&state.db)
-        .await
-        .unwrap()
-    }
-
-    async fn insert_successful_deployment(state: &AppState, app_id: Uuid) -> Uuid {
-        let id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO deployments
-               (app_id,server_id,status,commit_sha,started_at,finished_at,container_name,published_port,runtime_kind)
-             VALUES ($1,'00000000-0000-0000-0000-000000000001','success','HEAD',now(),now(),$2,32001,'single')
-             RETURNING id",
-        )
-        .bind(app_id)
-        .bind(format!("hostlet-app-{app_id}"))
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
-        sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
-            .bind(id)
-            .bind(app_id)
-            .execute(&state.db)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO deployment_logs (deployment_id,stream,line) VALUES ($1,'stdout','ready')",
-        )
-        .bind(id)
-        .execute(&state.db)
-        .await
-        .unwrap();
-        id
-    }
-
-    async fn insert_agent_job(
-        state: &AppState,
-        app_id: Uuid,
-        deployment_id: Option<Uuid>,
-        status: &str,
-    ) -> Uuid {
-        sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO agent_jobs
-               (server_id,app_id,deployment_id,job_type,status,payload_json)
-             VALUES ('00000000-0000-0000-0000-000000000001',$1,$2,'health_check',$3,'{\"type\":\"health_check\"}'::jsonb)
-             RETURNING id",
-        )
-        .bind(app_id)
-        .bind(deployment_id)
-        .bind(status)
-        .fetch_one(&state.db)
-        .await
-        .unwrap()
-    }
-
-    async fn insert_env_var(state: &AppState, app_id: Uuid, key: &str, value: &str) {
-        sqlx::query("INSERT INTO app_env_vars (app_id,key,value_ciphertext) VALUES ($1,$2,$3)")
-            .bind(app_id)
-            .bind(key)
-            .bind(state.crypto.encrypt(value).unwrap())
-            .execute(&state.db)
-            .await
-            .unwrap();
-    }
-
-    fn create_app_payload(name: &str) -> CreateApp {
-        CreateApp {
-            name: name.into(),
-            repo_full_name: "hostlet-ci/node-hello".into(),
-            branch: "main".into(),
-            server_id: None,
-            container_port: 3000,
-            health_path: "/health".into(),
-            domain: "".into(),
-            runtime_kind: Some("single".into()),
-            hostlet_config_path: None,
-            runtime_config: None,
-            packaging_strategy: None,
-            root_directory: Some(".".into()),
-            install_command: None,
-            build_command: None,
-            start_command: None,
-            memory_limit_mb: None,
-            cpu_limit: None,
-            public_exposure: None,
-            auto_deploy: None,
-            deploy_after_create: Some(false),
-            env: vec![],
-        }
-    }
-
-    fn update_app_payload() -> UpdateApp {
-        UpdateApp {
-            domain: None,
-            runtime_kind: None,
-            hostlet_config_path: None,
-            runtime_config: None,
-            packaging_strategy: None,
-            health_path: Some("/ready".into()),
-            root_directory: None,
-            install_command: None,
-            build_command: None,
-            start_command: None,
-            container_port: Some(3000),
-            memory_limit_mb: None,
-            cpu_limit: None,
-            public_exposure: None,
-            auto_deploy: None,
-            env: None,
-        }
-    }
-
-    fn rand_installation_id() -> i64 {
-        let bytes = *Uuid::new_v4().as_bytes();
-        i64::from_be_bytes(bytes[..8].try_into().unwrap()).abs()
-    }
-
-    async fn subscription_status(state: &AppState, subscription_id: &str) -> Option<String> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT status FROM cloud_subscriptions WHERE stripe_subscription_id=$1",
-        )
-        .bind(subscription_id)
-        .fetch_optional(&state.db)
-        .await
-        .unwrap()
-    }
 }
 
 struct UpdateCheck {
