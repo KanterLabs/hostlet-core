@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/api", "apps/agent", "apps/cli"]
+members = ["apps/api", "apps/agent", "apps/cli", "crates/contracts"]
 resolver = "2"
 
 [workspace.package]

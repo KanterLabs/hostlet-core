@@ -893,6 +893,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "hostlet-contracts",
  "jsonwebtoken",
  "rand 0.8.6",
  "reqwest",
@@ -907,6 +908,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "hostlet-contracts"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
