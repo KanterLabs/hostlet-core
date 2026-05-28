@@ -81,7 +81,12 @@ jobs:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
           for image in hostlet-api hostlet-web hostlet-agent; do
-            digest="$(docker buildx imagetools inspect "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" | awk '/^Digest:/ {print $2; exit}')"
+            digest="$(docker manifest inspect -v "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" | node -e '
+              const fs = require("fs");
+              const data = JSON.parse(fs.readFileSync(0, "utf8"));
+              const item = Array.isArray(data) ? data[0] : data;
+              process.stdout.write(item?.Descriptor?.digest || item?.digest || "");
+            ')"
             if [[ ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
               echo "failed to capture registry digest for ${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}: ${digest}" >&2
               exit 1
