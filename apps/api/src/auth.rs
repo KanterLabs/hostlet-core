@@ -345,6 +345,22 @@ pub async fn github_device_poll(
     }
 }
 
+pub async fn github_oauth_start() -> impl IntoResponse {
+    (
+        StatusCode::FORBIDDEN,
+        "GitHub OAuth login is only available in the hosted cloud layer",
+    )
+        .into_response()
+}
+
+pub async fn github_oauth_callback() -> impl IntoResponse {
+    (
+        StatusCode::FORBIDDEN,
+        "GitHub OAuth login is only available in the hosted cloud layer",
+    )
+        .into_response()
+}
+
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let Some(user_id) = current_user_id(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
