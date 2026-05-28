@@ -16,7 +16,7 @@ test("settings show self-hosted provider status", async ({ page }) => {
   await page.goto("/settings");
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   await expect(page.getByText("GitHub Device Flow is configured.")).toBeVisible();
-  await expect(page.getByText("Cloudflare")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cloudflare" })).toBeVisible();
 });
 
 async function mockApi(page: Page) {
