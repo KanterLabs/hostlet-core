@@ -1,11 +1,13 @@
-async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
+use super::*;
+
+pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
     let tmp = target.with_extension(format!("caddy.tmp-{}", std::process::id()));
     tokio::fs::write(&tmp, contents).await?;
     tokio::fs::rename(tmp, target).await?;
     Ok(())
 }
 
-async fn restore_route_file(target: &Path, previous: Option<Vec<u8>>) -> anyhow::Result<()> {
+pub(crate) async fn restore_route_file(target: &Path, previous: Option<Vec<u8>>) -> anyhow::Result<()> {
     if let Some(contents) = previous {
         tokio::fs::write(target, contents).await?;
     } else {
@@ -18,7 +20,7 @@ async fn restore_route_file(target: &Path, previous: Option<Vec<u8>>) -> anyhow:
     Ok(())
 }
 
-async fn remove_local_caddy_route(router: &LocalRouter, app: &str) -> anyhow::Result<()> {
+pub(crate) async fn remove_local_caddy_route(router: &LocalRouter, app: &str) -> anyhow::Result<()> {
     let target = router.snippets_dir.join(format!("{app}.caddy"));
     match tokio::fs::remove_file(target).await {
         Ok(()) => Ok(()),
@@ -27,7 +29,7 @@ async fn remove_local_caddy_route(router: &LocalRouter, app: &str) -> anyhow::Re
     }
 }
 
-async fn ensure_no_conflicting_route(
+pub(crate) async fn ensure_no_conflicting_route(
     dir: &Path,
     target: &Path,
     domain: &str,
@@ -48,7 +50,7 @@ async fn ensure_no_conflicting_route(
     Ok(())
 }
 
-fn route_domain(contents: &str) -> Option<&str> {
+pub(crate) fn route_domain(contents: &str) -> Option<&str> {
     for line in contents.lines().map(str::trim) {
         if let Some(domain) = line.strip_prefix("# hostlet-domain:") {
             return Some(domain.trim());
@@ -63,7 +65,7 @@ fn route_domain(contents: &str) -> Option<&str> {
     None
 }
 
-async fn run_router_reload(
+pub(crate) async fn run_router_reload(
     cfg: &Config,
     deployment_id: Uuid,
     router: &LocalRouter,
@@ -75,7 +77,7 @@ async fn run_router_reload(
     run_log(cfg, deployment_id, bin, &args).await
 }
 
-async fn run_router_reload_quiet(router: &LocalRouter) -> anyhow::Result<()> {
+pub(crate) async fn run_router_reload_quiet(router: &LocalRouter) -> anyhow::Result<()> {
     let Some((bin, args)) = router.reload_command.split_first() else {
         return Ok(());
     };
@@ -83,7 +85,7 @@ async fn run_router_reload_quiet(router: &LocalRouter) -> anyhow::Result<()> {
     run_quiet(bin, &args).await
 }
 
-async fn status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
+pub(crate) async fn status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
     status_extra(
         cfg,
         id,
@@ -97,21 +99,21 @@ async fn status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
 }
 
 #[derive(Default)]
-struct StatusDetails<'a> {
-    failure: Option<&'a str>,
-    image: Option<&'a str>,
-    container: Option<&'a str>,
-    local_url: Option<&'a str>,
-    published_port: Option<u16>,
-    compose_project: Option<&'a str>,
-    runtime_metadata: Option<Value>,
+pub(crate) struct StatusDetails<'a> {
+    pub(crate) failure: Option<&'a str>,
+    pub(crate) image: Option<&'a str>,
+    pub(crate) container: Option<&'a str>,
+    pub(crate) local_url: Option<&'a str>,
+    pub(crate) published_port: Option<u16>,
+    pub(crate) compose_project: Option<&'a str>,
+    pub(crate) runtime_metadata: Option<Value>,
 }
 
-async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
+pub(crate) async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
     post_reliable(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":details.failure,"image_tag":details.image,"container_name":details.container,"local_url":details.local_url,"published_port":details.published_port,"compose_project":details.compose_project,"runtime_metadata":details.runtime_metadata})).await;
 }
 
-async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
+pub(crate) async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
     post(
         cfg,
         json!({"type":"log","deployment_id":id,"stream":stream,"line":line}),
@@ -119,7 +121,7 @@ async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
     .await;
 }
 
-async fn job_status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
+pub(crate) async fn job_status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
     post_reliable(
         cfg,
         json!({"type":"job_status","job_id":id,"status":status,"failure":failure}),
@@ -127,11 +129,11 @@ async fn job_status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>)
     .await;
 }
 
-async fn post(cfg: &Config, msg: Value) {
+pub(crate) async fn post(cfg: &Config, msg: Value) {
     let _ = send_event(cfg, &msg).await;
 }
 
-async fn post_reliable(cfg: &Config, msg: Value) {
+pub(crate) async fn post_reliable(cfg: &Config, msg: Value) {
     let attempts = event_retry_delays();
     for attempt in 0..attempts.len() {
         match send_event(cfg, &msg).await {
@@ -151,7 +153,7 @@ async fn post_reliable(cfg: &Config, msg: Value) {
     }
 }
 
-async fn send_event(cfg: &Config, msg: &Value) -> anyhow::Result<()> {
+pub(crate) async fn send_event(cfg: &Config, msg: &Value) -> anyhow::Result<()> {
     cfg.http
         .post(format!("{}/api/agent/events", cfg.api_url))
         .header("x-hostlet-server-id", cfg.server_id.to_string())
@@ -163,7 +165,7 @@ async fn send_event(cfg: &Config, msg: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn event_retry_delays() -> [Duration; 4] {
+pub(crate) fn event_retry_delays() -> [Duration; 4] {
     [
         Duration::from_millis(0),
         Duration::from_millis(250),
@@ -173,20 +175,20 @@ fn event_retry_delays() -> [Duration; 4] {
 }
 
 #[derive(Default)]
-struct HealthCounts {
+pub(crate) struct HealthCounts {
     failures: u32,
     successes: u32,
 }
 
-struct HealthTarget {
+pub(crate) struct HealthTarget {
     app_id: Uuid,
     deployment_id: Uuid,
     container_name: String,
-    published_port: u16,
+    pub(crate) published_port: u16,
     health_path: String,
 }
 
-async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uuid, HealthCounts>) {
+pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uuid, HealthCounts>) {
     let Ok(targets) = health_targets(cfg).await else {
         return;
     };
@@ -226,7 +228,7 @@ async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uuid, HealthC
     }
 }
 
-async fn health_check_job(cfg: &Config, payload: &Value) {
+pub(crate) async fn health_check_job(cfg: &Config, payload: &Value) {
     let Some(target) = health_target_from_payload(payload) else {
         return;
     };
@@ -250,7 +252,7 @@ async fn health_check_job(cfg: &Config, payload: &Value) {
     .await;
 }
 
-async fn restart_container_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
+pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
     let Some(target) = health_target_from_payload(payload) else {
         bail!("restart job missing valid health target");
     };
@@ -277,7 +279,7 @@ async fn restart_container_job(cfg: &Config, payload: &Value) -> anyhow::Result<
     Ok(())
 }
 
-async fn health_targets(cfg: &Config) -> anyhow::Result<Vec<HealthTarget>> {
+pub(crate) async fn health_targets(cfg: &Config) -> anyhow::Result<Vec<HealthTarget>> {
     let raw = cfg
         .http
         .get(format!("{}/api/agent/health-targets", cfg.api_url))
@@ -294,7 +296,7 @@ async fn health_targets(cfg: &Config) -> anyhow::Result<Vec<HealthTarget>> {
         .collect::<Vec<_>>())
 }
 
-fn health_target_from_payload(value: &Value) -> Option<HealthTarget> {
+pub(crate) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> {
     let app_id = value
         .get("appId")
         .or_else(|| value.get("app_id"))
@@ -335,7 +337,7 @@ fn health_target_from_payload(value: &Value) -> Option<HealthTarget> {
     })
 }
 
-struct HealthProbeResult {
+pub(crate) struct HealthProbeResult {
     healthy: bool,
     url: String,
     http_status: Option<u16>,
@@ -343,7 +345,7 @@ struct HealthProbeResult {
     error: Option<String>,
 }
 
-async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> HealthProbeResult {
+pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> HealthProbeResult {
     let url = format!(
         "http://{}:{}{}",
         cfg.health_host, target.published_port, target.health_path
@@ -386,7 +388,7 @@ async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> HealthProbe
     }
 }
 
-fn health_error_for_status(status: StatusCode) -> Option<String> {
+pub(crate) fn health_error_for_status(status: StatusCode) -> Option<String> {
     if status.is_success() || status.is_redirection() {
         None
     } else {
@@ -394,7 +396,7 @@ fn health_error_for_status(status: StatusCode) -> Option<String> {
     }
 }
 
-async fn container_running(container: &str) -> anyhow::Result<()> {
+pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
     let output = command_output(
         "docker",
         &["inspect", "-f", "{{.State.Running}}", container],
@@ -411,7 +413,7 @@ async fn container_running(container: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn publish_resource_stats(cfg: &Config) {
+pub(crate) async fn publish_resource_stats(cfg: &Config) {
     let Ok(containers) = hostlet_containers().await else {
         return;
     };
@@ -458,7 +460,7 @@ async fn publish_resource_stats(cfg: &Config) {
     }
 }
 
-async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
+pub(crate) async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
     let output = command_output(
         "docker",
         &[
@@ -483,7 +485,7 @@ async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-async fn hostlet_containers_all() -> anyhow::Result<Vec<String>> {
+pub(crate) async fn hostlet_containers_all() -> anyhow::Result<Vec<String>> {
     let output = command_output(
         "docker",
         &[
@@ -509,7 +511,7 @@ async fn hostlet_containers_all() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-async fn hostlet_images() -> anyhow::Result<Vec<String>> {
+pub(crate) async fn hostlet_images() -> anyhow::Result<Vec<String>> {
     let output = command_output(
         "docker",
         &[
@@ -533,7 +535,7 @@ async fn hostlet_images() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-async fn docker_compose_managed_container(container: &str) -> anyhow::Result<bool> {
+pub(crate) async fn docker_compose_managed_container(container: &str) -> anyhow::Result<bool> {
     if !valid_container_name(container) {
         bail!("refusing to inspect invalid managed container name");
     }
@@ -562,7 +564,7 @@ async fn docker_compose_managed_container(container: &str) -> anyhow::Result<boo
     Ok(!String::from_utf8(output.stdout)?.trim().is_empty())
 }
 
-fn string_set_from_array(value: Option<&Value>) -> HashSet<String> {
+pub(crate) fn string_set_from_array(value: Option<&Value>) -> HashSet<String> {
     value
         .and_then(|v| v.as_array())
         .into_iter()
@@ -572,7 +574,7 @@ fn string_set_from_array(value: Option<&Value>) -> HashSet<String> {
         .collect()
 }
 
-async fn command_output(bin: &str, args: &[&str], timeout: Duration) -> anyhow::Result<Output> {
+pub(crate) async fn command_output(bin: &str, args: &[&str], timeout: Duration) -> anyhow::Result<Output> {
     let mut cmd = Command::new(bin);
     cmd.args(args).kill_on_drop(true);
     match tokio::time::timeout(timeout, cmd.output()).await {
@@ -581,7 +583,7 @@ async fn command_output(bin: &str, args: &[&str], timeout: Duration) -> anyhow::
     }
 }
 
-async fn log_docker_tooling() {
+pub(crate) async fn log_docker_tooling() {
     match command_output("docker", &["version"], Duration::from_secs(10)).await {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -612,7 +614,7 @@ async fn log_docker_tooling() {
     }
 }
 
-async fn ensure_docker_compose() -> anyhow::Result<()> {
+pub(crate) async fn ensure_docker_compose() -> anyhow::Result<()> {
     let output = command_output("docker", &["compose", "version"], Duration::from_secs(10)).await?;
     if output.status.success() {
         return Ok(());
@@ -628,7 +630,7 @@ async fn ensure_docker_compose() -> anyhow::Result<()> {
     );
 }
 
-fn http_client() -> anyhow::Result<reqwest::Client> {
+pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
@@ -637,11 +639,10 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
         .context("failed to build HTTP client")
 }
 
-fn valid_container_name(value: &str) -> bool {
+pub(crate) fn valid_container_name(value: &str) -> bool {
     value.starts_with("hostlet-")
         && value.len() <= 128
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
-

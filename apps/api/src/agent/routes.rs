@@ -1,26 +1,4 @@
-use crate::{
-    crypto::{sign, verify_token},
-    state::{AgentConnection, AppState},
-};
-use axum::{
-    extract::{
-        ws::{Message, WebSocket},
-        Path, State, WebSocketUpgrade,
-    },
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    Json,
-};
-use futures_util::{SinkExt, StreamExt};
-use hostlet_contracts::{AgentJobStatus, DeploymentStatus, RuntimeHealthStatus};
-use serde::Deserialize;
-use sqlx::Row;
-use tokio::sync::mpsc;
-use uuid::Uuid;
-
-const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
-const MAX_LOG_LINES_PER_DEPLOYMENT: i64 = 20_000;
-const MAX_HEALTH_EVENTS_PER_APP: i64 = 500;
+use super::*;
 
 pub async fn register() -> impl IntoResponse {
     (
@@ -143,7 +121,7 @@ pub async fn health_targets(
 
 #[derive(Deserialize)]
 pub struct ClaimJobRequest {
-    agent_id: Option<String>,
+    pub(crate) agent_id: Option<String>,
 }
 
 pub async fn claim_job(
@@ -250,9 +228,9 @@ pub async fn claim_job(
 
 #[derive(Deserialize)]
 pub struct CompleteJobRequest {
-    status: String,
-    failure: Option<String>,
-    result: Option<serde_json::Value>,
+    pub(crate) status: String,
+    pub(crate) failure: Option<String>,
+    pub(crate) result: Option<serde_json::Value>,
 }
 
 pub async fn complete_job(
@@ -330,65 +308,4 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
     .rows_affected();
 
     Ok(retried + failed)
-}
-
-async fn handle_socket(state: AppState, server_id: Uuid, socket: WebSocket) {
-    let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<serde_json::Value>(32);
-    let connection_id = Uuid::new_v4();
-    let already_connected = {
-        let mut agents = state.agents.write().await;
-        if agents
-            .get(&server_id)
-            .is_some_and(|connection| !connection.sender.is_closed())
-        {
-            true
-        } else {
-            agents.insert(
-                server_id,
-                AgentConnection {
-                    connection_id,
-                    sender: tx,
-                },
-            );
-            false
-        }
-    };
-    if already_connected {
-        tracing::warn!(%server_id, "rejected duplicate agent websocket connection");
-        let _ = sender.send(Message::Close(None)).await;
-        return;
-    }
-    let _ = sqlx::query("UPDATE servers SET status='online', last_seen_at=now() WHERE id=$1")
-        .bind(server_id)
-        .execute(&state.db)
-        .await;
-    let db = state.db.clone();
-    let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.to_string())).await.is_err() {
-                break;
-            }
-        }
-    });
-    while let Some(Ok(msg)) = receiver.next().await {
-        if let Message::Text(text) = msg {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                handle_agent_message(&state, server_id, value).await;
-            }
-        }
-    }
-    send_task.abort();
-    let mut agents = state.agents.write().await;
-    if agents
-        .get(&server_id)
-        .is_some_and(|connection| connection_is_current(connection, connection_id))
-    {
-        agents.remove(&server_id);
-        drop(agents);
-        let _ = sqlx::query("UPDATE servers SET status='offline' WHERE id=$1")
-            .bind(server_id)
-            .execute(&db)
-            .await;
-    }
 }

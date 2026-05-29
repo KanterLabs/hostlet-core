@@ -1,11 +1,13 @@
+use super::*;
+
 #[derive(Debug, Deserialize)]
-struct HostletManifest {
+pub(crate) struct HostletManifest {
     runtime: String,
     compose: HostletComposeManifest,
 }
 
 #[derive(Debug, Deserialize)]
-struct HostletComposeManifest {
+pub(crate) struct HostletComposeManifest {
     file: Option<String>,
     web_service: String,
     port: Option<u16>,
@@ -13,7 +15,7 @@ struct HostletComposeManifest {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn deploy_compose(
+pub(crate) async fn deploy_compose(
     cfg: Config,
     p: Value,
     deployment_id: Uuid,
@@ -255,7 +257,7 @@ async fn deploy_compose(
     Ok(())
 }
 
-async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
+pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
     let container = p["target_container"].as_str().context("target_container")?;
     let domain = p["domain"].as_str().context("domain")?;
@@ -319,7 +321,7 @@ async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
+pub(crate) async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
     let app_id = p
         .get("app_id")
         .and_then(|v| v.as_str())
@@ -372,7 +374,7 @@ async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
+pub(crate) async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
     let dry_run = p.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
     let keep_containers = string_set_from_array(p.get("keep_containers"));
     let keep_images = string_set_from_array(p.get("keep_images"));
@@ -410,7 +412,7 @@ async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_log(
+pub(crate) async fn run_log(
     cfg: &Config,
     deployment_id: Uuid,
     bin: &str,
@@ -451,7 +453,7 @@ async fn run_log(
     Ok(())
 }
 
-async fn run_log_in_dir(
+pub(crate) async fn run_log_in_dir(
     cfg: &Config,
     deployment_id: Uuid,
     dir: &Path,
@@ -496,7 +498,7 @@ async fn run_log_in_dir(
     Ok(())
 }
 
-async fn run_quiet(bin: &str, args: &[&str]) -> anyhow::Result<()> {
+pub(crate) async fn run_quiet(bin: &str, args: &[&str]) -> anyhow::Result<()> {
     let output = command_output(bin, args, Duration::from_secs(120)).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -505,7 +507,7 @@ async fn run_quiet(bin: &str, args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_quiet_absent_ok(
+pub(crate) async fn run_quiet_absent_ok(
     bin: &str,
     args: &[&str],
     absent_needles: &[&str],
@@ -526,7 +528,7 @@ async fn run_quiet_absent_ok(
     bail!("{bin} exited with {}: {}", output.status, combined.trim());
 }
 
-async fn run_capture_trim(
+pub(crate) async fn run_capture_trim(
     cfg: &Config,
     deployment_id: Uuid,
     bin: &str,
@@ -553,7 +555,7 @@ async fn run_capture_trim(
         .context("command output was not valid UTF-8")
 }
 
-async fn ensure_checkout_remote(
+pub(crate) async fn ensure_checkout_remote(
     cfg: &Config,
     deployment_id: Uuid,
     checkout: &Path,
@@ -578,7 +580,7 @@ async fn ensure_checkout_remote(
     Ok(())
 }
 
-async fn verify_git_head(
+pub(crate) async fn verify_git_head(
     cfg: &Config,
     deployment_id: Uuid,
     checkout: &Path,

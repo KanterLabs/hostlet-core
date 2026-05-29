@@ -1,4 +1,6 @@
-async fn cleanup(root: &Path, dry_run: bool, yes: bool) -> anyhow::Result<()> {
+use super::*;
+
+pub(crate) async fn cleanup(root: &Path, dry_run: bool, yes: bool) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let env = read_env_file(&root.join(".env")).unwrap_or_default();
     let (api_url, token) = operator_api_and_token(&env)?;
@@ -36,7 +38,7 @@ async fn cleanup(root: &Path, dry_run: bool, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn operator_api_and_token(env: &BTreeMap<String, String>) -> anyhow::Result<(String, String)> {
+pub(crate) fn operator_api_and_token(env: &BTreeMap<String, String>) -> anyhow::Result<(String, String)> {
     let api_url = env
         .get("PUBLIC_API_URL")
         .cloned()
@@ -51,7 +53,7 @@ fn operator_api_and_token(env: &BTreeMap<String, String>) -> anyhow::Result<(Str
     Ok((api_url, token))
 }
 
-async fn print_operator_status(client: &reqwest::Client, env: &BTreeMap<String, String>) {
+pub(crate) async fn print_operator_status(client: &reqwest::Client, env: &BTreeMap<String, String>) {
     let (Some(api_url), Some(token)) = (env.get("PUBLIC_API_URL"), env.get("LOCAL_AGENT_TOKEN"))
     else {
         println!("App health summary        unavailable");
@@ -81,14 +83,14 @@ async fn print_operator_status(client: &reqwest::Client, env: &BTreeMap<String, 
     }
 }
 
-async fn update_check() -> anyhow::Result<()> {
+pub(crate) async fn update_check() -> anyhow::Result<()> {
     let client = http_client()?;
     let release = latest_release(&client).await?;
     print_update_check(&release);
     Ok(())
 }
 
-async fn update(root: &Path, dry_run: bool, yes: bool, no_backup: bool) -> anyhow::Result<()> {
+pub(crate) async fn update(root: &Path, dry_run: bool, yes: bool, no_backup: bool) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let client = http_client()?;
     let release = latest_release(&client).await?;
@@ -164,7 +166,7 @@ async fn update(root: &Path, dry_run: bool, yes: bool, no_backup: bool) -> anyho
     Ok(())
 }
 
-fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
+pub(crate) fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
     check("Docker", command_ok("docker", &["version"]));
     check(
         "Docker Compose",
@@ -206,7 +208,7 @@ fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn update_env_image_tag(root: &Path, image_tag: &str) -> anyhow::Result<()> {
+pub(crate) fn update_env_image_tag(root: &Path, image_tag: &str) -> anyhow::Result<()> {
     let env_path = root.join(".env");
     let mut env = read_env_file(&env_path)
         .with_context(|| format!("failed to read {}", env_path.display()))?;
@@ -214,7 +216,7 @@ fn update_env_image_tag(root: &Path, image_tag: &str) -> anyhow::Result<()> {
     write_env_file(&env_path, &env)
 }
 
-fn checkout_release_tag(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
+pub(crate) fn checkout_release_tag(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
     if !root.join(".git").exists() {
         return Ok(());
     }
@@ -227,7 +229,7 @@ fn checkout_release_tag(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()
     run_passthrough(root, "git", &["checkout".into(), "--detach".into(), tag])
 }
 
-fn pre_update_backup(root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn pre_update_backup(root: &Path) -> anyhow::Result<PathBuf> {
     let output = root
         .join("backups")
         .join(format!("pre-update-{}", timestamp_suffix()));
@@ -245,7 +247,7 @@ fn pre_update_backup(root: &Path) -> anyhow::Result<PathBuf> {
     Ok(output)
 }
 
-fn save_update_state(root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn save_update_state(root: &Path) -> anyhow::Result<PathBuf> {
     let state_dir = root
         .join(".hostlet-update")
         .join(format!("state-{}", timestamp_suffix()));
@@ -283,7 +285,7 @@ fn save_update_state(root: &Path) -> anyhow::Result<PathBuf> {
     Ok(state_dir)
 }
 
-fn update_rollback(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn update_rollback(root: &Path) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let update_dir = root.join(".hostlet-update");
     let mut previous = fs::read_dir(&update_dir)
@@ -322,7 +324,7 @@ fn update_rollback(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn latest_update_state(update_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn latest_update_state(update_dir: &Path) -> Option<PathBuf> {
     let mut states = fs::read_dir(update_dir)
         .ok()?
         .filter_map(Result::ok)
@@ -337,7 +339,7 @@ fn latest_update_state(update_dir: &Path) -> Option<PathBuf> {
     states.pop()
 }
 
-fn restore_update_state(root: &Path, state_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn restore_update_state(root: &Path, state_dir: &Path) -> anyhow::Result<()> {
     for relative in [
         ".env",
         "infra/docker-compose.yml",
@@ -359,34 +361,34 @@ fn restore_update_state(root: &Path, state_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct ReleaseInfo {
-    version: String,
-    notes_url: String,
-    released_at: Option<String>,
-    minimum_supported_version: Option<String>,
-    compose_migrations: bool,
-    database_migrations: bool,
-    assets: Vec<ReleaseAsset>,
-    image_registry: Option<String>,
-    image_tag: Option<String>,
-    images: ReleaseImages,
+pub(crate) struct ReleaseInfo {
+    pub(crate) version: String,
+    pub(crate) notes_url: String,
+    pub(crate) released_at: Option<String>,
+    pub(crate) minimum_supported_version: Option<String>,
+    pub(crate) compose_migrations: bool,
+    pub(crate) database_migrations: bool,
+    pub(crate) assets: Vec<ReleaseAsset>,
+    pub(crate) image_registry: Option<String>,
+    pub(crate) image_tag: Option<String>,
+    pub(crate) images: ReleaseImages,
 }
 
-struct ReleaseAsset {
+pub(crate) struct ReleaseAsset {
     name: String,
     download_url: String,
 }
 
 #[derive(Default)]
-struct ReleaseImages {
+pub(crate) struct ReleaseImages {
     api: Option<ReleaseImage>,
-    web: Option<ReleaseImage>,
-    agent: Option<ReleaseImage>,
+    pub(crate) web: Option<ReleaseImage>,
+    pub(crate) agent: Option<ReleaseImage>,
 }
 
-struct ReleaseImage {
-    reference: String,
-    digest: Option<String>,
+pub(crate) struct ReleaseImage {
+    pub(crate) reference: String,
+    pub(crate) digest: Option<String>,
 }
 
 impl ReleaseInfo {
@@ -394,18 +396,18 @@ impl ReleaseInfo {
         self.assets.iter().find(|asset| asset.name == name)
     }
 
-    fn image_tag(&self) -> String {
+    pub(crate) fn image_tag(&self) -> String {
         self.image_tag
             .clone()
             .unwrap_or_else(|| format!("v{}", self.version.trim_start_matches('v')))
     }
 
-    fn has_release_images(&self) -> bool {
+    pub(crate) fn has_release_images(&self) -> bool {
         self.images.api.is_some() && self.images.web.is_some() && self.images.agent.is_some()
     }
 }
 
-async fn latest_release(client: &reqwest::Client) -> anyhow::Result<ReleaseInfo> {
+pub(crate) async fn latest_release(client: &reqwest::Client) -> anyhow::Result<ReleaseInfo> {
     let value: Value = client
         .get(format!(
             "https://api.github.com/repos/{HOSTLET_REPO}/releases/latest"
@@ -461,7 +463,7 @@ async fn latest_release(client: &reqwest::Client) -> anyhow::Result<ReleaseInfo>
     Ok(release)
 }
 
-async fn apply_release_manifest(
+pub(crate) async fn apply_release_manifest(
     client: &reqwest::Client,
     release: &mut ReleaseInfo,
     manifest_url: &str,
@@ -477,7 +479,7 @@ async fn apply_release_manifest(
     Ok(())
 }
 
-fn apply_release_manifest_value(release: &mut ReleaseInfo, value: &Value) {
+pub(crate) fn apply_release_manifest_value(release: &mut ReleaseInfo, value: &Value) {
     if let Some(version) = value.get("version").and_then(|v| v.as_str()) {
         release.version = version.trim_start_matches('v').to_string();
     }
@@ -517,7 +519,7 @@ fn apply_release_manifest_value(release: &mut ReleaseInfo, value: &Value) {
     }
 }
 
-fn parse_release_image(value: Option<&Value>) -> Option<ReleaseImage> {
+pub(crate) fn parse_release_image(value: Option<&Value>) -> Option<ReleaseImage> {
     let value = value?;
     Some(ReleaseImage {
         reference: value.get("ref")?.as_str()?.to_string(),
@@ -529,7 +531,7 @@ fn parse_release_image(value: Option<&Value>) -> Option<ReleaseImage> {
     })
 }
 
-fn print_update_check(release: &ReleaseInfo) {
+pub(crate) fn print_update_check(release: &ReleaseInfo) {
     let current = env!("CARGO_PKG_VERSION");
     let latest = release.version.trim_start_matches('v');
     println!("Current version: {current}");
@@ -592,11 +594,11 @@ fn print_update_check(release: &ReleaseInfo) {
     );
 }
 
-fn version_is_newer(current: &str, latest: &str) -> bool {
+pub(crate) fn version_is_newer(current: &str, latest: &str) -> bool {
     version_parts(latest) > version_parts(current)
 }
 
-fn version_parts(value: &str) -> (u64, u64, u64) {
+pub(crate) fn version_parts(value: &str) -> (u64, u64, u64) {
     let mut parts = value
         .trim_start_matches('v')
         .split('.')
@@ -608,7 +610,7 @@ fn version_parts(value: &str) -> (u64, u64, u64) {
     )
 }
 
-async fn download(client: &reqwest::Client, url: &str, path: &Path) -> anyhow::Result<()> {
+pub(crate) async fn download(client: &reqwest::Client, url: &str, path: &Path) -> anyhow::Result<()> {
     let bytes = client
         .get(url)
         .send()
@@ -620,7 +622,7 @@ async fn download(client: &reqwest::Client, url: &str, path: &Path) -> anyhow::R
     Ok(())
 }
 
-async fn checksum_from_asset(
+pub(crate) async fn checksum_from_asset(
     client: &reqwest::Client,
     asset: &ReleaseAsset,
 ) -> anyhow::Result<String> {
@@ -637,9 +639,8 @@ async fn checksum_from_asset(
         .context("checksum asset was empty")
 }
 
-fn sha256_file(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
-

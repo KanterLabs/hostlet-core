@@ -101,16 +101,6 @@ fn rule_for(method: &Method, path: &str) -> Option<Rule> {
             max: 90,
             window: Duration::from_secs(60),
         }),
-        (&Method::GET, "/auth/github/oauth/start") => Some(Rule {
-            name: "github-oauth-start",
-            max: 20,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::GET, "/auth/github/oauth/callback") => Some(Rule {
-            name: "github-oauth-callback",
-            max: 40,
-            window: Duration::from_secs(60),
-        }),
         (&Method::POST, "/api/agent/register") => Some(Rule {
             name: "agent-register",
             max: 20,

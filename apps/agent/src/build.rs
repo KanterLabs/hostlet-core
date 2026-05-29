@@ -1,4 +1,6 @@
-fn normalize_git_remote(value: &str) -> String {
+use super::*;
+
+pub(crate) fn normalize_git_remote(value: &str) -> String {
     value
         .trim()
         .trim_end_matches(".git")
@@ -6,7 +8,7 @@ fn normalize_git_remote(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn git_fetch_remote(repo: &str, github_token: Option<&str>) -> String {
+pub(crate) fn git_fetch_remote(repo: &str, github_token: Option<&str>) -> String {
     let Some(token) = github_token.filter(|token| !token.trim().is_empty()) else {
         return format!("https://github.com/{repo}.git");
     };
@@ -14,24 +16,24 @@ fn git_fetch_remote(repo: &str, github_token: Option<&str>) -> String {
     format!("https://x-access-token:{encoded}@github.com/{repo}.git")
 }
 
-struct BuildPlan {
-    context: PathBuf,
-    dockerfile: PathBuf,
-    generated: bool,
-    packaging_strategy: PackagingStrategy,
-    detected_framework: Option<Framework>,
-    package_manager: Option<PackageManager>,
+pub(crate) struct BuildPlan {
+    pub(crate) context: PathBuf,
+    pub(crate) dockerfile: PathBuf,
+    pub(crate) generated: bool,
+    pub(crate) packaging_strategy: PackagingStrategy,
+    pub(crate) detected_framework: Option<Framework>,
+    pub(crate) package_manager: Option<PackageManager>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PackagingStrategy {
+pub(crate) enum PackagingStrategy {
     Auto,
     Dockerfile,
     Generated,
 }
 
 impl PackagingStrategy {
-    fn from_payload(payload: &Value) -> anyhow::Result<Self> {
+    pub(crate) fn from_payload(payload: &Value) -> anyhow::Result<Self> {
         match payload
             .get("packaging_strategy")
             .and_then(|v| v.as_str())
@@ -55,7 +57,7 @@ impl PackagingStrategy {
     }
 }
 
-async fn prepare_build(
+pub(crate) async fn prepare_build(
     cfg: &Config,
     deployment_id: Uuid,
     checkout: &Path,
@@ -179,7 +181,7 @@ async fn prepare_build(
     })
 }
 
-async fn safe_project_dir(checkout: &Path, root_directory: &str) -> anyhow::Result<PathBuf> {
+pub(crate) async fn safe_project_dir(checkout: &Path, root_directory: &str) -> anyhow::Result<PathBuf> {
     let clean = root_directory.trim().trim_start_matches('/');
     if clean.len() > 256
         || clean.starts_with('\\')
@@ -206,7 +208,7 @@ async fn safe_project_dir(checkout: &Path, root_directory: &str) -> anyhow::Resu
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PackageManager {
+pub(crate) enum PackageManager {
     Npm,
     Pnpm,
     Yarn,
@@ -237,7 +239,7 @@ impl PackageManager {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Framework {
+pub(crate) enum Framework {
     Next,
     Vite,
     Astro,
@@ -268,7 +270,7 @@ impl Framework {
     }
 }
 
-async fn detect_package_manager(checkout: &Path) -> anyhow::Result<PackageManager> {
+pub(crate) async fn detect_package_manager(checkout: &Path) -> anyhow::Result<PackageManager> {
     if tokio::fs::try_exists(checkout.join("pnpm-lock.yaml")).await? {
         return Ok(PackageManager::Pnpm);
     }
@@ -278,7 +280,7 @@ async fn detect_package_manager(checkout: &Path) -> anyhow::Result<PackageManage
     Ok(PackageManager::Npm)
 }
 
-fn collect_deps(package: &Value) -> HashMap<String, String> {
+pub(crate) fn collect_deps(package: &Value) -> HashMap<String, String> {
     let mut deps = HashMap::new();
     for key in ["dependencies", "devDependencies"] {
         if let Some(map) = package.get(key).and_then(|v| v.as_object()) {
@@ -290,7 +292,7 @@ fn collect_deps(package: &Value) -> HashMap<String, String> {
     deps
 }
 
-fn detect_framework(deps: &HashMap<String, String>) -> Framework {
+pub(crate) fn detect_framework(deps: &HashMap<String, String>) -> Framework {
     if deps.contains_key("next") {
         Framework::Next
     } else if deps.contains_key("astro") {
@@ -308,7 +310,7 @@ fn detect_framework(deps: &HashMap<String, String>) -> Framework {
     }
 }
 
-fn pick_build_command(
+pub(crate) fn pick_build_command(
     scripts: &serde_json::Map<String, Value>,
     framework: Framework,
 ) -> Option<String> {
@@ -321,7 +323,7 @@ fn pick_build_command(
     }
 }
 
-fn pick_start_command(
+pub(crate) fn pick_start_command(
     scripts: &serde_json::Map<String, Value>,
     framework: Framework,
 ) -> Option<String> {
@@ -336,7 +338,7 @@ fn pick_start_command(
     }
 }
 
-fn generated_node_dockerfile(
+pub(crate) fn generated_node_dockerfile(
     pm: PackageManager,
     install_command: Option<&str>,
     build_command: Option<&str>,
@@ -436,7 +438,7 @@ fn generated_node_dockerfile(
     )
 }
 
-fn generated_dockerignore() -> &'static str {
+pub(crate) fn generated_dockerignore() -> &'static str {
     ".git\n\
      .next/cache\n\
      .nuxt\n\
@@ -451,7 +453,7 @@ fn generated_dockerignore() -> &'static str {
      .DS_Store\n"
 }
 
-fn buildx_args<'a>(
+pub(crate) fn buildx_args<'a>(
     image: &'a str,
     dockerfile: &'a str,
     context: &'a str,
@@ -474,18 +476,18 @@ fn buildx_args<'a>(
     ]
 }
 
-fn docker_build_args<'a>(image: &'a str, dockerfile: &'a str, context: &'a str) -> Vec<&'a str> {
+pub(crate) fn docker_build_args<'a>(image: &'a str, dockerfile: &'a str, context: &'a str) -> Vec<&'a str> {
     vec!["build", "-f", dockerfile, "-t", image, context]
 }
 
-async fn docker_buildx_available() -> bool {
+pub(crate) async fn docker_buildx_available() -> bool {
     command_output("docker", &["buildx", "version"], Duration::from_secs(30))
         .await
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
-async fn image_size_bytes(image: &str) -> anyhow::Result<i64> {
+pub(crate) async fn image_size_bytes(image: &str) -> anyhow::Result<i64> {
     let output = command_output(
         "docker",
         &["image", "inspect", "-f", "{{.Size}}", image],
@@ -508,7 +510,7 @@ async fn image_size_bytes(image: &str) -> anyhow::Result<i64> {
         .context("docker image inspect size was not an integer")
 }
 
-fn build_runtime_metadata(
+pub(crate) fn build_runtime_metadata(
     build: &BuildPlan,
     build_duration_ms: u128,
     image_size_bytes: Option<i64>,
@@ -524,7 +526,7 @@ fn build_runtime_metadata(
     })
 }
 
-async fn stream_lines<R: tokio::io::AsyncRead + Unpin>(
+pub(crate) async fn stream_lines<R: tokio::io::AsyncRead + Unpin>(
     cfg: Config,
     deployment_id: Uuid,
     stream: &str,
@@ -536,7 +538,7 @@ async fn stream_lines<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-async fn wait_health(
+pub(crate) async fn wait_health(
     cfg: &Config,
     deployment_id: Uuid,
     container: &str,
@@ -593,11 +595,11 @@ async fn wait_health(
     bail!("no successful response from {url}");
 }
 
-fn docker_port_map(port: u16) -> String {
+pub(crate) fn docker_port_map(port: u16) -> String {
     format!("127.0.0.1::{port}")
 }
 
-async fn apply_caddy_route(
+pub(crate) async fn apply_caddy_route(
     cfg: &Config,
     deployment_id: Uuid,
     app: &str,
@@ -625,13 +627,13 @@ async fn apply_caddy_route(
     Ok(())
 }
 
-fn render_caddy_route(app: &str, domain: &str, port: u16) -> String {
+pub(crate) fn render_caddy_route(app: &str, domain: &str, port: u16) -> String {
     format!(
         "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n{domain} {{\n  reverse_proxy 127.0.0.1:{port}\n}}\n"
     )
 }
 
-async fn remove_caddy_route(app: &str) -> anyhow::Result<()> {
+pub(crate) async fn remove_caddy_route(app: &str) -> anyhow::Result<()> {
     let target = PathBuf::from("/etc/caddy/hostlet").join(format!("{app}.caddy"));
     match tokio::fs::remove_file(target).await {
         Ok(()) => Ok(()),
@@ -640,7 +642,7 @@ async fn remove_caddy_route(app: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn apply_local_caddy_route(
+pub(crate) async fn apply_local_caddy_route(
     cfg: &Config,
     deployment_id: Uuid,
     router: &LocalRouter,
@@ -661,9 +663,8 @@ async fn apply_local_caddy_route(
     Ok(())
 }
 
-fn render_local_caddy_route(app: &str, domain: &str, port: u16) -> String {
+pub(crate) fn render_local_caddy_route(app: &str, domain: &str, port: u16) -> String {
     format!(
         "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n@{app} host {domain}\nreverse_proxy @{app} 127.0.0.1:{port}\n"
     )
 }
-

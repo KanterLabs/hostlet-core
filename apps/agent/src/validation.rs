@@ -1,4 +1,6 @@
-fn valid_hostlet_image(value: &str) -> bool {
+use super::*;
+
+pub(crate) fn valid_hostlet_image(value: &str) -> bool {
     value.starts_with("hostlet/")
         && value.len() <= 300
         && value
@@ -6,7 +8,7 @@ fn valid_hostlet_image(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '_' | '-'))
 }
 
-fn verify_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
+pub(crate) fn verify_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(payload);
     let expected = format!(
@@ -20,11 +22,11 @@ fn verify_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
     constant_time_eq(expected.as_bytes(), signature.as_bytes())
 }
 
-fn env(key: &str) -> anyhow::Result<String> {
+pub(crate) fn env(key: &str) -> anyhow::Result<String> {
     std::env::var(key).with_context(|| format!("{key} is required"))
 }
 
-fn local_router_config() -> anyhow::Result<Option<LocalRouter>> {
+pub(crate) fn local_router_config() -> anyhow::Result<Option<LocalRouter>> {
     if std::env::var("HOSTLET_LOCAL_ROUTER").ok().as_deref() != Some("caddy") {
         return Ok(None);
     }
@@ -48,7 +50,7 @@ fn local_router_config() -> anyhow::Result<Option<LocalRouter>> {
     }))
 }
 
-fn safe_name(s: &str) -> String {
+pub(crate) fn safe_name(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -59,7 +61,7 @@ fn safe_name(s: &str) -> String {
         })
         .collect()
 }
-async fn docker_published_port(container: &str, container_port: u16) -> anyhow::Result<u16> {
+pub(crate) async fn docker_published_port(container: &str, container_port: u16) -> anyhow::Result<u16> {
     let target = format!("{container_port}/tcp");
     let output = command_output(
         "docker",
@@ -81,7 +83,7 @@ async fn docker_published_port(container: &str, container_port: u16) -> anyhow::
         .context("Docker did not report a published port")
 }
 
-async fn compose_service_container(
+pub(crate) async fn compose_service_container(
     dir: &Path,
     project: &str,
     compose_file: &Path,
@@ -132,7 +134,7 @@ async fn compose_service_container(
     Ok(name)
 }
 
-async fn command_output_in_dir(
+pub(crate) async fn command_output_in_dir(
     dir: &Path,
     bin: &str,
     args: &[&str],
@@ -146,11 +148,11 @@ async fn command_output_in_dir(
     }
 }
 
-fn compose_project_name(app_id: Uuid) -> String {
+pub(crate) fn compose_project_name(app_id: Uuid) -> String {
     format!("hostlet-app-{}", app_id.simple())
 }
 
-fn compose_override_yaml(
+pub(crate) fn compose_override_yaml(
     web_service: &str,
     port: u16,
     app_id: Uuid,
@@ -181,7 +183,7 @@ fn compose_override_yaml(
     )
 }
 
-fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
     let value: serde_yaml::Value =
         serde_yaml::from_str(contents).context("compose file is not valid YAML")?;
     let services = value
@@ -244,7 +246,7 @@ fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<
     Ok(())
 }
 
-fn validate_relative_file_path(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_relative_file_path(value: &str) -> anyhow::Result<()> {
     let value = value.trim();
     if value.is_empty()
         || value.len() > 256
@@ -258,7 +260,7 @@ fn validate_relative_file_path(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_service_name(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_service_name(value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 48
         || !value
@@ -272,7 +274,7 @@ fn validate_service_name(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn valid_env_key(key: &str) -> bool {
+pub(crate) fn valid_env_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 128
         && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -281,14 +283,14 @@ fn valid_env_key(key: &str) -> bool {
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn redact(line: &str) -> String {
+pub(crate) fn redact(line: &str) -> String {
     if let Some(redacted) = redact_url_credentials(line) {
         return redacted;
     }
@@ -313,7 +315,7 @@ fn redact(line: &str) -> String {
     }
 }
 
-fn redact_url_credentials(value: &str) -> Option<String> {
+pub(crate) fn redact_url_credentials(value: &str) -> Option<String> {
     let scheme = "https://";
     let start = value.find(scheme)?;
     let credentials_start = start + scheme.len();
@@ -325,7 +327,7 @@ fn redact_url_credentials(value: &str) -> Option<String> {
     Some(redacted)
 }
 
-fn command_args_for_log(args: &[&str]) -> Vec<String> {
+pub(crate) fn command_args_for_log(args: &[&str]) -> Vec<String> {
     let mut output = Vec::with_capacity(args.len());
     let mut redact_next = false;
     for arg in args {
@@ -348,14 +350,14 @@ fn command_args_for_log(args: &[&str]) -> Vec<String> {
     output
 }
 
-fn redact_env_arg(arg: &str) -> String {
+pub(crate) fn redact_env_arg(arg: &str) -> String {
     match arg.split_once('=') {
         Some((key, _)) if !key.is_empty() => format!("{key}=[redacted]"),
         _ => "[redacted]".into(),
     }
 }
 
-fn env_args(p: &Value) -> Vec<String> {
+pub(crate) fn env_args(p: &Value) -> Vec<String> {
     p.get("env")
         .and_then(|v| v.as_object())
         .map(|m| {
@@ -366,18 +368,18 @@ fn env_args(p: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn env_pairs_has_key(pairs: &[String], key: &str) -> bool {
+pub(crate) fn env_pairs_has_key(pairs: &[String], key: &str) -> bool {
     pairs
         .iter()
         .filter_map(|pair| pair.split_once('='))
         .any(|(existing, _)| existing == key)
 }
 
-fn app_data_volume(app_id: Uuid) -> String {
+pub(crate) fn app_data_volume(app_id: Uuid) -> String {
     format!("hostlet-app-data-{app_id}")
 }
 
-async fn ensure_app_data_volume(
+pub(crate) async fn ensure_app_data_volume(
     cfg: &Config,
     deployment_id: Uuid,
     volume: &str,
@@ -402,7 +404,7 @@ async fn ensure_app_data_volume(
     .await
 }
 
-async fn remove_app_data_volume(app_id: Uuid) -> anyhow::Result<()> {
+pub(crate) async fn remove_app_data_volume(app_id: Uuid) -> anyhow::Result<()> {
     let volume = app_data_volume(app_id);
     run_quiet_absent_ok(
         "docker",
@@ -412,7 +414,7 @@ async fn remove_app_data_volume(app_id: Uuid) -> anyhow::Result<()> {
     .await
 }
 
-async fn remove_compose_project_resources(project: &str) -> anyhow::Result<()> {
+pub(crate) async fn remove_compose_project_resources(project: &str) -> anyhow::Result<()> {
     if !valid_compose_project_name(project) {
         bail!("refusing to remove invalid compose project");
     }
@@ -455,7 +457,7 @@ async fn remove_compose_project_resources(project: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn docker_names_by_label(
+pub(crate) async fn docker_names_by_label(
     cmd: &str,
     args: &[&str],
     format: &str,
@@ -476,7 +478,7 @@ async fn docker_names_by_label(
         .collect())
 }
 
-fn valid_compose_project_name(value: &str) -> bool {
+pub(crate) fn valid_compose_project_name(value: &str) -> bool {
     value.starts_with("hostlet-app-")
         && value.len() <= 64
         && value
@@ -484,7 +486,7 @@ fn valid_compose_project_name(value: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn valid_compose_volume_name(value: &str) -> bool {
+pub(crate) fn valid_compose_volume_name(value: &str) -> bool {
     value.starts_with("hostlet-app-")
         && value.len() <= 128
         && value
@@ -492,7 +494,7 @@ fn valid_compose_volume_name(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn validate_repo(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_repo(value: &str) -> anyhow::Result<()> {
     let mut parts = value.split('/');
     let owner = parts.next().unwrap_or_default();
     let repo = parts.next().unwrap_or_default();
@@ -512,7 +514,7 @@ fn validate_repo(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_branch(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_branch(value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 255
         || value.starts_with('-')
@@ -529,7 +531,7 @@ fn validate_branch(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_commit_sha(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_commit_sha(value: &str) -> anyhow::Result<()> {
     if value == "HEAD" {
         return Ok(());
     }
@@ -539,14 +541,14 @@ fn validate_commit_sha(value: &str) -> anyhow::Result<()> {
     bail!("commit sha must be HEAD or a 40-character hex SHA");
 }
 
-fn validate_port(value: i64) -> anyhow::Result<()> {
+pub(crate) fn validate_port(value: i64) -> anyhow::Result<()> {
     if !(1..=65_535).contains(&value) {
         bail!("container port must be between 1 and 65535");
     }
     Ok(())
 }
 
-fn validate_domain(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_domain(value: &str) -> anyhow::Result<()> {
     let valid = if let Some((host, port)) = value.rsplit_once(':') {
         valid_hostname(host) && !port.is_empty() && port.parse::<u16>().is_ok()
     } else {
@@ -558,7 +560,7 @@ fn validate_domain(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn valid_hostname(value: &str) -> bool {
+pub(crate) fn valid_hostname(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 253
         && !value.starts_with('.')
@@ -572,7 +574,7 @@ fn valid_hostname(value: &str) -> bool {
         })
 }
 
-fn validate_health_path(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_health_path(value: &str) -> anyhow::Result<()> {
     if !value.starts_with('/')
         || value.len() > 256
         || value.chars().any(|c| c.is_control() || c == '\\')
@@ -582,7 +584,7 @@ fn validate_health_path(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_dockerfile_command(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_dockerfile_command(value: &str) -> anyhow::Result<()> {
     if value.len() > 500 || value.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
         bail!("commands cannot contain newlines, NUL bytes, or more than 500 characters");
     }

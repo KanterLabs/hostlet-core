@@ -1,4 +1,6 @@
-async fn handle_agent_message(state: &AppState, server_id: Uuid, msg: serde_json::Value) {
+use super::*;
+
+pub(in crate::agent) async fn handle_agent_message(state: &AppState, server_id: Uuid, msg: serde_json::Value) {
     match msg.get("type").and_then(|v| v.as_str()) {
         Some("heartbeat") => {
             let _ =
@@ -271,7 +273,7 @@ async fn handle_agent_message(state: &AppState, server_id: Uuid, msg: serde_json
     }
 }
 
-async fn prune_health_events(state: &AppState, app_id: Uuid) {
+pub(in crate::agent) async fn prune_health_events(state: &AppState, app_id: Uuid) {
     let _ = sqlx::query(
         "DELETE FROM app_health_events
          WHERE app_id=$1
@@ -294,64 +296,4 @@ async fn prune_health_events(state: &AppState, app_id: Uuid) {
     .bind(MAX_HEALTH_EVENTS_PER_APP)
     .execute(&state.db)
     .await;
-}
-
-async fn authenticated_server_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
-    let server_id = header_uuid(headers, "x-hostlet-server-id")?;
-    let token = headers
-        .get("x-hostlet-agent-token")
-        .and_then(|v| v.to_str().ok())?;
-    let row = sqlx::query("SELECT agent_token_hash FROM servers WHERE id=$1")
-        .bind(server_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()?;
-    let expected: Option<String> = row.get("agent_token_hash");
-    expected
-        .as_deref()
-        .filter(|hash| verify_token(token, hash))
-        .map(|_| server_id)
-}
-
-fn valid_deployment_status(status: &str) -> bool {
-    status.parse::<DeploymentStatus>().is_ok() && status != "canceled"
-}
-
-fn valid_agent_job_status(status: &str) -> bool {
-    status.parse::<AgentJobStatus>().is_ok() && status != "canceled"
-}
-
-fn valid_health_status(status: &str) -> bool {
-    status.parse::<RuntimeHealthStatus>().is_ok()
-}
-
-fn valid_container_name(value: &str) -> bool {
-    value.starts_with("hostlet-")
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-fn truncate_log_line(line: &str, max_bytes: usize) -> String {
-    if line.len() <= max_bytes {
-        return line.to_string();
-    }
-    let mut end = max_bytes;
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...[truncated]", &line[..end])
-}
-
-fn header_uuid(headers: &HeaderMap, key: &str) -> Option<Uuid> {
-    headers
-        .get(key)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| Uuid::parse_str(v).ok())
-}
-
-fn connection_is_current(connection: &AgentConnection, connection_id: Uuid) -> bool {
-    connection.connection_id == connection_id
 }

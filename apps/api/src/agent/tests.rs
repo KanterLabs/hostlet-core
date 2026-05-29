@@ -1,6 +1,5 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
+use super::*;
+use super::routes::{ClaimJobRequest, CompleteJobRequest};
 
     #[test]
     fn stale_agent_connection_does_not_match_current_connection() {
@@ -344,4 +343,3 @@ mod tests {
         let bytes = *Uuid::new_v4().as_bytes();
         i64::from_be_bytes(bytes[..8].try_into().unwrap()).abs()
     }
-}

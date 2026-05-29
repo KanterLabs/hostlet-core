@@ -1,4 +1,6 @@
-fn compose_args(dev: bool) -> Vec<String> {
+use super::*;
+
+pub(crate) fn compose_args(dev: bool) -> Vec<String> {
     vec![
         "compose".into(),
         "-f".into(),
@@ -10,7 +12,7 @@ fn compose_args(dev: bool) -> Vec<String> {
     ]
 }
 
-fn run_passthrough(root: &Path, bin: &str, args: &[String]) -> anyhow::Result<()> {
+pub(crate) fn run_passthrough(root: &Path, bin: &str, args: &[String]) -> anyhow::Result<()> {
     let mut command = Command::new(bin);
     command
         .current_dir(root)
@@ -30,7 +32,7 @@ fn run_passthrough(root: &Path, bin: &str, args: &[String]) -> anyhow::Result<()
     Ok(())
 }
 
-fn command_ok(bin: &str, args: &[&str]) -> bool {
+pub(crate) fn command_ok(bin: &str, args: &[&str]) -> bool {
     Command::new(bin)
         .args(args)
         .stdout(Stdio::null())
@@ -40,7 +42,7 @@ fn command_ok(bin: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn compose_config_ok(root: &Path, dev: bool) -> bool {
+pub(crate) fn compose_config_ok(root: &Path, dev: bool) -> bool {
     let mut args = compose_args(dev);
     args.push("config".into());
     Command::new("docker")
@@ -53,7 +55,7 @@ fn compose_config_ok(root: &Path, dev: bool) -> bool {
         .unwrap_or(false)
 }
 
-fn compose_services_running(root: &Path, dev: bool) -> bool {
+pub(crate) fn compose_services_running(root: &Path, dev: bool) -> bool {
     let mut args = compose_args(dev);
     args.extend([
         "ps".into(),
@@ -69,7 +71,7 @@ fn compose_services_running(root: &Path, dev: bool) -> bool {
         .unwrap_or(false)
 }
 
-fn disk_space_ok(root: &Path) -> bool {
+pub(crate) fn disk_space_ok(root: &Path) -> bool {
     Command::new("df")
         .arg("-Pk")
         .arg(root)
@@ -87,7 +89,7 @@ fn disk_space_ok(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn latest_backup(root: &Path) -> Option<PathBuf> {
+pub(crate) fn latest_backup(root: &Path) -> Option<PathBuf> {
     let backup_dir = root.join("backups");
     let mut entries = fs::read_dir(backup_dir)
         .ok()?
@@ -101,14 +103,14 @@ fn latest_backup(root: &Path) -> Option<PathBuf> {
     entries.pop().map(|(_, path)| path)
 }
 
-fn latest_backup_age(root: &Path) -> Option<String> {
+pub(crate) fn latest_backup_age(root: &Path) -> Option<String> {
     let backup = latest_backup(root)?;
     let modified = backup.metadata().ok()?.modified().ok()?;
     let elapsed = modified.elapsed().ok()?;
     Some(format_duration(elapsed))
 }
 
-fn format_duration(duration: Duration) -> String {
+pub(crate) fn format_duration(duration: Duration) -> String {
     let hours = duration.as_secs() / 3600;
     if hours >= 48 {
         format!("{} days", hours / 24)
@@ -119,7 +121,7 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-fn check(label: &str, ok: bool) {
+pub(crate) fn check(label: &str, ok: bool) {
     println!(
         "{:<28} {}",
         label,
@@ -127,7 +129,7 @@ fn check(label: &str, ok: bool) {
     );
 }
 
-fn default_env() -> BTreeMap<String, String> {
+pub(crate) fn default_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     let postgres_password = hex_secret(24);
     env.insert("POSTGRES_USER".into(), "hostlet".into());
@@ -164,7 +166,7 @@ fn default_env() -> BTreeMap<String, String> {
     env
 }
 
-fn write_env_file(path: &Path, env: &BTreeMap<String, String>) -> anyhow::Result<()> {
+pub(crate) fn write_env_file(path: &Path, env: &BTreeMap<String, String>) -> anyhow::Result<()> {
     let mut out = String::new();
     for (key, value) in env {
         out.push_str(key);
@@ -181,7 +183,7 @@ fn write_env_file(path: &Path, env: &BTreeMap<String, String>) -> anyhow::Result
     Ok(())
 }
 
-fn secret_open_options() -> OpenOptions {
+pub(crate) fn secret_open_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]
@@ -189,14 +191,14 @@ fn secret_open_options() -> OpenOptions {
     options
 }
 
-fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to set secure permissions on {}", path.display()))?;
     Ok(())
 }
 
-fn read_env_file(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+pub(crate) fn read_env_file(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     let mut env = BTreeMap::new();
     for line in fs::read_to_string(path)?.lines() {
         let line = line.trim();
@@ -210,7 +212,7 @@ fn read_env_file(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(env)
 }
 
-fn quote_env(value: &str) -> String {
+pub(crate) fn quote_env(value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
@@ -224,7 +226,7 @@ fn quote_env(value: &str) -> String {
     }
 }
 
-fn unquote_env(value: &str) -> String {
+pub(crate) fn unquote_env(value: &str) -> String {
     value
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
@@ -233,19 +235,19 @@ fn unquote_env(value: &str) -> String {
         .replace("\\\\", "\\")
 }
 
-fn base64_secret(bytes: usize) -> String {
+pub(crate) fn base64_secret(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::thread_rng().fill_bytes(&mut buf);
     STANDARD.encode(buf)
 }
 
-fn hex_secret(bytes: usize) -> String {
+pub(crate) fn hex_secret(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::thread_rng().fill_bytes(&mut buf);
     buf.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn docker_gid() -> String {
+pub(crate) fn docker_gid() -> String {
     #[cfg(unix)]
     {
         fs::metadata("/var/run/docker.sock")
@@ -258,11 +260,11 @@ fn docker_gid() -> String {
     }
 }
 
-fn timestamp_suffix() -> String {
+pub(crate) fn timestamp_suffix() -> String {
     chrono_like_timestamp()
 }
 
-fn chrono_like_timestamp() -> String {
+pub(crate) fn chrono_like_timestamp() -> String {
     Command::new("date")
         .arg("-u")
         .arg("+%Y%m%dT%H%M%SZ")
@@ -274,7 +276,7 @@ fn chrono_like_timestamp() -> String {
         .unwrap_or_else(|| "backup".into())
 }
 
-fn ensure_repo_root(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn ensure_repo_root(root: &Path) -> anyhow::Result<()> {
     if !root.join("infra").join("docker-compose.yml").exists() || !root.join("Cargo.toml").exists()
     {
         bail!(
@@ -285,7 +287,7 @@ fn ensure_repo_root(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn require_interactive() -> anyhow::Result<()> {
+pub(crate) fn require_interactive() -> anyhow::Result<()> {
     if !io::stdin().is_terminal() {
         bail!("hostlet init requires an interactive terminal");
     }

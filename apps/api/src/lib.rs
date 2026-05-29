@@ -98,11 +98,6 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
         )
         .route("/auth/github/device/start", post(auth::github_device_start))
         .route("/auth/github/device/poll", post(auth::github_device_poll))
-        .route("/auth/github/oauth/start", get(auth::github_oauth_start))
-        .route(
-            "/auth/github/oauth/callback",
-            get(auth::github_oauth_callback),
-        )
         .route("/api/session", get(auth::session_status))
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", post(auth::setup_password))

@@ -1,49 +1,25 @@
-use anyhow::{bail, Context};
-use futures_util::{SinkExt, StreamExt};
-use hmac::{Hmac, Mac};
-use reqwest::StatusCode;
-use serde::Deserialize;
-use serde_json::{json, Value};
-use sha2::Sha256;
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-    process::{Output, Stdio},
-    time::{Duration, Instant},
-};
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-};
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, Message},
-};
-use uuid::Uuid;
-
-type HmacSha256 = Hmac<Sha256>;
+use super::*;
 
 #[derive(Clone)]
-struct Config {
-    api_url: String,
-    http: reqwest::Client,
-    server_id: Uuid,
-    agent_token: String,
-    job_signing_secret: String,
-    workdir: PathBuf,
-    local_mode: bool,
-    health_host: String,
-    local_router: Option<LocalRouter>,
+pub(crate) struct Config {
+    pub(crate) api_url: String,
+    pub(crate) http: reqwest::Client,
+    pub(crate) server_id: Uuid,
+    pub(crate) agent_token: String,
+    pub(crate) job_signing_secret: String,
+    pub(crate) workdir: PathBuf,
+    pub(crate) local_mode: bool,
+    pub(crate) health_host: String,
+    pub(crate) local_router: Option<LocalRouter>,
 }
 
 #[derive(Clone)]
-struct LocalRouter {
-    snippets_dir: PathBuf,
-    reload_command: Vec<String>,
+pub(crate) struct LocalRouter {
+    pub(crate) snippets_dir: PathBuf,
+    pub(crate) reload_command: Vec<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+pub(crate) async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
     let cfg = Config {
         api_url: env("HOSTLET_API_URL")?,
@@ -70,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
+pub(crate) async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
     let ws_url = cfg
         .api_url
         .replace("http://", "ws://")
@@ -106,7 +82,7 @@ async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
     }
 }
 
-async fn claim_and_run_job(cfg: &Config) {
+pub(crate) async fn claim_and_run_job(cfg: &Config) {
     let response = cfg
         .http
         .post(format!("{}/api/agent/jobs/claim", cfg.api_url))
@@ -171,7 +147,7 @@ async fn claim_and_run_job(cfg: &Config) {
     }
 }
 
-async fn run_claimed_job_with_lease(
+pub(crate) async fn run_claimed_job_with_lease(
     cfg: Config,
     job_id: Uuid,
     payload: Value,
@@ -190,7 +166,7 @@ async fn run_claimed_job_with_lease(
     result
 }
 
-async fn complete_claimed_job(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
+pub(crate) async fn complete_claimed_job(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
     let _ = cfg
         .http
         .post(format!("{}/api/agent/jobs/{id}/complete", cfg.api_url))
@@ -201,7 +177,7 @@ async fn complete_claimed_job(cfg: &Config, id: Uuid, status: &str, failure: Opt
         .await;
 }
 
-async fn handle_ws_text(cfg: &Config, text: &str) {
+pub(crate) async fn handle_ws_text(cfg: &Config, text: &str) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         tracing::warn!("ignored invalid websocket JSON from API");
         return;
@@ -259,7 +235,7 @@ async fn handle_ws_text(cfg: &Config, text: &str) {
     }
 }
 
-async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
+pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
     match payload.get("type").and_then(|v| v.as_str()) {
         Some("deploy") => deploy(cfg, payload).await,
         Some("rollback") => rollback(cfg, payload).await,
@@ -277,7 +253,7 @@ async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
     }
 }
 
-async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
+pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
     let app_id = Uuid::parse_str(p["app_id"].as_str().context("app_id")?)?;
     let app_name = safe_name(&format!("app-{app_id}"));
