@@ -214,7 +214,7 @@ async function installApiMocks(page) {
           name: "This machine",
           kind: "local",
           status: "online",
-          version: "0.5.1",
+          version: "0.2.0",
           lastSeenAt: new Date().toISOString(),
         },
       ]);
@@ -256,10 +256,10 @@ async function installApiMocks(page) {
     if (path === "/api/agent-jobs") return json([]);
     if (path === "/api/system/version") {
       return json({
-        currentVersion: "0.5.1",
+        currentVersion: "0.2.0",
         updateChecksEnabled: true,
         update: {
-          latestVersion: "0.5.1",
+          latestVersion: "0.2.0",
           updateAvailable: false,
           checkedAt: new Date().toISOString(),
         },

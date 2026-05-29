@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "hostlet"
-version = "0.5.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "hostlet-agent"
-version = "0.5.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "hostlet-api"
-version = "0.5.1"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "hostlet-contracts"
-version = "0.5.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
