@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 mod app_env;
+mod app_delete;
 mod apps;
 mod audit;
 mod cleanup;
@@ -27,9 +28,8 @@ mod system;
 mod validation;
 
 pub use app_env::{app_env_vars, delete_app_env_var, set_app_env_var};
-pub use apps::{
-    create_app, delete_app, get_app, list_apps, reconcile_completed_delete_jobs, update_app,
-};
+pub use app_delete::{delete_app, reconcile_completed_delete_jobs};
+pub use apps::{create_app, get_app, list_apps, update_app};
 pub use audit::audit_events;
 pub use cleanup::{cleanup_preview, run_cleanup};
 pub use system::{operator_cleanup_preview, operator_run_cleanup};
@@ -44,7 +44,10 @@ pub use system::{
 };
 
 pub(in crate::web) use dns::cloudflare::{delete_cloudflare_app_dns, ensure_cloudflare_app_dns};
-pub(in crate::web) use apps::{app_belongs_to_user, finalize_delete_app_from_job};
+pub(in crate::web) use app_delete::{app_belongs_to_user, finalize_delete_app_from_job};
+pub(in crate::web) use app_delete::{
+    app_domain_in_use, compensate_failed_app_update_dns, delete_created_app_row,
+};
 pub(in crate::web) use cleanup::{cleanup_plan, run_cleanup_inner};
 pub(in crate::web) use jobs::enqueue_interactive_agent_job;
 pub(in crate::web) use system::domain_host;
