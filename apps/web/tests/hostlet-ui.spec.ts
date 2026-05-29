@@ -36,7 +36,7 @@ async function handleApi(route: Route, path: string) {
   if (path === "/api/github/status") return json({ oauthConfigured: true, webhookConfigured: true, authenticated: true, tokenValid: true, login: "ci-user", message: "GitHub Device Flow is configured." });
   if (path === "/api/github/repos") return json([]);
   if (path === "/api/cloudflare/status") return json({ configured: true, tokenValid: true, baseDomain: "example.test", defaultDomainPattern: "*.example.test", domainPrefix: "hostlet-", tunnelTargetConfigured: true, message: "Cloudflare DNS is configured." });
-  if (path === "/api/system/version") return json({ currentVersion: "0.5.0", updateChecksEnabled: true });
+  if (path === "/api/system/version") return json({ currentVersion: "0.5.1", updateChecksEnabled: true });
   if (path === "/api/system/cleanup") return json({ database: {}, docker: { keepContainers: 1, keepImages: 1, jobWillRun: true } });
   if (path === "/api/system/backups/latest") return json(null);
   if (path === "/api/agent-jobs" || path === "/api/audit-events") return json([]);
