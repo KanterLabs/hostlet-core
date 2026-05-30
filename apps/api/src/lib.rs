@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod apps;
 pub mod auth;
 pub mod crypto;
 pub mod deploy;
