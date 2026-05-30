@@ -6,6 +6,7 @@ cd "${ROOT}"
 
 git diff --check
 scripts/check-line-cap.sh
+scripts/check-line-cap-selftest.sh
 cargo fmt --all -- --check
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hostlet-target}" cargo clippy --workspace --all-targets --all-features -- -D warnings
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hostlet-target}" cargo test --workspace

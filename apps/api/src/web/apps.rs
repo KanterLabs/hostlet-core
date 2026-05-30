@@ -347,10 +347,6 @@ pub async fn create_app(
     if let Err(message) = validate_env_vars(&body.env) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
-    let mut tx = match state.db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
     let auto_deploy = body.auto_deploy.unwrap_or(false);
     if auto_deploy {
         if let Err(err) = github::ensure_repo_webhook(&state, user_id, repo_full_name).await {
@@ -362,36 +358,43 @@ pub async fn create_app(
                 .into_response();
         }
     }
-    let row = sqlx::query("INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit,public_exposure,auto_deploy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id")
-        .bind(user_id).bind(server_id).bind(app_name).bind(repo_full_name).bind(branch).bind(body.container_port).bind(health_path).bind(&domain)
-        .bind(runtime_kind).bind(hostlet_config_path).bind(runtime_config).bind(packaging_strategy).bind(root_directory).bind(install_command).bind(build_command).bind(start_command)
-        .bind(body.memory_limit_mb)
-        .bind(body.cpu_limit)
-        .bind(public_exposure).bind(auto_deploy)
-        .fetch_one(&mut *tx).await;
-    let Ok(row) = row else {
-        return StatusCode::BAD_REQUEST.into_response();
+    let record = crate::apps::NewAppRecord {
+        user_id,
+        server_id,
+        name: app_name.to_string(),
+        repo_full_name: repo_full_name.to_string(),
+        branch: branch.to_string(),
+        container_port: body.container_port,
+        health_path,
+        domain: domain.clone(),
+        runtime_kind,
+        hostlet_config_path,
+        runtime_config,
+        packaging_strategy,
+        root_directory,
+        install_command,
+        build_command,
+        start_command,
+        memory_limit_mb: body.memory_limit_mb,
+        cpu_limit: body.cpu_limit,
+        public_exposure,
+        auto_deploy,
+        env: body
+            .env
+            .into_iter()
+            .map(|ev| crate::apps::AppEnvVarInput {
+                key: ev.key,
+                value: ev.value,
+            })
+            .collect(),
     };
-    let app_id: Uuid = row.get("id");
-    for ev in body.env {
-        let enc = match state.crypto.encrypt(&ev.value) {
-            Ok(v) => v,
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
-        if sqlx::query("INSERT INTO app_env_vars (app_id,key,value_ciphertext) VALUES ($1,$2,$3)")
-            .bind(app_id)
-            .bind(ev.key)
-            .bind(enc)
-            .execute(&mut *tx)
-            .await
-            .is_err()
-        {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    let app_id = match crate::apps::create_app_record(&state, record).await {
+        Ok(id) => id,
+        Err(crate::apps::CreateAppError::Insert) => return StatusCode::BAD_REQUEST.into_response(),
+        Err(crate::apps::CreateAppError::Internal) => {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-    }
-    if tx.commit().await.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+    };
     if public_exposure {
         if let Err(err) = ensure_cloudflare_app_dns(&state, app_id, &domain).await {
             tracing::warn!(error = %err, domain = %domain, "failed to open public tunnel");
