@@ -1,6 +1,9 @@
 use super::*;
 
-pub(in crate::agent) async fn authenticated_server_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
+pub(in crate::agent) async fn authenticated_server_id(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<Uuid> {
     let server_id = header_uuid(headers, "x-hostlet-server-id")?;
     let token = headers
         .get("x-hostlet-agent-token")

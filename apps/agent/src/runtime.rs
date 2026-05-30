@@ -166,7 +166,12 @@ pub(crate) async fn run_claimed_job_with_lease(
     result
 }
 
-pub(crate) async fn complete_claimed_job(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
+pub(crate) async fn complete_claimed_job(
+    cfg: &Config,
+    id: Uuid,
+    status: &str,
+    failure: Option<&str>,
+) {
     let _ = cfg
         .http
         .post(format!("{}/api/agent/jobs/{id}/complete", cfg.api_url))

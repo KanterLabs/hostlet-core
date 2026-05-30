@@ -38,7 +38,9 @@ pub(crate) async fn cleanup(root: &Path, dry_run: bool, yes: bool) -> anyhow::Re
     Ok(())
 }
 
-pub(crate) fn operator_api_and_token(env: &BTreeMap<String, String>) -> anyhow::Result<(String, String)> {
+pub(crate) fn operator_api_and_token(
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<(String, String)> {
     let api_url = env
         .get("PUBLIC_API_URL")
         .cloned()
@@ -53,7 +55,10 @@ pub(crate) fn operator_api_and_token(env: &BTreeMap<String, String>) -> anyhow::
     Ok((api_url, token))
 }
 
-pub(crate) async fn print_operator_status(client: &reqwest::Client, env: &BTreeMap<String, String>) {
+pub(crate) async fn print_operator_status(
+    client: &reqwest::Client,
+    env: &BTreeMap<String, String>,
+) {
     let (Some(api_url), Some(token)) = (env.get("PUBLIC_API_URL"), env.get("LOCAL_AGENT_TOKEN"))
     else {
         println!("App health summary        unavailable");
@@ -90,7 +95,12 @@ pub(crate) async fn update_check() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn update(root: &Path, dry_run: bool, yes: bool, no_backup: bool) -> anyhow::Result<()> {
+pub(crate) async fn update(
+    root: &Path,
+    dry_run: bool,
+    yes: bool,
+    no_backup: bool,
+) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let client = http_client()?;
     let release = latest_release(&client).await?;
@@ -610,7 +620,11 @@ pub(crate) fn version_parts(value: &str) -> (u64, u64, u64) {
     )
 }
 
-pub(crate) async fn download(client: &reqwest::Client, url: &str, path: &Path) -> anyhow::Result<()> {
+pub(crate) async fn download(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
     let bytes = client
         .get(url)
         .send()

@@ -99,4 +99,3 @@ pub(crate) fn restore_preflight(root: &Path, backup_dir: &Path) -> anyhow::Resul
     }
     Ok(())
 }
-

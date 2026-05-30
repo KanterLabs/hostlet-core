@@ -391,4 +391,3 @@ pub async fn cancel_agent_job(
         }
     }
 }
-

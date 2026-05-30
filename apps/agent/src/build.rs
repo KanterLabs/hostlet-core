@@ -181,7 +181,10 @@ pub(crate) async fn prepare_build(
     })
 }
 
-pub(crate) async fn safe_project_dir(checkout: &Path, root_directory: &str) -> anyhow::Result<PathBuf> {
+pub(crate) async fn safe_project_dir(
+    checkout: &Path,
+    root_directory: &str,
+) -> anyhow::Result<PathBuf> {
     let clean = root_directory.trim().trim_start_matches('/');
     if clean.len() > 256
         || clean.starts_with('\\')
@@ -476,7 +479,11 @@ pub(crate) fn buildx_args<'a>(
     ]
 }
 
-pub(crate) fn docker_build_args<'a>(image: &'a str, dockerfile: &'a str, context: &'a str) -> Vec<&'a str> {
+pub(crate) fn docker_build_args<'a>(
+    image: &'a str,
+    dockerfile: &'a str,
+    context: &'a str,
+) -> Vec<&'a str> {
     vec!["build", "-f", dockerfile, "-t", image, context]
 }
 

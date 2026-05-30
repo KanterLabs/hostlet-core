@@ -7,7 +7,10 @@ pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::R
     Ok(())
 }
 
-pub(crate) async fn restore_route_file(target: &Path, previous: Option<Vec<u8>>) -> anyhow::Result<()> {
+pub(crate) async fn restore_route_file(
+    target: &Path,
+    previous: Option<Vec<u8>>,
+) -> anyhow::Result<()> {
     if let Some(contents) = previous {
         tokio::fs::write(target, contents).await?;
     } else {
@@ -20,7 +23,10 @@ pub(crate) async fn restore_route_file(target: &Path, previous: Option<Vec<u8>>)
     Ok(())
 }
 
-pub(crate) async fn remove_local_caddy_route(router: &LocalRouter, app: &str) -> anyhow::Result<()> {
+pub(crate) async fn remove_local_caddy_route(
+    router: &LocalRouter,
+    app: &str,
+) -> anyhow::Result<()> {
     let target = router.snippets_dir.join(format!("{app}.caddy"));
     match tokio::fs::remove_file(target).await {
         Ok(()) => Ok(()),
@@ -574,7 +580,11 @@ pub(crate) fn string_set_from_array(value: Option<&Value>) -> HashSet<String> {
         .collect()
 }
 
-pub(crate) async fn command_output(bin: &str, args: &[&str], timeout: Duration) -> anyhow::Result<Output> {
+pub(crate) async fn command_output(
+    bin: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> anyhow::Result<Output> {
     let mut cmd = Command::new(bin);
     cmd.args(args).kill_on_drop(true);
     match tokio::time::timeout(timeout, cmd.output()).await {

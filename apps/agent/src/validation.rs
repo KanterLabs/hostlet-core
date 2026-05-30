@@ -61,7 +61,10 @@ pub(crate) fn safe_name(s: &str) -> String {
         })
         .collect()
 }
-pub(crate) async fn docker_published_port(container: &str, container_port: u16) -> anyhow::Result<u16> {
+pub(crate) async fn docker_published_port(
+    container: &str,
+    container_port: u16,
+) -> anyhow::Result<u16> {
     let target = format!("{container_port}/tcp");
     let output = command_output(
         "docker",

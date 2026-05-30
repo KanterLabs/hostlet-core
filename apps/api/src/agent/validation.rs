@@ -38,6 +38,9 @@ pub(in crate::agent) fn header_uuid(headers: &HeaderMap, key: &str) -> Option<Uu
         .and_then(|v| Uuid::parse_str(v).ok())
 }
 
-pub(in crate::agent) fn connection_is_current(connection: &AgentConnection, connection_id: Uuid) -> bool {
+pub(in crate::agent) fn connection_is_current(
+    connection: &AgentConnection,
+    connection_id: Uuid,
+) -> bool {
     connection.connection_id == connection_id
 }

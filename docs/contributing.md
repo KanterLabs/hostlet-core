@@ -7,6 +7,12 @@ Hostlet Core is open source self-hosted infrastructure. Contributions should pre
 Run relevant checks before opening a change:
 
 ```bash
+scripts/validate-local.sh
+```
+
+For narrower local runs, use the matching commands directly:
+
+```bash
 cargo fmt --all -- --check
 CARGO_TARGET_DIR=/tmp/hostlet-target cargo test --workspace
 pnpm --dir apps/web lint

@@ -14,9 +14,9 @@ The hosted-service layer is not required for self-hosted use.
 ## Install
 
 ```bash
-git clone https://github.com/ShaneKanterman04/Hostlet.git
-cd Hostlet
-curl -L https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/hostlet-linux-x64 -o hostlet
+git clone https://github.com/ShaneKanterman04/hostlet-core.git
+cd hostlet-core
+curl -L https://github.com/ShaneKanterman04/hostlet-core/releases/latest/download/hostlet-linux-x64 -o hostlet
 chmod +x hostlet
 sudo mv hostlet /usr/local/bin/hostlet
 ```

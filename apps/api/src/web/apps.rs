@@ -852,4 +852,3 @@ pub async fn update_app(
     }
     StatusCode::NO_CONTENT.into_response()
 }
-

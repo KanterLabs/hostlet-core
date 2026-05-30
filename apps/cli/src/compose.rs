@@ -33,4 +33,3 @@ pub(crate) fn compose_logs(root: &Path, dev: bool, services: &[String]) -> anyho
     args.extend(services.iter().cloned());
     run_passthrough(root, "docker", &args)
 }
-

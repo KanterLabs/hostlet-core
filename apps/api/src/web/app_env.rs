@@ -129,4 +129,3 @@ pub async fn delete_app_env_var(
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
-

@@ -109,4 +109,3 @@ pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
         .build()
         .context("failed to build HTTP client")
 }
-

@@ -190,7 +190,10 @@ pub(in crate::web) fn default_domain_pattern(state: &AppState) -> Option<String>
         .map(|base_domain| format!("{{app}}.{base_domain}"))
 }
 
-pub(in crate::web) fn hostlet_public_cloudflare_host(state: &AppState, domain: &str) -> anyhow::Result<String> {
+pub(in crate::web) fn hostlet_public_cloudflare_host(
+    state: &AppState,
+    domain: &str,
+) -> anyhow::Result<String> {
     if domain.contains(':') {
         anyhow::bail!("public app domain cannot include a port");
     }
@@ -323,7 +326,9 @@ pub(in crate::web) fn clean_runtime_kind(value: Option<&str>) -> Result<String, 
     }
 }
 
-pub(in crate::web) fn clean_packaging_strategy(value: Option<&str>) -> Result<String, &'static str> {
+pub(in crate::web) fn clean_packaging_strategy(
+    value: Option<&str>,
+) -> Result<String, &'static str> {
     let value = value
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -334,7 +339,9 @@ pub(in crate::web) fn clean_packaging_strategy(value: Option<&str>) -> Result<St
     }
 }
 
-pub(in crate::web) fn clean_hostlet_config_path(value: Option<&str>) -> Result<String, &'static str> {
+pub(in crate::web) fn clean_hostlet_config_path(
+    value: Option<&str>,
+) -> Result<String, &'static str> {
     let value = value
         .map(str::trim)
         .filter(|v| !v.is_empty())

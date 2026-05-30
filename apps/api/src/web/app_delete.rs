@@ -121,7 +121,10 @@ pub async fn delete_app(
         .into_response()
 }
 
-pub(in crate::web) async fn finalize_delete_app_from_job(state: &AppState, job_id: Uuid) -> anyhow::Result<bool> {
+pub(in crate::web) async fn finalize_delete_app_from_job(
+    state: &AppState,
+    job_id: Uuid,
+) -> anyhow::Result<bool> {
     let row = sqlx::query(
         "SELECT app_id,payload_json FROM agent_jobs WHERE id=$1 AND job_type='delete_app' AND status='success'",
     )
@@ -249,7 +252,11 @@ pub(in crate::web) async fn delete_app_records(
     Ok(deleted)
 }
 
-pub(in crate::web) async fn app_belongs_to_user(state: &AppState, app_id: Uuid, user_id: Uuid) -> bool {
+pub(in crate::web) async fn app_belongs_to_user(
+    state: &AppState,
+    app_id: Uuid,
+    user_id: Uuid,
+) -> bool {
     matches!(
         sqlx::query("SELECT 1 FROM apps WHERE id=$1 AND user_id=$2")
             .bind(app_id)
@@ -260,7 +267,11 @@ pub(in crate::web) async fn app_belongs_to_user(state: &AppState, app_id: Uuid, 
     )
 }
 
-pub(in crate::web) async fn app_domain_in_use(state: &AppState, domain: &str, except_app_id: Option<Uuid>) -> bool {
+pub(in crate::web) async fn app_domain_in_use(
+    state: &AppState,
+    domain: &str,
+    except_app_id: Option<Uuid>,
+) -> bool {
     match except_app_id {
         Some(app_id) => matches!(
             sqlx::query("SELECT 1 FROM apps WHERE lower(domain)=lower($1) AND id<>$2 LIMIT 1")
@@ -322,4 +333,3 @@ pub(in crate::web) async fn mark_agent_job_failed(state: &AppState, job_id: Uuid
     .execute(&state.db)
     .await;
 }
-

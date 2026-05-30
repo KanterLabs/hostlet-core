@@ -204,4 +204,3 @@ pub(crate) async fn status(root: &Path) -> anyhow::Result<()> {
     }
     Ok(())
 }
-

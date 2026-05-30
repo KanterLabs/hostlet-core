@@ -31,7 +31,10 @@ pub async fn run_cleanup(State(state): State<AppState>, headers: HeaderMap) -> i
     run_cleanup_inner(&state, Some(context.user_id)).await
 }
 
-pub(in crate::web) async fn run_cleanup_inner(state: &AppState, user_id: Option<Uuid>) -> axum::response::Response {
+pub(in crate::web) async fn run_cleanup_inner(
+    state: &AppState,
+    user_id: Option<Uuid>,
+) -> axum::response::Response {
     let plan = match cleanup_plan(state, user_id.unwrap_or_else(Uuid::nil)).await {
         Ok(plan) => plan,
         Err(err) => {
@@ -159,7 +162,10 @@ const RETENTION: CleanupRetention = CleanupRetention {
     failed_agent_job_days: 90,
 };
 
-pub(in crate::web) async fn cleanup_plan(state: &AppState, _user_id: Uuid) -> anyhow::Result<CleanupPlan> {
+pub(in crate::web) async fn cleanup_plan(
+    state: &AppState,
+    _user_id: Uuid,
+) -> anyhow::Result<CleanupPlan> {
     let database = CleanupDatabasePreview {
         deployment_logs: cleanup_count(state, CLEANUP_DEPLOYMENT_LOGS).await?,
         health_events: cleanup_count(state, CLEANUP_HEALTH_EVENTS).await?,
@@ -354,4 +360,3 @@ DELETE FROM agent_jobs j
 WHERE j.status IN ('failed','expired')
   AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '90 days'
 "#;
-

@@ -5,6 +5,12 @@ Hostlet Core is the public, self-hosted Hostlet project. Keep hosted-service bil
 Run the relevant checks before opening a pull request:
 
 ```bash
+scripts/validate-local.sh
+```
+
+For narrower local runs, use the matching commands directly:
+
+```bash
 cargo fmt --all -- --check
 CARGO_TARGET_DIR=/tmp/hostlet-target cargo test --workspace
 pnpm --dir apps/web lint

@@ -283,4 +283,3 @@ pub(crate) async fn cloudflare_tunnel_token(
         .map(str::to_string)
         .context("Cloudflare tunnel token response did not include a token")
 }
-

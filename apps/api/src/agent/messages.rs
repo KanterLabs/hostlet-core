@@ -1,6 +1,10 @@
 use super::*;
 
-pub(in crate::agent) async fn handle_agent_message(state: &AppState, server_id: Uuid, msg: serde_json::Value) {
+pub(in crate::agent) async fn handle_agent_message(
+    state: &AppState,
+    server_id: Uuid,
+    msg: serde_json::Value,
+) {
     match msg.get("type").and_then(|v| v.as_str()) {
         Some("heartbeat") => {
             let _ =
