@@ -1,0 +1,100 @@
+name: Staging
+
+# Push to the always-alive `staging` branch -> build moving staging images and
+# ring the doorbell on hostlet-cloud so it redeploys staging from this core tip.
+# No version-match gate here: staging tracks the branch, not a release tag. The
+# vX.Y.Z release path (release.yml) is unchanged and remains the only tagged build.
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: staging-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 detect --source=/repo --redact --verbose
+
+  rust:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/check-line-cap.sh
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace
+
+  web:
+    runs-on: [self-hosted, Linux, X64]
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build
+
+  images:
+    needs: [secrets, rust, web]
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute image tags
+        run: echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and push staging images
+        env:
+          IMAGE_REGISTRY: ghcr.io/shanekanterman04
+        run: |
+          for app in api web agent; do
+            docker build \
+              --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+              --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+              --label org.opencontainers.image.version="staging" \
+              -f "apps/${app}/Dockerfile" \
+              -t "${IMAGE_REGISTRY}/hostlet-${app}:staging" \
+              -t "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}" \
+              .
+            docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"
+            docker push "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}"
+          done
+
+  notify-cloud:
+    needs: [images]
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Ring the hostlet-cloud staging doorbell
+        env:
+          CLOUD_DISPATCH_PAT: ${{ secrets.CLOUD_DISPATCH_PAT }}
+        run: |
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${CLOUD_DISPATCH_PAT}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/ShaneKanterman04/hostlet-cloud/dispatches" \
+            -d "{\"event_type\":\"core-staging-updated\",\"client_payload\":{\"core_sha\":\"${GITHUB_SHA}\"}}"
