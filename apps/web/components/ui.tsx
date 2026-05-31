@@ -156,7 +156,7 @@ export function Metric({
   return (
     <div className="metric">
       <div className="flex items-center justify-between gap-3">
-        <div className="eyebrow">{label}</div>
+        <div className="data-label">{label}</div>
         {Icon && <Icon size={17} className="text-neutral-500" />}
       </div>
       <div className="mt-2 break-words text-lg font-semibold leading-tight">{value}</div>
@@ -294,7 +294,7 @@ export function KeyValueItem({
 }) {
   return (
     <div className="min-w-0 border-t border-line px-4 py-3 first:border-t-0 md:border-l md:border-t-0 md:first:border-l-0">
-      <div className="eyebrow">{label}</div>
+      <div className="data-label">{label}</div>
       {href ? (
         <a className="mt-1 flex items-center gap-1 truncate text-sm font-medium hover:text-action" href={href} target="_blank" rel="noreferrer">
           <span className="truncate">{value || "Not set"}</span>
@@ -323,7 +323,7 @@ export function DataRow({ label, value }: { label: string; value: React.ReactNod
 export function SummaryItem({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="rounded-md bg-surface-alt px-3 py-2 text-sm">
-      <div className="eyebrow">{label}</div>
+      <div className="data-label">{label}</div>
       <div className="mt-1 break-words font-medium">{value}</div>
     </div>
   );
