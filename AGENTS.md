@@ -32,3 +32,6 @@ pnpm --dir apps/web lint && pnpm --dir apps/web build
 
 Workflows: `.github/workflows/{ci,staging,release,full-ci}.yml`. Never add secrets or private
 operational data (IPs, hosts, credentials) to tracked files.
+
+> A push to `staging` is a deploy: it publishes `:staging` images and rings the downstream
+> Hostlet Cloud staging deploy. Keep `staging` green.
