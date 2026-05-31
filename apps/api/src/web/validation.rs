@@ -102,65 +102,23 @@ pub(in crate::web) fn valid_app_name(value: &str) -> bool {
 }
 
 pub(in crate::web) fn valid_repo_full_name(value: &str) -> bool {
-    let mut parts = value.split('/');
-    let Some(owner) = parts.next() else {
-        return false;
-    };
-    let Some(repo) = parts.next() else {
-        return false;
-    };
-    if parts.next().is_some() {
-        return false;
-    }
-    [owner, repo].into_iter().all(|part| {
-        !part.is_empty()
-            && part.len() <= 100
-            && part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-            && !part.starts_with('.')
-            && !part.ends_with('.')
-    })
+    hostlet_contracts::valid_repo_full_name(value)
 }
 
 pub(in crate::web) fn valid_branch(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 255
-        && !value.starts_with('-')
-        && !value.starts_with('/')
-        && !value.ends_with('/')
-        && !value.contains("..")
-        && !value.contains("@{")
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+    hostlet_contracts::valid_branch(value)
 }
 
 pub(in crate::web) fn valid_domain(value: &str) -> bool {
-    let Some((host, port)) = value.rsplit_once(':') else {
-        return valid_hostname(value);
-    };
-    valid_hostname(host) && !port.is_empty() && port.parse::<u16>().is_ok()
+    hostlet_contracts::valid_domain(value)
 }
 
 pub(in crate::web) fn valid_hostname(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 253
-        && !value.starts_with('.')
-        && !value.ends_with('.')
-        && value.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        })
+    hostlet_contracts::valid_hostname(value)
 }
 
 pub(in crate::web) fn valid_health_path(value: &str) -> bool {
-    value.starts_with('/')
-        && value.len() <= 256
-        && !value.chars().any(|c| c.is_control() || c == '\\')
+    hostlet_contracts::valid_health_path(value)
 }
 
 pub(in crate::web) fn valid_root_directory(value: &str) -> bool {

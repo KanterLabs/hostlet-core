@@ -498,37 +498,14 @@ pub(crate) fn valid_compose_volume_name(value: &str) -> bool {
 }
 
 pub(crate) fn validate_repo(value: &str) -> anyhow::Result<()> {
-    let mut parts = value.split('/');
-    let owner = parts.next().unwrap_or_default();
-    let repo = parts.next().unwrap_or_default();
-    if parts.next().is_some()
-        || [owner, repo].into_iter().any(|part| {
-            part.is_empty()
-                || part.len() > 100
-                || part.starts_with('.')
-                || part.ends_with('.')
-                || !part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        })
-    {
+    if !hostlet_contracts::valid_repo_full_name(value) {
         bail!("repo must be a GitHub owner/repo name");
     }
     Ok(())
 }
 
 pub(crate) fn validate_branch(value: &str) -> anyhow::Result<()> {
-    if value.is_empty()
-        || value.len() > 255
-        || value.starts_with('-')
-        || value.starts_with('/')
-        || value.ends_with('/')
-        || value.contains("..")
-        || value.contains("@{")
-        || !value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
-    {
+    if !hostlet_contracts::valid_branch(value) {
         bail!("branch name contains unsupported characters");
     }
     Ok(())
@@ -552,36 +529,14 @@ pub(crate) fn validate_port(value: i64) -> anyhow::Result<()> {
 }
 
 pub(crate) fn validate_domain(value: &str) -> anyhow::Result<()> {
-    let valid = if let Some((host, port)) = value.rsplit_once(':') {
-        valid_hostname(host) && !port.is_empty() && port.parse::<u16>().is_ok()
-    } else {
-        valid_hostname(value)
-    };
-    if !valid {
+    if !hostlet_contracts::valid_domain(value) {
         bail!("domain must be a hostname with optional port");
     }
     Ok(())
 }
 
-pub(crate) fn valid_hostname(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 253
-        && !value.starts_with('.')
-        && !value.ends_with('.')
-        && value.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        })
-}
-
 pub(crate) fn validate_health_path(value: &str) -> anyhow::Result<()> {
-    if !value.starts_with('/')
-        || value.len() > 256
-        || value.chars().any(|c| c.is_control() || c == '\\')
-    {
+    if !hostlet_contracts::valid_health_path(value) {
         bail!("health path must start with / and cannot contain control characters");
     }
     Ok(())
