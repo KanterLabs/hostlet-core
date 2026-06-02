@@ -269,9 +269,9 @@ async fn inspect_repo(
             packaging_options: json!(["auto", "generated"]),
             recommended_packaging_strategy: "generated",
             env: json!([]),
-            warnings: json!(["Node app detected. Hostlet will infer install/build/start commands during deployment; set custom commands if the preview is incomplete."]),
+            warnings: json!(["Node app detected. Hostlet will build it with Railpack unless a repository Dockerfile is selected. Set custom build/start commands if the preview is incomplete."]),
             summary: format!(
-                "{} app detected. Hostlet will use optimized generated Docker with {}.",
+                "{} app detected. Hostlet will use generated Railpack runtime support with {}.",
                 inference.framework, inference.package_manager
             ),
         }

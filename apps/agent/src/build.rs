@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const NO_NATIVE_BUILD_PLAN: &str = "No usable Dockerfile or package.json found";
+pub(crate) const NO_NATIVE_BUILD_PLAN: &str = "No repository Dockerfile selected";
 
 pub(crate) fn normalize_git_remote(value: &str) -> String {
     value
@@ -23,22 +23,6 @@ pub(crate) struct BuildPlan {
     pub(crate) dockerfile: PathBuf,
     pub(crate) generated: bool,
     pub(crate) packaging_strategy: PackagingStrategy,
-    pub(crate) detected_language: Option<GeneratedLanguage>,
-    pub(crate) detected_framework: Option<Framework>,
-    pub(crate) package_manager: Option<PackageManager>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GeneratedLanguage {
-    Node,
-}
-
-impl GeneratedLanguage {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Node => "node",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +61,7 @@ pub(crate) async fn prepare_build(
     cfg: &Config,
     deployment_id: Uuid,
     checkout: &Path,
-    port: i64,
+    _port: i64,
     payload: &Value,
 ) -> anyhow::Result<BuildPlan> {
     let packaging_strategy = PackagingStrategy::from_payload(payload)?;
@@ -86,7 +70,7 @@ pub(crate) async fn prepare_build(
     {
         return Ok(plan);
     }
-    generated_packaging_plan(cfg, deployment_id, checkout, port, payload).await
+    bail!(NO_NATIVE_BUILD_PLAN)
 }
 
 /// Returns a repository-Dockerfile [`BuildPlan`] when one applies, or `None`
@@ -117,120 +101,7 @@ async fn dockerfile_packaging_plan(
         dockerfile: root_dockerfile,
         generated: false,
         packaging_strategy: PackagingStrategy::Dockerfile,
-        detected_language: None,
-        detected_framework: None,
-        package_manager: None,
     }))
-}
-
-/// Inspects `package.json`, infers build commands, and writes an auto-generated
-/// Hostlet Dockerfile, returning the resulting [`BuildPlan`].
-async fn generated_packaging_plan(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    port: i64,
-    payload: &Value,
-) -> anyhow::Result<BuildPlan> {
-    let package_json = checkout.join("package.json");
-    if !tokio::fs::try_exists(&package_json).await? {
-        bail!(NO_NATIVE_BUILD_PLAN);
-    }
-    let contents = tokio::fs::read_to_string(&package_json).await?;
-    let package: Value =
-        serde_json::from_str(&contents).context("package.json is not valid JSON")?;
-    let scripts = package
-        .get("scripts")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
-    let framework = detect_framework(&collect_deps(&package));
-    let package_manager = detect_package_manager(checkout).await?;
-
-    let commands = infer_node_commands(payload, &scripts, framework, package_manager)?;
-
-    log(
-        cfg,
-        deployment_id,
-        "stdout",
-        &format!(
-            "Detected {} app. Generating optimized Hostlet Dockerfile with {}.",
-            framework.label(),
-            package_manager.label()
-        ),
-    )
-    .await;
-
-    let hostlet_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
-    tokio::fs::create_dir_all(&hostlet_dir).await?;
-    let dockerfile = hostlet_dir.join("Dockerfile");
-    tokio::fs::write(
-        &dockerfile,
-        generated_node_dockerfile(
-            package_manager,
-            commands.install.as_deref(),
-            commands.build.as_deref(),
-            &commands.start,
-            port,
-            framework,
-        ),
-    )
-    .await?;
-    Ok(BuildPlan {
-        context: checkout.to_path_buf(),
-        dockerfile,
-        generated: true,
-        packaging_strategy: PackagingStrategy::Generated,
-        detected_language: Some(GeneratedLanguage::Node),
-        detected_framework: Some(framework),
-        package_manager: Some(package_manager),
-    })
-}
-
-/// Build commands inferred for an auto-packaged Node app, after validation.
-struct NodeCommands {
-    install: Option<String>,
-    build: Option<String>,
-    start: String,
-}
-
-/// Resolves install/build/start commands from the payload overrides and
-/// framework heuristics, then validates each one.
-fn infer_node_commands(
-    payload: &Value,
-    scripts: &serde_json::Map<String, Value>,
-    framework: Framework,
-    package_manager: PackageManager,
-) -> anyhow::Result<NodeCommands> {
-    let install = payload_command(payload, "install_command");
-    let build = payload_command(payload, "build_command").or_else(|| {
-        pick_build_command(scripts, framework).map(|script| package_manager.run_command(&script))
-    });
-    let start = payload_command(payload, "start_command").or_else(|| {
-        pick_start_command(scripts, framework).map(|script| {
-            if script == STATIC_START_SENTINEL {
-                script
-            } else {
-                package_manager.run_command(&script)
-            }
-        })
-    });
-
-    let Some(start) = start else {
-        bail!("Node app detected, but no start command could be inferred");
-    };
-    if let Some(command) = install.as_deref() {
-        validate_dockerfile_command(command)?;
-    }
-    if let Some(command) = build.as_deref() {
-        validate_dockerfile_command(command)?;
-    }
-    validate_dockerfile_command(&start)?;
-    Ok(NodeCommands {
-        install,
-        build,
-        start,
-    })
 }
 
 /// Reads a non-blank string command override from the deploy payload.
@@ -269,135 +140,6 @@ pub(crate) async fn safe_project_dir(
         bail!("root directory cannot resolve outside the repository checkout");
     }
     Ok(project)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PackageManager {
-    Npm,
-    Pnpm,
-    Yarn,
-}
-
-impl PackageManager {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Npm => "npm",
-            Self::Pnpm => "pnpm",
-            Self::Yarn => "yarn",
-        }
-    }
-    fn run_command(self, script: &str) -> String {
-        match self {
-            Self::Npm => format!("npm run {script}"),
-            Self::Pnpm => format!("pnpm run {script}"),
-            Self::Yarn => format!("yarn {script}"),
-        }
-    }
-}
-
-mod dockerfile;
-
-pub(crate) use dockerfile::generated_node_dockerfile;
-use dockerfile::STATIC_START_SENTINEL;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Framework {
-    Next,
-    Vite,
-    Astro,
-    Nuxt,
-    Remix,
-    SvelteKit,
-    Node,
-}
-
-impl Framework {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Next => "Next.js",
-            Self::Vite => "Vite",
-            Self::Astro => "Astro",
-            Self::Nuxt => "Nuxt",
-            Self::Remix => "Remix",
-            Self::SvelteKit => "SvelteKit",
-            Self::Node => "Node",
-        }
-    }
-
-    fn runtime_kind(self) -> &'static str {
-        match self {
-            Self::Vite | Self::Astro | Self::SvelteKit => "static",
-            Self::Next | Self::Nuxt | Self::Remix | Self::Node => "node",
-        }
-    }
-}
-
-pub(crate) async fn detect_package_manager(checkout: &Path) -> anyhow::Result<PackageManager> {
-    if tokio::fs::try_exists(checkout.join("pnpm-lock.yaml")).await? {
-        return Ok(PackageManager::Pnpm);
-    }
-    if tokio::fs::try_exists(checkout.join("yarn.lock")).await? {
-        return Ok(PackageManager::Yarn);
-    }
-    Ok(PackageManager::Npm)
-}
-
-pub(crate) fn collect_deps(package: &Value) -> HashMap<String, String> {
-    let mut deps = HashMap::new();
-    for key in ["dependencies", "devDependencies"] {
-        if let Some(map) = package.get(key).and_then(|v| v.as_object()) {
-            for (name, version) in map {
-                deps.insert(name.to_string(), version.as_str().unwrap_or("").to_string());
-            }
-        }
-    }
-    deps
-}
-
-pub(crate) fn detect_framework(deps: &HashMap<String, String>) -> Framework {
-    if deps.contains_key("next") {
-        Framework::Next
-    } else if deps.contains_key("astro") {
-        Framework::Astro
-    } else if deps.contains_key("nuxt") {
-        Framework::Nuxt
-    } else if deps.contains_key("@remix-run/node") || deps.contains_key("@remix-run/react") {
-        Framework::Remix
-    } else if deps.contains_key("@sveltejs/kit") {
-        Framework::SvelteKit
-    } else if deps.contains_key("vite") {
-        Framework::Vite
-    } else {
-        Framework::Node
-    }
-}
-
-pub(crate) fn pick_build_command(
-    scripts: &serde_json::Map<String, Value>,
-    framework: Framework,
-) -> Option<String> {
-    if scripts.contains_key("build") {
-        return Some("build".into());
-    }
-    match framework {
-        Framework::Node => None,
-        _ => Some("build".into()),
-    }
-}
-
-pub(crate) fn pick_start_command(
-    scripts: &serde_json::Map<String, Value>,
-    framework: Framework,
-) -> Option<String> {
-    if scripts.contains_key("start") {
-        return Some("start".into());
-    }
-    match framework {
-        Framework::Vite | Framework::Astro | Framework::SvelteKit => {
-            Some(STATIC_START_SENTINEL.into())
-        }
-        Framework::Next | Framework::Nuxt | Framework::Remix | Framework::Node => None,
-    }
 }
 
 pub(crate) fn generated_dockerignore() -> &'static str {
@@ -484,10 +226,10 @@ pub(crate) fn build_runtime_metadata(
     json!({
         "packagingStrategy": build.packaging_strategy.label(),
         "generatedDockerfile": build.generated,
-        "detectedLanguage": build.detected_language.map(|language| language.label()),
-        "detectedFramework": build.detected_framework.map(|framework| framework.label()),
-        "runtimeKind": build.detected_framework.map(|framework| framework.runtime_kind()),
-        "packageManager": build.package_manager.map(|pm| pm.label()),
+        "detectedLanguage": null,
+        "detectedFramework": null,
+        "runtimeKind": null,
+        "packageManager": null,
         "buildDurationMs": build_duration_ms,
         "imageSizeBytes": image_size_bytes,
     })

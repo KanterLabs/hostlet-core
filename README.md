@@ -5,7 +5,7 @@ Hostlet is an open-source deployment control panel for running web apps on your 
 ## What You Get
 
 - Self-hosted GitHub-backed app deployment.
-- Dockerfile and generated Node app support.
+- Dockerfile and Railpack generated app support.
 - Deployment logs, runtime health, restart, rollback, and delete flows.
 - Encrypted app environment variables.
 - Optional Cloudflare Tunnel support for self-hosted public URLs.

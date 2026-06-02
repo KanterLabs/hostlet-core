@@ -26,7 +26,7 @@ pub(crate) async fn railpack_build_app(
         cfg,
         deployment_id,
         "stdout",
-        "No native Hostlet Dockerfile plan matched. Building with Railpack.",
+        "Building generated runtime with Railpack.",
     )
     .await;
     let build_started = Instant::now();
@@ -162,10 +162,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_packaging_miss_falls_through_to_railpack() {
+    fn generated_packaging_miss_falls_through_to_railpack() {
         assert!(should_try_railpack(&anyhow::anyhow!(NO_NATIVE_BUILD_PLAN)));
         assert!(!should_try_railpack(&anyhow::anyhow!(
-            "Node app detected, but no start command could be inferred"
+            "packaging strategy dockerfile requires a Dockerfile at the app root"
         )));
     }
 

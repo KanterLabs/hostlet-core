@@ -24,6 +24,7 @@ RAILPACK_FIXTURES=(
   "go:go-api:/health:hostlet-generated-go"
   "rust:rust-api:/health:hostlet-generated-rust"
   "static:static-site:/:hostlet-generated-static"
+  "next-pnpm:next-pnpm-site:/:hostlet-generated-next-pnpm"
 )
 CREATED_APP_IDS=()
 RAILPACK_BUILDKIT_PREEXISTED=0
@@ -249,7 +250,7 @@ JSON
   printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.packagingStrategy | grep -q '^generated$'
 
   railpack_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${railpack_deployment_id}/logs")"
-  printf '%s' "${railpack_logs}" | grep -q 'Building with Railpack'
+  printf '%s' "${railpack_logs}" | grep -q 'Building generated runtime with Railpack'
   printf '%s' "${railpack_logs}" | grep -q 'Health check passed'
   docker ps --filter "name=hostlet-app-${railpack_app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
 
@@ -331,7 +332,9 @@ curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
 
 logs_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
 printf '%s' "${logs_payload}" | grep -q 'Health check passed'
-printf '%s' "${logs_payload}" | grep -q 'Generating optimized Hostlet Dockerfile'
+printf '%s' "${logs_payload}" | grep -q 'Building generated runtime with Railpack'
+printf '%s' "${app_detail}" | json_get latestDeployment.runtimeMetadata.buildBackend | grep -q '^railpack$'
+printf '%s' "${app_detail}" | json_get latestDeployment.runtimeMetadata.generatedDockerfile | grep -q '^false$'
 if printf '%s' "${logs_payload}" | grep -q 'secret-value-for-redaction'; then
   echo "deployment logs exposed a raw secret" >&2
   exit 1

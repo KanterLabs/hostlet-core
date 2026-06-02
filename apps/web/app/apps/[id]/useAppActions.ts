@@ -136,7 +136,7 @@ export function useAppActions({
         health_path: settings.health_path,
         root_directory: settings.root_directory || ".",
         packaging_strategy: settings.packaging_strategy,
-        install_command: settings.install_command.trim() || null,
+        install_command: null,
         build_command: settings.build_command.trim() || null,
         start_command: settings.start_command.trim() || null,
         container_port: Number(settings.container_port),

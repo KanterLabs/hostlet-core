@@ -226,15 +226,7 @@ async fn report_deployment_failure(cfg: &Config, payload: &Value, message: &str)
         return;
     };
     log(cfg, deployment_id, "stderr", message).await;
-    status(
-        cfg,
-        deployment_id,
-        "failed",
-        Some(&format!(
-            "{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run."
-        )),
-    )
-    .await;
+    status(cfg, deployment_id, "failed", Some(message)).await;
 }
 
 pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {

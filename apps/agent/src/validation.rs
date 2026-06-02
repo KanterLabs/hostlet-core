@@ -350,34 +350,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_next_framework() {
-        let package = serde_json::json!({"dependencies":{"next":"16.0.0"}});
-        assert!(matches!(
-            detect_framework(&collect_deps(&package)),
-            Framework::Next
-        ));
-    }
-
-    #[test]
-    fn generated_node_dockerfile_uses_selected_port() {
-        let dockerfile = generated_node_dockerfile(
-            PackageManager::Npm,
-            None,
-            Some("npm run build"),
-            "npm run start",
-            3000,
-            Framework::Next,
-        );
-        assert!(dockerfile.contains("ENV PORT=3000"));
-        assert!(dockerfile.contains("npm run build"));
-        assert!(dockerfile.contains("npm run start"));
-        assert!(dockerfile.contains("FROM node:22-alpine AS deps"));
-        assert!(dockerfile.contains("npm install"));
-        assert!(dockerfile.contains("mkdir -p node_modules"));
-        assert!(dockerfile.contains("npm prune --omit=dev"));
-    }
-
-    #[test]
     fn packaging_strategy_defaults_to_auto() {
         assert!(matches!(
             PackagingStrategy::from_payload(&serde_json::json!({})).unwrap(),
@@ -403,21 +375,6 @@ mod tests {
         assert!(args.contains(&"--load"));
         assert!(args.contains(&"--cache-from"));
         assert!(args.contains(&"--cache-to"));
-    }
-
-    #[test]
-    fn generated_static_dockerfile_uses_runtime_stage() {
-        let dockerfile = generated_node_dockerfile(
-            PackageManager::Pnpm,
-            None,
-            Some("pnpm run build"),
-            "__hostlet_static",
-            4173,
-            Framework::Vite,
-        );
-        assert!(dockerfile.contains("FROM node:22-alpine AS runner"));
-        assert!(dockerfile.contains("serve -s dist"));
-        assert!(dockerfile.contains("ENV PORT=4173"));
     }
 
     #[test]

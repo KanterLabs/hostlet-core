@@ -335,11 +335,10 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <SelectField label="Package with" value={settings.packaging_strategy} onChange={(value) => setSettings({ ...settings, packaging_strategy: value })}>
                     <option value="auto">Auto detect</option>
                     <option value="dockerfile">Repository Dockerfile</option>
-                    <option value="generated">Hostlet generated runtime</option>
+                    <option value="generated">Railpack generated runtime</option>
                   </SelectField>
                   <Field label="Root directory" value={settings.root_directory} onChange={(value) => setSettings({ ...settings, root_directory: value })} />
                   <Field label="Container port" type="number" value={settings.container_port} onChange={(value) => setSettings({ ...settings, container_port: value })} />
-                  <Field label="Install command" value={settings.install_command} onChange={(value) => setSettings({ ...settings, install_command: value })} />
                   <Field label="Build command" value={settings.build_command} onChange={(value) => setSettings({ ...settings, build_command: value })} />
                   <Field label="Start command" value={settings.start_command} onChange={(value) => setSettings({ ...settings, start_command: value })} />
                   <div className="grid gap-3 sm:grid-cols-2">

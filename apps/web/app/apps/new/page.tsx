@@ -129,6 +129,7 @@ export default function CreateApp() {
       const payload: Record<string, unknown> = {
         ...form,
         server_id: form.server_id || null,
+        install_command: null,
         env,
         deploy_after_create: !!inspection?.deployable,
       };
@@ -281,7 +282,7 @@ export default function CreateApp() {
                   <SelectField label="Package with" value={form.packaging_strategy} onChange={(value) => setField("packaging_strategy", value)}>
                     <option value="auto">Auto detect</option>
                     <option value="dockerfile">Repository Dockerfile</option>
-                    <option value="generated">Hostlet generated runtime</option>
+                    <option value="generated">Railpack generated runtime</option>
                   </SelectField>
                   {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setField("hostlet_config_path", value)} placeholder="hostlet.yml" />}
                   <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setField("memory_limit_mb", Number(value))}>
@@ -300,9 +301,8 @@ export default function CreateApp() {
                   </SelectField>
                 </div>
                 <div className="mt-4 grid gap-4">
-                  <Field label="Install command" value={form.install_command} onChange={(value) => setField("install_command", value)} placeholder="auto, npm install, pnpm install" />
-                  <Field label="Build command" value={form.build_command} onChange={(value) => setField("build_command", value)} placeholder="optional, npm run build" />
-                  <Field label="Start command" value={form.start_command} onChange={(value) => setField("start_command", value)} placeholder="npm start, uvicorn main:app --host 0.0.0.0 --port $PORT, go run ., cargo run" />
+                  <Field label="Build command" value={form.build_command} onChange={(value) => setField("build_command", value)} placeholder="optional Railpack override, npm run build, go build, cargo build --release" />
+                  <Field label="Start command" value={form.start_command} onChange={(value) => setField("start_command", value)} placeholder="optional Railpack override, npm start, uvicorn main:app --host 0.0.0.0 --port $PORT" />
                 </div>
               </Panel>
             </div>

@@ -55,5 +55,6 @@ run_fixture python 3000 /health hostlet-generated-python
 run_fixture go 3000 /health hostlet-generated-go
 run_fixture rust 3000 /health hostlet-generated-rust
 run_fixture static 3000 / hostlet-generated-static
+run_fixture next-pnpm 3000 / hostlet-generated-next-pnpm
 
 echo "Railpack generated fixture builds passed"
