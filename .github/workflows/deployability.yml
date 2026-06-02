@@ -24,6 +24,15 @@ jobs:
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
       - run: scripts/ci-railpack-generated-fixtures.sh
+        env:
+          HOSTLET_RAILPACK_METRICS_FILE: ${{ github.workspace }}/reports/railpack-generated-fixtures-metrics.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: railpack-generated-fixtures-metrics
+          path: reports/railpack-generated-fixtures-metrics.json
+          if-no-files-found: warn
+          retention-days: 14
 
   self-hosted-api:
     runs-on: [self-hosted, Linux, X64]

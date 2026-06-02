@@ -253,6 +253,12 @@ async fn inspect_repo(
     {
         let inference = infer_package_json(
             &package_text,
+            github_file_text(state, repo, branch, "bun.lock", token)
+                .await?
+                .is_some()
+                || github_file_text(state, repo, branch, "bun.lockb", token)
+                    .await?
+                    .is_some(),
             github_file_text(state, repo, branch, "pnpm-lock.yaml", token)
                 .await?
                 .is_some(),
@@ -371,6 +377,7 @@ struct PackageInference {
 
 fn infer_package_json(
     contents: &str,
+    has_bun_lock: bool,
     has_pnpm_lock: bool,
     has_yarn_lock: bool,
 ) -> PackageInference {
@@ -396,16 +403,34 @@ fn infer_package_json(
     } else {
         "Node"
     };
-    let package_manager = if has_pnpm_lock {
+    let fallback_package_manager = if has_bun_lock {
+        "bun"
+    } else if has_pnpm_lock {
         "pnpm"
     } else if has_yarn_lock {
         "yarn"
     } else {
         "npm"
     };
+    let package_manager = package
+        .get("packageManager")
+        .and_then(|value| value.as_str())
+        .and_then(package_manager_from_field)
+        .unwrap_or(fallback_package_manager);
     PackageInference {
         framework,
         package_manager,
+    }
+}
+
+fn package_manager_from_field(value: &str) -> Option<&'static str> {
+    let manager = value.split('@').next().unwrap_or(value);
+    match manager {
+        "bun" => Some("bun"),
+        "pnpm" => Some("pnpm"),
+        "yarn" => Some("yarn"),
+        "npm" => Some("npm"),
+        _ => None,
     }
 }
 
@@ -975,10 +1000,74 @@ VOLUME ["/data"]
     fn package_json_inference_detects_framework_and_package_manager() {
         let inference = infer_package_json(
             r#"{"dependencies":{"next":"16.0.0"},"devDependencies":{}}"#,
+            false,
             true,
             false,
         );
         assert_eq!(inference.framework, "Next.js");
         assert_eq!(inference.package_manager, "pnpm");
+    }
+
+    #[test]
+    fn package_json_inference_detects_bun_package_manager() {
+        let inference = infer_package_json(
+            r#"{"scripts":{"start":"bun server.js"},"packageManager":"bun@1.3.5"}"#,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(inference.framework, "Node");
+        assert_eq!(inference.package_manager, "bun");
+
+        let lock_inference = infer_package_json(r#"{"dependencies":{}}"#, true, false, false);
+        assert_eq!(lock_inference.package_manager, "bun");
+    }
+
+    #[test]
+    fn package_json_inference_detects_yarn_package_manager() {
+        let inference = infer_package_json(
+            r#"{"scripts":{"start":"node server.js"},"packageManager":"yarn@1.22.22"}"#,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(inference.package_manager, "yarn");
+
+        let lock_inference = infer_package_json(r#"{"dependencies":{}}"#, false, false, true);
+        assert_eq!(lock_inference.package_manager, "yarn");
+    }
+
+    #[test]
+    fn package_json_inference_ignores_unsupported_package_manager_field() {
+        let inference = infer_package_json(
+            r#"{"scripts":{"start":"node server.js"},"packageManager":"deno@2.0.0"}"#,
+            false,
+            true,
+            false,
+        );
+
+        assert_eq!(inference.package_manager, "pnpm");
+    }
+
+    #[test]
+    fn package_json_inference_prefers_supported_package_manager_field_over_locks() {
+        let inference = infer_package_json(
+            r#"{"scripts":{"start":"node server.js"},"packageManager":"npm@11.0.0"}"#,
+            true,
+            true,
+            true,
+        );
+
+        assert_eq!(inference.package_manager, "npm");
+    }
+
+    #[test]
+    fn package_json_inference_falls_back_when_package_json_is_malformed() {
+        let locked = infer_package_json("{not-json", false, true, false);
+        let unlocked = infer_package_json("{not-json", false, false, false);
+
+        assert_eq!(locked.framework, "Node");
+        assert_eq!(locked.package_manager, "pnpm");
+        assert_eq!(unlocked.package_manager, "npm");
     }
 }

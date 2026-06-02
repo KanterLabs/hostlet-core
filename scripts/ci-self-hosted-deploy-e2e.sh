@@ -24,6 +24,8 @@ RAILPACK_FIXTURES=(
   "go:go-api:/health:hostlet-generated-go"
   "rust:rust-api:/health:hostlet-generated-rust"
   "static:static-site:/:hostlet-generated-static"
+  "bun:bun-api:/health:hostlet-generated-bun"
+  "yarn:yarn-api:/health:hostlet-generated-yarn"
   "next-pnpm:next-pnpm-site:/:hostlet-generated-next-pnpm"
 )
 CREATED_APP_IDS=()
