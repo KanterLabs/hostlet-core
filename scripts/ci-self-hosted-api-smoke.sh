@@ -151,9 +151,10 @@ printf '%s' "${env_payload}" | grep -q 'CI_EXTRA'
 expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X DELETE "${base}/api/apps/${app_id}/env/CI_EXTRA" "${ORIGIN_CSRF[@]}"
 
 # ---------------------------------------------------------------------------
-# Self-hosted mode disables OAuth/agent-install routes; clean up the app.
+# Self-hosted mode does not expose the legacy OAuth route and disables agent
+# install routes; clean up the app.
 # ---------------------------------------------------------------------------
-expect_status 403 -H "cookie: ${AUTH_COOKIE}" "${base}/auth/github/oauth/start"
+expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${base}/auth/github/oauth/start"
 expect_status 410 -H "cookie: ${AUTH_COOKIE}" "${base}/api/servers/00000000-0000-0000-0000-000000000001/install"
 expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X DELETE "${base}/api/apps/${app_id}" "${ORIGIN_CSRF[@]}"
 

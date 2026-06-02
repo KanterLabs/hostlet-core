@@ -1,0 +1,36 @@
+name: Deployability CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generated-apps:
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      HOSTLET_RAILPACK_BIN: /tmp/hostlet-railpack-bin/railpack
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/ci-verify-runner.sh
+      - run: test -x "${HOSTLET_RAILPACK_BIN}"
+      - run: scripts/ci-railpack-generated-fixtures.sh
+
+  self-hosted-api:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/ci-verify-runner.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci-self-hosted-api-smoke.sh
