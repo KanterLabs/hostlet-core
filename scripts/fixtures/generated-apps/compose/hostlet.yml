@@ -1,0 +1,6 @@
+runtime: compose
+compose:
+  file: compose.yaml
+  web_service: web
+  port: 3000
+  health_path: /health

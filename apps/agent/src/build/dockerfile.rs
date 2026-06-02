@@ -20,7 +20,10 @@ const SERVE_VERSION: &str = "14.2.5";
 impl PackageManager {
     pub(super) fn install_command(self) -> String {
         match self {
-            Self::Npm => "npm ci".to_string(),
+            Self::Npm => {
+                "if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then npm ci; else npm install; fi"
+                    .to_string()
+            }
             Self::Pnpm => format!(
                 "corepack enable && corepack prepare pnpm@{PNPM_VERSION} --activate && pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds=true"
             ),
@@ -53,7 +56,7 @@ fn deps_and_builder_stages(install: &str, build_command: Option<&str>) -> String
         "FROM {NODE_IMAGE} AS deps\n\
          WORKDIR /app\n\
          COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\n\
-         RUN {install}\n\
+         RUN {install} && mkdir -p node_modules\n\
          \n\
          FROM {NODE_IMAGE} AS builder\n\
          WORKDIR /app\n\

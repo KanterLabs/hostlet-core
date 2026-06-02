@@ -503,7 +503,19 @@ async fn build_image(
     port: i64,
     p: &Value,
 ) -> anyhow::Result<BuiltImage> {
-    let build = prepare_build(cfg, deployment_id, project_dir, port, p).await?;
+    let build = match prepare_build(cfg, deployment_id, project_dir, port, p).await {
+        Ok(build) => build,
+        Err(err) if should_try_railpack(&err) => {
+            let built =
+                railpack_build_app(cfg, deployment_id, app_name, image, project_dir, port, p)
+                    .await?;
+            return Ok(BuiltImage {
+                runtime_metadata: built.runtime_metadata,
+                generated: true,
+            });
+        }
+        Err(err) => return Err(err),
+    };
     if build.generated {
         tokio::fs::write(project_dir.join(".dockerignore"), generated_dockerignore()).await?;
     }
@@ -618,13 +630,7 @@ async fn run_app_container(
         args.push("--tmpfs");
         args.push("/tmp");
     }
-    let mut env_pairs = env_args(p);
-    if !env_pairs_has_key(&env_pairs, "HOSTLET_DATA_DIR") {
-        env_pairs.push("HOSTLET_DATA_DIR=/data".into());
-    }
-    if !env_pairs_has_key(&env_pairs, "DATA_DIR") {
-        env_pairs.push("DATA_DIR=/data".into());
-    }
+    let env_pairs = runtime_env_args(p, port);
     for pair in &env_pairs {
         args.push("-e");
         args.push(pair);

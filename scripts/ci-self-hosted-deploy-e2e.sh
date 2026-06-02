@@ -17,7 +17,25 @@ GIT_CONFIG_GLOBAL="${TMP_DIR}/gitconfig"
 AUTH_COOKIE=""
 APP_REPO_NAME="node-hello"
 APP_REPO_FULL="hostlet-ci/${APP_REPO_NAME}"
-CREATED_APP_ID=""
+COMPOSE_REPO_NAME="compose-fullstack"
+COMPOSE_REPO_FULL="hostlet-ci/${COMPOSE_REPO_NAME}"
+RAILPACK_FIXTURES=(
+  "python:python-api:/health:hostlet-generated-python"
+  "go:go-api:/health:hostlet-generated-go"
+  "rust:rust-api:/health:hostlet-generated-rust"
+  "static:static-site:/:hostlet-generated-static"
+)
+CREATED_APP_IDS=()
+RAILPACK_BUILDKIT_PREEXISTED=0
+FAILED=0
+
+mark_failed() {
+  local exit_code="$?"
+  FAILED=1
+  echo "self-hosted deploy E2E failed at line ${BASH_LINENO[0]} with exit code ${exit_code}; preserving ${TMP_DIR}" >&2
+  exit "${exit_code}"
+}
+trap mark_failed ERR
 
 cleanup() {
   if [ -n "${AGENT_PID}" ] && kill -0 "${AGENT_PID}" >/dev/null 2>&1; then
@@ -29,11 +47,19 @@ cleanup() {
     wait "${API_PID}" >/dev/null 2>&1 || true
   fi
   docker rm -f "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
-  if [ -n "${CREATED_APP_ID}" ]; then
-    docker ps -aq --filter "name=hostlet-app-${CREATED_APP_ID}" | xargs -r docker rm -f >/dev/null 2>&1 || true
-    docker volume rm "hostlet-app-data-${CREATED_APP_ID}" >/dev/null 2>&1 || true
+  if [ "${RAILPACK_BUILDKIT_PREEXISTED}" = "0" ]; then
+    docker rm -f hostlet-railpack-buildkit >/dev/null 2>&1 || true
   fi
-  rm -rf "${TMP_DIR}"
+  for app in "${CREATED_APP_IDS[@]}"; do
+    docker ps -aq --filter "name=hostlet-app-${app}" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker volume rm "hostlet-app-data-${app}" >/dev/null 2>&1 || true
+    docker images "hostlet/app-${app}" --format "{{.Repository}}:{{.Tag}}" | xargs -r docker image rm -f >/dev/null 2>&1 || true
+    docker ps -aq --filter "label=com.docker.compose.project=hostlet-app-${app//-/}" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker volume ls -q --filter "label=com.docker.compose.project=hostlet-app-${app//-/}" | xargs -r docker volume rm >/dev/null 2>&1 || true
+  done
+  if [ "${FAILED}" = "0" ]; then
+    rm -rf "${TMP_DIR}"
+  fi
 }
 trap cleanup EXIT
 
@@ -96,45 +122,17 @@ wait_job_status() {
 }
 
 make_fixture_repo() {
-  mkdir -p "${TMP_DIR}/git/${APP_REPO_NAME}"
-  cd "${TMP_DIR}/git/${APP_REPO_NAME}"
+  local repo_name="$1"
+  local fixture="$2"
+  mkdir -p "${TMP_DIR}/git/${repo_name}"
+  cd "${TMP_DIR}/git/${repo_name}"
   git init -b main >/dev/null
   git config user.email "ci@hostlet.local"
   git config user.name "Hostlet CI"
-  cat > server.js <<'EOF'
-const http = require("http");
-const fs = require("fs");
-const port = Number(process.env.PORT || 3000);
-const version = process.env.APP_VERSION || "v1";
-http.createServer((req, res) => {
-  if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "text/plain" });
-    res.end("ok");
-    return;
-  }
-  let persisted = "no-data";
-  try {
-    fs.mkdirSync("/data", { recursive: true });
-    const marker = "/data/hostlet-ci-version";
-    if (!fs.existsSync(marker)) fs.writeFileSync(marker, version);
-    persisted = fs.readFileSync(marker, "utf8");
-  } catch {
-    persisted = "no-data";
-  }
-  res.writeHead(200, { "content-type": "text/plain" });
-  res.end(`hostlet-ci-${version}-${persisted}`);
-}).listen(port, "0.0.0.0");
-EOF
-  cat > Dockerfile <<'EOF'
-FROM node:22-alpine
-WORKDIR /app
-COPY server.js .
-ENV PORT=3000
-CMD ["node", "server.js"]
-EOF
+  cp -R "${fixture}/." .
   git add .
   git commit -m "initial app" >/dev/null
-  git clone --bare . "${TMP_DIR}/git/${APP_REPO_NAME}.git" >/dev/null 2>&1
+  git clone --bare . "${TMP_DIR}/git/${repo_name}.git" >/dev/null 2>&1
   cd "${ROOT}"
   cat > "${GIT_CONFIG_GLOBAL}" <<EOF
 [url "file://${TMP_DIR}/git/"]
@@ -149,7 +147,15 @@ start_postgres_container postgres:16-alpine
 wait_postgres_ready
 POSTGRES_PORT="$(discover_postgres_port)"
 
-make_fixture_repo
+make_fixture_repo "${APP_REPO_NAME}" "${ROOT}/scripts/fixtures/generated-apps/node"
+make_fixture_repo "${COMPOSE_REPO_NAME}" "${ROOT}/scripts/fixtures/generated-apps/compose"
+for fixture in "${RAILPACK_FIXTURES[@]}"; do
+  IFS=: read -r fixture_name repo_name _health_path _expected <<<"${fixture}"
+  make_fixture_repo "${repo_name}" "${ROOT}/scripts/fixtures/generated-apps/${fixture_name}"
+done
+if docker inspect hostlet-railpack-buildkit >/dev/null 2>&1; then
+  RAILPACK_BUILDKIT_PREEXISTED=1
+fi
 
 # ---------------------------------------------------------------------------
 # Environment: shared self-hosted API config plus the agent-side config this
@@ -196,6 +202,61 @@ published_app_serves() {
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
   port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
   curl -fsS "http://127.0.0.1:${port}/" | grep -q "${expected}"
+}
+
+deploy_railpack_fixture() {
+  local fixture_name="$1"
+  local repo_name="$2"
+  local health_path="$3"
+  local expected="$4"
+  local railpack_payload railpack_app_payload railpack_app_id railpack_deploy_payload railpack_deployment_id
+  local railpack_detail railpack_published_port railpack_logs railpack_delete_payload railpack_delete_job
+
+  railpack_payload="$(cat <<JSON
+{
+  "name":"ci-railpack-${fixture_name}",
+  "repo_full_name":"hostlet-ci/${repo_name}",
+  "branch":"main",
+  "server_id":null,
+  "container_port":3000,
+  "health_path":"${health_path}",
+  "domain":"",
+  "runtime_kind":"single",
+  "hostlet_config_path":"hostlet.yml",
+  "root_directory":".",
+  "memory_limit_mb":512,
+  "cpu_limit":0.5,
+  "public_exposure":false,
+  "auto_deploy":false,
+  "deploy_after_create":false,
+  "env":[]
+}
+JSON
+)"
+  railpack_app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps" --data "${railpack_payload}")"
+  railpack_app_id="$(printf '%s' "${railpack_app_payload}" | json_get id)"
+  CREATED_APP_IDS+=("${railpack_app_id}")
+
+  railpack_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${railpack_app_id}/deploy" --data '{}')"
+  railpack_deployment_id="$(printf '%s' "${railpack_deploy_payload}" | json_get deploymentId)"
+  wait_deployment_status "${railpack_deployment_id}"
+
+  railpack_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${railpack_app_id}")"
+  railpack_published_port="$(printf '%s' "${railpack_detail}" | json_get currentDeployment.publishedPort)"
+  curl -fsS "http://127.0.0.1:${railpack_published_port}${health_path}" >/dev/null
+  curl -fsS "http://127.0.0.1:${railpack_published_port}/" | grep -q "${expected}"
+  printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.buildBackend | grep -q '^railpack$'
+  printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.packagingStrategy | grep -q '^generated$'
+
+  railpack_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${railpack_deployment_id}/logs")"
+  printf '%s' "${railpack_logs}" | grep -q 'Building with Railpack'
+  printf '%s' "${railpack_logs}" | grep -q 'Health check passed'
+  docker ps --filter "name=hostlet-app-${railpack_app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+
+  railpack_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${railpack_app_id}")"
+  railpack_delete_job="$(printf '%s' "${railpack_delete_payload}" | json_get jobId)"
+  wait_job_status "${railpack_delete_job}"
+  expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${railpack_app_id}"
 }
 
 # ---------------------------------------------------------------------------
@@ -253,7 +314,7 @@ JSON
 # ---------------------------------------------------------------------------
 app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps" --data "${create_payload}")"
 app_id="$(printf '%s' "${app_payload}" | json_get id)"
-CREATED_APP_ID="${app_id}"
+CREATED_APP_IDS+=("${app_id}")
 
 # ---------------------------------------------------------------------------
 # Deploy v1: container comes up healthy, serves v1, logs redact the secret, and
@@ -270,11 +331,12 @@ curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
 
 logs_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
 printf '%s' "${logs_payload}" | grep -q 'Health check passed'
+printf '%s' "${logs_payload}" | grep -q 'Generating optimized Hostlet Dockerfile'
 if printf '%s' "${logs_payload}" | grep -q 'secret-value-for-redaction'; then
   echo "deployment logs exposed a raw secret" >&2
   exit 1
 fi
-docker ps --filter "name=hostlet-app-${CREATED_APP_ID}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+docker ps --filter "name=hostlet-app-${app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
 
 # ---------------------------------------------------------------------------
 # Redeploy v2: bumping APP_VERSION and redeploying serves v2 (data volume keeps
@@ -312,5 +374,60 @@ delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${J
 delete_job="$(printf '%s' "${delete_payload}" | json_get jobId)"
 wait_job_status "${delete_job}"
 expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}"
+
+for fixture in "${RAILPACK_FIXTURES[@]}"; do
+  IFS=: read -r fixture_name repo_name health_path expected <<<"${fixture}"
+  deploy_railpack_fixture "${fixture_name}" "${repo_name}" "${health_path}" "${expected}"
+done
+
+compose_payload="$(cat <<JSON
+{
+  "name":"ci-compose-fullstack",
+  "repo_full_name":"${COMPOSE_REPO_FULL}",
+  "branch":"main",
+  "server_id":null,
+  "container_port":3000,
+  "health_path":"/health",
+  "domain":"",
+  "runtime_kind":"compose",
+  "hostlet_config_path":"hostlet.yml",
+  "root_directory":".",
+  "memory_limit_mb":512,
+  "cpu_limit":0.5,
+  "public_exposure":false,
+  "auto_deploy":false,
+  "deploy_after_create":false,
+  "env":[{"key":"CI_SECRET","value":"compose-secret-value-for-redaction"}]
+}
+JSON
+)"
+compose_app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps" --data "${compose_payload}")"
+compose_app_id="$(printf '%s' "${compose_app_payload}" | json_get id)"
+CREATED_APP_IDS+=("${compose_app_id}")
+
+compose_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${compose_app_id}/deploy" --data '{}')"
+compose_deployment_id="$(printf '%s' "${compose_deploy_payload}" | json_get deploymentId)"
+wait_deployment_status "${compose_deployment_id}"
+
+compose_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${compose_app_id}")"
+compose_published_port="$(printf '%s' "${compose_detail}" | json_get currentDeployment.publishedPort)"
+curl -fsS "http://127.0.0.1:${compose_published_port}/health" | grep -q '^ok$'
+curl -fsS "http://127.0.0.1:${compose_published_port}/" | grep -q 'hostlet-compose-fullstack'
+printf '%s' "${compose_detail}" | json_get latestDeployment.runtimeMetadata.runtime | grep -q '^compose$'
+printf '%s' "${compose_detail}" | json_get latestDeployment.runtimeMetadata.webService | grep -q '^web$'
+
+compose_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${compose_deployment_id}/logs")"
+printf '%s' "${compose_logs}" | grep -q 'Detected Hostlet Compose app'
+printf '%s' "${compose_logs}" | grep -q 'Health check passed'
+if printf '%s' "${compose_logs}" | grep -q 'compose-secret-value-for-redaction'; then
+  echo "compose deployment logs exposed a raw secret" >&2
+  exit 1
+fi
+docker ps --filter "label=com.docker.compose.project=hostlet-app-${compose_app_id//-/}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+
+compose_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${compose_app_id}")"
+compose_delete_job="$(printf '%s' "${compose_delete_payload}" | json_get jobId)"
+wait_job_status "${compose_delete_job}"
+expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${compose_app_id}"
 
 echo "self-hosted deploy E2E passed"

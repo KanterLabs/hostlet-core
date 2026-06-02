@@ -328,14 +328,14 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <Field label="Domain" value={settings.domain} onChange={(value) => setSettings({ ...settings, domain: value })} />
                   <Field label="Health path" value={settings.health_path} onChange={(value) => setSettings({ ...settings, health_path: value })} />
                   <SelectField label="Runtime" value={settings.runtime_kind} onChange={(value) => setSettings({ ...settings, runtime_kind: value })}>
-                    <option value="single">Dockerfile or Node</option>
+                    <option value="single">Single service app</option>
                     <option value="compose">Docker Compose</option>
                   </SelectField>
                   {settings.runtime_kind === "compose" && <Field label="Hostlet config" value={settings.hostlet_config_path} onChange={(value) => setSettings({ ...settings, hostlet_config_path: value })} />}
                   <SelectField label="Package with" value={settings.packaging_strategy} onChange={(value) => setSettings({ ...settings, packaging_strategy: value })}>
-                    <option value="auto">Auto</option>
+                    <option value="auto">Auto detect</option>
                     <option value="dockerfile">Repository Dockerfile</option>
-                    <option value="generated">Hostlet optimized Dockerfile</option>
+                    <option value="generated">Hostlet generated runtime</option>
                   </SelectField>
                   <Field label="Root directory" value={settings.root_directory} onChange={(value) => setSettings({ ...settings, root_directory: value })} />
                   <Field label="Container port" type="number" value={settings.container_port} onChange={(value) => setSettings({ ...settings, container_port: value })} />

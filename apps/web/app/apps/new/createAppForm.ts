@@ -138,6 +138,6 @@ export function createAppDisabledReason({
   if (!form.branch.trim()) return "Enter a branch.";
   if (!form.server_id) return "Choose a local deploy target.";
   if (requiredEnvMissing) return "Fill required environment values from the repo inspection.";
-  if (inspection?.deployable === false) return "This repo is not deployable yet. Add a Dockerfile or package.json, then inspect again.";
+  if (inspection?.deployable === false) return "This repo is not deployable yet. Add a supported app manifest or start command, then inspect again.";
   return "";
 }

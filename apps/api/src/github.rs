@@ -281,6 +281,26 @@ async fn inspect_repo(
         return Ok(Value::Object(result));
     }
 
+    for (path, language) in [
+        ("requirements.txt", "Python"),
+        ("pyproject.toml", "Python"),
+        ("go.mod", "Go"),
+        ("Cargo.toml", "Rust"),
+        ("index.html", "static"),
+    ] {
+        if github_file_text(state, repo, branch, path, token)
+            .await?
+            .is_some()
+        {
+            return Ok(Value::Object(railpack_inspection(
+                repo,
+                branch,
+                default_branch,
+                language,
+            )));
+        }
+    }
+
     Ok(Value::Object(
         InspectionBase {
             repo,
@@ -291,7 +311,7 @@ async fn inspect_repo(
             packaging_options: json!(["auto"]),
             recommended_packaging_strategy: "auto",
             env: json!([]),
-            warnings: json!(["No root Dockerfile or package.json was found. Add a Dockerfile, package.json, or Hostlet Compose manifest before deploying."]),
+            warnings: json!(["No root Dockerfile, package.json, Python, Go, Rust, static, or Hostlet Compose marker was found. Add a start command or a supported app manifest before deploying."]),
             summary: "Hostlet could not infer a runnable app shape.".to_string(),
         }
         .build(),
@@ -492,6 +512,27 @@ fn gitea_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
         "summary": "Gitea detected. Hostlet will use the official rootless image with SQLite and persistent named volumes.",
         "autoDeployAvailable": false
     })
+}
+
+fn railpack_inspection(
+    repo: &str,
+    branch: &str,
+    default_branch: &str,
+    language: &str,
+) -> serde_json::Map<String, Value> {
+    InspectionBase {
+        repo,
+        default_branch,
+        branch,
+        deployable: true,
+        container_port: json!(3000),
+        packaging_options: json!(["auto", "generated"]),
+        recommended_packaging_strategy: "generated",
+        env: json!([]),
+        warnings: json!([format!("{language} app detected. Hostlet will build it with Railpack if there is no repository Dockerfile.")]),
+        summary: format!("{language} app detected. Hostlet will use generated Railpack runtime support."),
+    }
+    .build()
 }
 
 fn valid_env_prompt_key(key: &str) -> bool {
@@ -849,8 +890,10 @@ fn valid_commit_sha(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        gitea_inspection, infer_dockerfile, infer_package_json, parse_github_repo, valid_commit_sha,
+        gitea_inspection, infer_dockerfile, infer_package_json, parse_github_repo,
+        railpack_inspection, valid_commit_sha,
     };
+    use serde_json::Value;
 
     #[test]
     fn rejects_branch_delete_zero_sha() {
@@ -915,6 +958,17 @@ VOLUME ["/data"]
             .unwrap()
             .iter()
             .any(|warning| warning.as_str().unwrap().contains("SSH Git access")));
+    }
+
+    #[test]
+    fn railpack_inspection_marks_supported_language_deployable() {
+        let value = Value::Object(railpack_inspection("owner/repo", "main", "main", "Python"));
+        assert_eq!(value["deployable"], true);
+        assert_eq!(value["recommendedPackagingStrategy"], "generated");
+        assert!(value["summary"]
+            .as_str()
+            .unwrap()
+            .contains("generated Railpack runtime support"));
     }
 
     #[test]

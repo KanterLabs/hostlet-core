@@ -446,7 +446,7 @@ pub(crate) async fn run_log(
     bin: &str,
     args: &[&str],
 ) -> anyhow::Result<()> {
-    run_log_streamed(cfg, deployment_id, None, bin, args).await
+    run_log_streamed(cfg, deployment_id, None, &[], bin, args).await
 }
 
 pub(crate) async fn run_log_in_dir(
@@ -456,7 +456,18 @@ pub(crate) async fn run_log_in_dir(
     bin: &str,
     args: &[&str],
 ) -> anyhow::Result<()> {
-    run_log_streamed(cfg, deployment_id, Some(dir), bin, args).await
+    run_log_streamed(cfg, deployment_id, Some(dir), &[], bin, args).await
+}
+
+pub(crate) async fn run_log_in_dir_env(
+    cfg: &Config,
+    deployment_id: Uuid,
+    dir: &Path,
+    envs: &[(&str, &str)],
+    bin: &str,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    run_log_streamed(cfg, deployment_id, Some(dir), envs, bin, args).await
 }
 
 /// Spawns `bin args`, streaming stdout/stderr back as deployment logs. When
@@ -465,6 +476,7 @@ async fn run_log_streamed(
     cfg: &Config,
     deployment_id: Uuid,
     dir: Option<&Path>,
+    envs: &[(&str, &str)],
     bin: &str,
     args: &[&str],
 ) -> anyhow::Result<()> {
@@ -478,6 +490,9 @@ async fn run_log_streamed(
     let mut cmd = Command::new(bin);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
     }
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd

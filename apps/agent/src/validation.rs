@@ -217,6 +217,20 @@ pub(crate) fn env_pairs_has_key(pairs: &[String], key: &str) -> bool {
         .any(|(existing, _)| existing == key)
 }
 
+pub(crate) fn runtime_env_args(p: &Value, port: i64) -> Vec<String> {
+    let mut pairs = env_args(p);
+    if !env_pairs_has_key(&pairs, "PORT") {
+        pairs.push(format!("PORT={port}"));
+    }
+    if !env_pairs_has_key(&pairs, "HOSTLET_DATA_DIR") {
+        pairs.push("HOSTLET_DATA_DIR=/data".into());
+    }
+    if !env_pairs_has_key(&pairs, "DATA_DIR") {
+        pairs.push("DATA_DIR=/data".into());
+    }
+    pairs
+}
+
 /// Shared shape for Hostlet-managed Docker resource names: a required prefix,
 /// a maximum length, and a per-character allowlist.
 fn valid_prefixed_name(
@@ -315,6 +329,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_env_args_injects_port_and_data_dirs() {
+        let args = runtime_env_args(&serde_json::json!({"env":{"APP_ENV":"test"}}), 4173);
+        assert!(args.contains(&"APP_ENV=test".to_string()));
+        assert!(args.contains(&"PORT=4173".to_string()));
+        assert!(args.contains(&"HOSTLET_DATA_DIR=/data".to_string()));
+        assert!(args.contains(&"DATA_DIR=/data".to_string()));
+    }
+
+    #[test]
+    fn runtime_env_args_preserves_user_port() {
+        let args = runtime_env_args(&serde_json::json!({"env":{"PORT":"9000"}}), 4173);
+        assert!(args.contains(&"PORT=9000".to_string()));
+        assert!(!args.contains(&"PORT=4173".to_string()));
+    }
+
+    #[test]
     fn rejects_bad_job_signature() {
         assert!(!verify_signature("secret", b"{}", "sha256=bad"));
     }
@@ -342,6 +372,8 @@ mod tests {
         assert!(dockerfile.contains("npm run build"));
         assert!(dockerfile.contains("npm run start"));
         assert!(dockerfile.contains("FROM node:22-alpine AS deps"));
+        assert!(dockerfile.contains("npm install"));
+        assert!(dockerfile.contains("mkdir -p node_modules"));
         assert!(dockerfile.contains("npm prune --omit=dev"));
     }
 

@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) const NO_NATIVE_BUILD_PLAN: &str = "No usable Dockerfile or package.json found";
+
 pub(crate) fn normalize_git_remote(value: &str) -> String {
     value
         .trim()
@@ -21,8 +23,22 @@ pub(crate) struct BuildPlan {
     pub(crate) dockerfile: PathBuf,
     pub(crate) generated: bool,
     pub(crate) packaging_strategy: PackagingStrategy,
+    pub(crate) detected_language: Option<GeneratedLanguage>,
     pub(crate) detected_framework: Option<Framework>,
     pub(crate) package_manager: Option<PackageManager>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GeneratedLanguage {
+    Node,
+}
+
+impl GeneratedLanguage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +117,7 @@ async fn dockerfile_packaging_plan(
         dockerfile: root_dockerfile,
         generated: false,
         packaging_strategy: PackagingStrategy::Dockerfile,
+        detected_language: None,
         detected_framework: None,
         package_manager: None,
     }))
@@ -117,7 +134,7 @@ async fn generated_packaging_plan(
 ) -> anyhow::Result<BuildPlan> {
     let package_json = checkout.join("package.json");
     if !tokio::fs::try_exists(&package_json).await? {
-        bail!("No usable Dockerfile or package.json found");
+        bail!(NO_NATIVE_BUILD_PLAN);
     }
     let contents = tokio::fs::read_to_string(&package_json).await?;
     let package: Value =
@@ -164,6 +181,7 @@ async fn generated_packaging_plan(
         dockerfile,
         generated: true,
         packaging_strategy: PackagingStrategy::Generated,
+        detected_language: Some(GeneratedLanguage::Node),
         detected_framework: Some(framework),
         package_manager: Some(package_manager),
     })
@@ -216,7 +234,7 @@ fn infer_node_commands(
 }
 
 /// Reads a non-blank string command override from the deploy payload.
-fn payload_command(payload: &Value, key: &str) -> Option<String> {
+pub(crate) fn payload_command(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(|v| v.as_str())
@@ -466,6 +484,7 @@ pub(crate) fn build_runtime_metadata(
     json!({
         "packagingStrategy": build.packaging_strategy.label(),
         "generatedDockerfile": build.generated,
+        "detectedLanguage": build.detected_language.map(|language| language.label()),
         "detectedFramework": build.detected_framework.map(|framework| framework.label()),
         "runtimeKind": build.detected_framework.map(|framework| framework.runtime_kind()),
         "packageManager": build.package_manager.map(|pm| pm.label()),
