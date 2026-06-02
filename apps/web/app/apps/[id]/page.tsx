@@ -37,124 +37,27 @@ import {
   ToggleCard,
 } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
-
-type ResourceStats = {
-  cpuPercent: string;
-  memoryUsage: string;
-  memoryPercent: string;
-  networkIo: string;
-  blockIo: string;
-  pids: string;
-  sampledAt: string;
-};
-
-type RuntimeHealth = {
-  appId?: string;
-  deploymentId?: string | null;
-  containerName?: string | null;
-  status: string;
-  checkedUrl?: string | null;
-  httpStatus?: number | null;
-  latencyMs?: number | null;
-  failureCount: number;
-  successCount: number;
-  lastError?: string | null;
-  lastCheckedAt?: string | null;
-  lastHealthyAt?: string | null;
-  updatedAt?: string | null;
-};
-
-type RuntimeHealthEvent = {
-  id: string;
-  status: string;
-  httpStatus?: number | null;
-  latencyMs?: number | null;
-  error?: string | null;
-  createdAt: string;
-};
-
-type App = {
-  id: string;
-  name: string;
-  repoFullName: string;
-  branch: string;
-  domain: string;
-  containerPort?: number | null;
-  healthPath?: string | null;
-  runtimeKind?: string | null;
-  hostletConfigPath?: string | null;
-  packagingStrategy?: string | null;
-  rootDirectory?: string | null;
-  installCommand?: string | null;
-  buildCommand?: string | null;
-  startCommand?: string | null;
-  memoryLimitMb?: number | null;
-  cpuLimit?: number | null;
-  currentDeploymentId?: string | null;
-  publicExposure?: boolean | null;
-  autoDeploy?: boolean | null;
-  server?: { id: string; name: string; kind: string; status: string; publicIp?: string | null; lastSeenAt?: string | null } | null;
-  latestDeployment?: { id: string; status?: string | null; failure?: string | null; commitSha?: string | null; startedAt?: string | null; finishedAt?: string | null; runtimeMetadata?: RuntimeMetadata | null } | null;
-  currentDeployment?: { status: string; publishedPort?: number | null; finishedAt?: string | null } | null;
-  latestWebhook?: {
-    status: string;
-    ignoredReason?: string | null;
-    commitSha?: string | null;
-    branch?: string | null;
-    createdAt?: string | null;
-  } | null;
-  health?: RuntimeHealth | null;
-};
-
-type AgentJob = {
-  id: string;
-  status: "queued" | "running" | "success" | "failed";
-  failure?: string | null;
-};
-
-type SettingsForm = {
-  domain: string;
-  health_path: string;
-  runtime_kind: string;
-  hostlet_config_path: string;
-  packaging_strategy: string;
-  root_directory: string;
-  install_command: string;
-  build_command: string;
-  start_command: string;
-  container_port: string;
-  memory_limit_mb: string;
-  cpu_limit: string;
-  public_exposure: boolean;
-  auto_deploy: boolean;
-};
-
-type RuntimeMetadata = {
-  packagingStrategy?: string | null;
-  generatedDockerfile?: boolean | null;
-  detectedFramework?: string | null;
-  runtimeKind?: string | null;
-  packageManager?: string | null;
-  buildDurationMs?: number | null;
-  imageSizeBytes?: number | null;
-};
-
-const emptySettings: SettingsForm = {
-  domain: "",
-  health_path: "/",
-  runtime_kind: "single",
-  hostlet_config_path: "hostlet.yml",
-  packaging_strategy: "auto",
-  root_directory: ".",
-  install_command: "",
-  build_command: "",
-  start_command: "",
-  container_port: "3000",
-  memory_limit_mb: "",
-  cpu_limit: "",
-  public_exposure: false,
-  auto_deploy: false,
-};
+import {
+  appVisitHref,
+  appVisitLabel,
+  cpuDisplay,
+  displayDomain,
+  healthEventSummary,
+  healthMetricDetail,
+  isActiveDeploy,
+  rollbackDisabledReason,
+  shortSha,
+  webhookSummary,
+} from "./appDetailHelpers";
+import { emptySettings } from "./appDetail.types";
+import type {
+  App,
+  ResourceStats,
+  RuntimeHealth,
+  RuntimeHealthEvent,
+  SettingsForm,
+} from "./appDetail.types";
+import { useAppActions } from "./useAppActions";
 
 export default function AppDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -168,14 +71,39 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [newEnv, setNewEnv] = useState({ key: "", value: "" });
   const [resourceMessage, setResourceMessage] = useState("Waiting for a successful deploy.");
-  const [healthMessage, setHealthMessage] = useState("Waiting for runtime health.");
-  const [message, setMessage] = useState("");
-  const [busyAction, setBusyAction] = useState<"deploy" | "rollback" | "exposure" | "delete" | "settings" | "env" | "health" | "restart" | "">("");
+
+  const {
+    message,
+    healthMessage,
+    setHealthMessage,
+    busyAction,
+    refreshApp,
+    deploy,
+    rollback,
+    deleteApp,
+    toggleExposure,
+    saveSettings,
+    saveEnvVar,
+    checkHealthNow,
+    restartContainer,
+    deleteEnvVar,
+  } = useAppActions({
+    id,
+    app,
+    settings,
+    router,
+    setApp,
+    setSettings,
+    setHealth,
+    setEnvKeys,
+    setEnvValues,
+    setNewEnv,
+  });
 
   useEffect(() => {
     refreshApp();
     api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
-  }, [id]);
+  }, [id, refreshApp]);
 
   useEffect(() => {
     let active = true;
@@ -204,7 +132,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
       active = false;
       clearInterval(timer);
     };
-  }, [id]);
+  }, [id, setHealthMessage]);
 
   useEffect(() => {
     let active = true;
@@ -227,189 +155,6 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
       clearInterval(timer);
     };
   }, [id]);
-
-  async function refreshApp() {
-    try {
-      const loaded = await api<App>(`/api/apps/${id}`);
-      setApp(loaded);
-      if (loaded.health) setHealth(loaded.health);
-      setSettings({
-        domain: loaded.domain || "",
-        health_path: loaded.healthPath || "/",
-        runtime_kind: loaded.runtimeKind || "single",
-        hostlet_config_path: loaded.hostletConfigPath || "hostlet.yml",
-        packaging_strategy: loaded.packagingStrategy || "auto",
-        root_directory: loaded.rootDirectory || ".",
-        install_command: loaded.installCommand || "",
-        build_command: loaded.buildCommand || "",
-        start_command: loaded.startCommand || "",
-        container_port: String(loaded.containerPort || 3000),
-        memory_limit_mb: loaded.memoryLimitMb ? String(loaded.memoryLimitMb) : "",
-        cpu_limit: loaded.cpuLimit ? String(loaded.cpuLimit) : "",
-        public_exposure: !!loaded.publicExposure,
-        auto_deploy: !!loaded.autoDeploy,
-      });
-    } catch {
-      setMessage("Could not load app. Sign in and check that it still exists.");
-    }
-  }
-
-  async function deploy() {
-    if (busyAction || isActiveDeploy(app?.latestDeployment?.status)) return;
-      setBusyAction("deploy");
-    setMessage("Starting deployment...");
-    try {
-      const res = await api<{ deploymentId: string }>(`/api/apps/${id}/deploy`, { method: "POST", body: "{}" });
-      router.push(`/deployments/${res.deploymentId}`);
-    } catch (error) {
-      setMessage(`Deploy failed to start. ${error instanceof Error ? error.message : ""}`);
-      setBusyAction("");
-    }
-  }
-
-  async function rollback() {
-    if (busyAction) return;
-      setBusyAction("rollback");
-    setMessage("Starting rollback...");
-    try {
-      const res = await api<{ rollbackDeploymentId: string }>(`/api/apps/${id}/rollback`, { method: "POST", body: "{}" });
-      router.push(`/deployments/${res.rollbackDeploymentId}`);
-    } catch (error) {
-      setMessage(`Rollback could not start. ${error instanceof Error ? error.message : ""}`);
-      setBusyAction("");
-    }
-  }
-
-  async function deleteApp() {
-    if (!confirm("Delete this app, its Hostlet-managed route, containers, images, and deployment history?")) return;
-    if (busyAction) return;
-    setBusyAction("delete");
-    setMessage("Deleting app and requesting server cleanup...");
-    try {
-      const result = await api<{ jobId?: string } | undefined>(`/api/apps/${id}`, { method: "DELETE" });
-      if (result?.jobId) {
-        setMessage("Server cleanup is running...");
-        await waitForAgentJob(result.jobId, setMessage);
-      }
-      router.push("/apps");
-    } catch (error) {
-      setMessage(`Delete failed. ${error instanceof Error ? error.message : ""}`);
-      setBusyAction("");
-    }
-  }
-
-  async function toggleExposure() {
-    if (!app || busyAction) return;
-    const next = !app.publicExposure;
-    setBusyAction("exposure");
-    setMessage(next ? "Publishing app URL..." : "Making app private...");
-    try {
-      await api(`/api/apps/${id}`, { method: "PATCH", body: JSON.stringify({ public_exposure: next }) });
-      await refreshApp();
-      setMessage(next ? "App URL published. DNS may take a moment to propagate." : "App URL is private.");
-    } catch (error) {
-      setMessage(`${next ? "Publish" : "Unpublish"} failed. ${error instanceof Error ? error.message : ""}`);
-    } finally {
-      setBusyAction("");
-    }
-  }
-
-  async function saveSettings() {
-    if (busyAction) return;
-    setBusyAction("settings");
-    setMessage("Saving app settings...");
-    try {
-      const payload: Record<string, unknown> = {
-        health_path: settings.health_path,
-        root_directory: settings.root_directory || ".",
-        packaging_strategy: settings.packaging_strategy,
-        install_command: settings.install_command.trim() || null,
-        build_command: settings.build_command.trim() || null,
-        start_command: settings.start_command.trim() || null,
-        container_port: Number(settings.container_port),
-      };
-      payload.domain = settings.domain;
-      payload.runtime_kind = settings.runtime_kind;
-      payload.hostlet_config_path = settings.hostlet_config_path || "hostlet.yml";
-      payload.memory_limit_mb = settings.memory_limit_mb ? Number(settings.memory_limit_mb) : null;
-      payload.cpu_limit = settings.cpu_limit ? Number(settings.cpu_limit) : null;
-      payload.public_exposure = settings.public_exposure;
-      payload.auto_deploy = settings.auto_deploy;
-      await api(`/api/apps/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify(payload),
-      });
-      await refreshApp();
-      setMessage("Settings saved. Redeploy for runtime changes to reach the container.");
-    } catch (error) {
-      setMessage(`Save failed. ${error instanceof Error ? error.message : ""}`);
-    } finally {
-      setBusyAction("");
-    }
-  }
-
-  async function saveEnvVar(key: string, value: string) {
-    if (busyAction || !key.trim()) return;
-    setBusyAction("env");
-    setMessage("Saving environment variable...");
-    try {
-      await api(`/api/apps/${id}/env/${encodeURIComponent(key.trim().toUpperCase())}`, {
-        method: "PUT",
-        body: JSON.stringify({ value }),
-      });
-      setEnvKeys(await api<Array<{ key: string }>>(`/api/apps/${id}/env`));
-      setEnvValues((current) => ({ ...current, [key]: "" }));
-      setNewEnv({ key: "", value: "" });
-      setMessage("Environment variable saved. Redeploy for the change to reach the container.");
-    } catch (error) {
-      setMessage(`Env save failed. ${error instanceof Error ? error.message : ""}`);
-    } finally {
-      setBusyAction("");
-    }
-  }
-
-  async function checkHealthNow() {
-    if (busyAction) return;
-    setBusyAction("health");
-    setHealthMessage("Requesting a fresh health check...");
-    try {
-      await api(`/api/apps/${id}/health/check-now`, { method: "POST", body: "{}" });
-      setHealthMessage("Health check requested. Waiting for the agent result...");
-    } catch (error) {
-      setHealthMessage(`Health check could not start. ${error instanceof Error ? error.message : ""}`);
-    } finally {
-      setBusyAction("");
-    }
-  }
-
-  async function restartContainer() {
-    if (busyAction || !confirm("Restart the current app container?")) return;
-    setBusyAction("restart");
-    setHealthMessage("Requesting container restart...");
-    try {
-      await api(`/api/apps/${id}/restart`, { method: "POST", body: "{}" });
-      setHealthMessage("Container restart requested. Waiting for the agent health result...");
-    } catch (error) {
-      setHealthMessage(`Restart could not start. ${error instanceof Error ? error.message : ""}`);
-    } finally {
-      setBusyAction("");
-    }
-  }
-
-  async function deleteEnvVar(key: string) {
-    if (busyAction || !confirm(`Delete ${key}?`)) return;
-    setBusyAction("env");
-    setMessage("Deleting environment variable...");
-    try {
-      await api(`/api/apps/${id}/env/${encodeURIComponent(key)}`, { method: "DELETE" });
-      setEnvKeys(await api<Array<{ key: string }>>(`/api/apps/${id}/env`));
-      setMessage("Environment variable deleted. Redeploy for the change to reach the container.");
-    } catch (error) {
-      setMessage(`Env delete failed. ${error instanceof Error ? error.message : ""}`);
-    } finally {
-      setBusyAction("");
-    }
-  }
 
   const deploymentStatus = app?.latestDeployment?.status || (app?.currentDeploymentId ? "success" : "not deployed");
   const active = isActiveDeploy(app?.latestDeployment?.status);
@@ -674,115 +419,4 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
           {message && <Notice tone="neutral" className="mt-6" description={message} />}
     </AppShell>
   );
-}
-
-function webhookSummary(webhook?: App["latestWebhook"] | null) {
-  if (!webhook) return "No push seen";
-  const sha = webhook.commitSha ? ` ${webhook.commitSha.slice(0, 7)}` : "";
-  return webhook.ignoredReason ? `ignored${sha}: ${webhook.ignoredReason}` : `${webhook.status}${sha}`;
-}
-
-function isActiveDeploy(status?: string | null) {
-  return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
-}
-
-function rollbackDisabledReason(app: App | null, active: boolean) {
-  if (!app) return "App details are still loading.";
-  if (active) return "Wait for the active deployment to finish before rolling back.";
-  if (app.runtimeKind === "compose") return "Compose rollback is disabled for Hostlet 0.5.0. Redeploy the target revision instead.";
-  if (!app.currentDeploymentId) return "Deploy this app once before rolling back.";
-  return "";
-}
-
-function shortSha(sha?: string | null) {
-  if (!sha || sha === "HEAD") return sha || "No deploy yet";
-  return sha.slice(0, 7);
-}
-
-function cpuDisplay(raw: string) {
-  const value = Number.parseFloat(raw.replace("%", ""));
-  if (Number.isFinite(value) && value <= 0) {
-    return { value: "Idle", detail: `${raw} CPU` };
-  }
-  if (Number.isFinite(value) && value > 0 && value < 0.01) {
-    return { value: "<0.01%", detail: `${raw} CPU` };
-  }
-  return { value: raw, detail: "Docker live sample" };
-}
-
-function healthMetricDetail(health?: RuntimeHealth | null) {
-  if (!health) return "waiting for agent";
-  if (health.lastError) return health.lastError;
-  if (typeof health.latencyMs === "number") return `${health.latencyMs} ms`;
-  return health.lastCheckedAt ? `checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}` : "not checked yet";
-}
-
-function healthEventSummary(event: RuntimeHealthEvent) {
-  const bits = [];
-  if (event.httpStatus) bits.push(`HTTP ${event.httpStatus}`);
-  if (typeof event.latencyMs === "number") bits.push(`${event.latencyMs} ms`);
-  return bits.length ? bits.join(" · ") : "no response data";
-}
-
-async function waitForAgentJob(jobId: string, setMessage: (message: string) => void) {
-  for (let attempt = 1; attempt <= 60; attempt += 1) {
-    const job = await api<AgentJob>(`/api/agent-jobs/${jobId}`);
-    if (job.status === "success") return;
-    if (job.status === "failed") {
-      throw new Error(job.failure || "Server cleanup failed.");
-    }
-    setMessage(`Server cleanup is ${job.status}. Waiting for confirmation...`);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
-  throw new Error("Server cleanup did not finish within 120 seconds.");
-}
-
-function displayDomain(domain: string) {
-  if (!domain || typeof window === "undefined") return domain;
-  try {
-    const withProtocol = domain.startsWith("http://") || domain.startsWith("https://") ? domain : `http://${domain}`;
-    const url = new URL(withProtocol);
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
-      url.hostname = window.location.hostname;
-      return url.host + url.pathname.replace(/\/$/, "");
-    }
-  } catch {
-    return domain;
-  }
-  return domain;
-}
-
-function appVisitHref(app?: App | null) {
-  if (!app?.currentDeploymentId) return null;
-  if (!app.publicExposure) {
-    const port = app.currentDeployment?.publishedPort;
-    const host = privateAppHost(app);
-    return port && host ? `http://${host}:${port}` : null;
-  }
-  const display = displayDomain(app.domain);
-  if (!display) return null;
-  if (display.startsWith("http://") || display.startsWith("https://")) return display;
-  try {
-    const url = new URL(`http://${display}`);
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || /^[\d.]+$/.test(url.hostname)) {
-      return `http://${display}`;
-    }
-  } catch {
-    return null;
-  }
-  return `https://${display}`;
-}
-
-function appVisitLabel(app: App) {
-  if (app.publicExposure) return displayDomain(app.domain) || "No public URL";
-  const port = app.currentDeployment?.publishedPort;
-  const host = privateAppHost(app);
-  return port && host ? `${host}:${port}` : "Deploy to assign a private port";
-}
-
-function privateAppHost(app: App) {
-  const host = app.server?.publicIp?.trim();
-  if (host && host !== "127.0.0.1" && host !== "localhost" && host !== "0.0.0.0") return host;
-  if (typeof window !== "undefined") return window.location.hostname;
-  return host || null;
 }

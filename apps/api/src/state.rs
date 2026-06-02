@@ -79,48 +79,45 @@ pub struct LogEvent {
 
 impl AppState {
     pub async fn from_env() -> anyhow::Result<Self> {
-        let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
         let mode = HostletMode::from_env()?;
         let allow_insecure_dev_defaults = bool_env("HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS");
-        let db = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(&database_url)
-            .await?;
-        sqlx::migrate::Migrator::new(Path::new("apps/api/migrations"))
-            .await?
-            .run(&db)
-            .await?;
+
+        // Infrastructure startup: connect, migrate, and seed the local server.
+        // These are side effects, kept together and ahead of pure config
+        // assembly so a failure surfaces before we build the rest of the state.
+        let db = connect_db().await?;
+        run_migrations(&db).await?;
         let crypto = Crypto::from_env(allow_insecure_dev_defaults)?;
-        let http = http_client()?;
         let local_agent_token = secret_from_env("LOCAL_AGENT_TOKEN", allow_insecure_dev_defaults)?;
         let job_signing_secret =
             secret_from_env("JOB_SIGNING_SECRET", allow_insecure_dev_defaults)?;
+        seed_local_server(&db, &crypto, &local_agent_token, &job_signing_secret).await?;
+
+        // Pure configuration assembly (no I/O beyond reading env vars).
         let allowed_github_logins = allowed_github_logins();
-        if !allow_insecure_dev_defaults && allowed_github_logins.is_none() {
-            bail!("HOSTLET_ALLOWED_GITHUB_LOGINS is required in secure mode");
-        }
-        let public_api_url =
-            std::env::var("PUBLIC_API_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-        let public_webhook_url = std::env::var("PUBLIC_WEBHOOK_URL")
-            .ok()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| public_api_url.trim_end_matches('/').to_string());
-        let public_web_url =
-            std::env::var("PUBLIC_WEB_URL").unwrap_or_else(|_| "http://localhost:3000".into());
+        require_in_secure_mode(
+            allow_insecure_dev_defaults,
+            allowed_github_logins.is_some(),
+            "HOSTLET_ALLOWED_GITHUB_LOGINS is required in secure mode",
+        )?;
+        let public_api_url = public_api_url();
+        let public_webhook_url = public_webhook_url(&public_api_url);
+        let public_web_url = public_web_url();
         let allowed_web_origins =
             allowed_web_origins(&public_web_url, allow_insecure_dev_defaults)?;
         let setup_token = nonempty_env("HOSTLET_SETUP_TOKEN");
-        if !allow_insecure_dev_defaults && setup_token.is_none() {
-            bail!("HOSTLET_SETUP_TOKEN is required in secure mode for first-run setup");
-        }
-        seed_local_server(&db, &crypto, &local_agent_token, &job_signing_secret).await?;
+        require_in_secure_mode(
+            allow_insecure_dev_defaults,
+            setup_token.is_some(),
+            "HOSTLET_SETUP_TOKEN is required in secure mode for first-run setup",
+        )?;
+
         let (logs, _) = broadcast::channel(1024);
         Ok(Self {
             db,
             crypto,
             mode,
-            http,
+            http: http_client()?,
             github_client_id: std::env::var("GITHUB_CLIENT_ID").unwrap_or_default(),
             github_webhook_secret: secret_from_env(
                 "GITHUB_WEBHOOK_SECRET",
@@ -130,11 +127,8 @@ impl AppState {
             public_api_url,
             public_web_url,
             allowed_web_origins,
-            base_domain: nonempty_env("HOSTLET_BASE_DOMAIN")
-                .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase()),
-            domain_prefix: std::env::var("HOSTLET_DOMAIN_PREFIX")
-                .unwrap_or_else(|_| "hostlet-".into())
-                .to_ascii_lowercase(),
+            base_domain: base_domain(),
+            domain_prefix: domain_prefix(),
             cloudflare_api_token: nonempty_env("CLOUDFLARE_API_TOKEN"),
             cloudflare_zone_id: nonempty_env("CLOUDFLARE_ZONE_ID"),
             cloudflare_tunnel_target: nonempty_env("CLOUDFLARE_TUNNEL_TARGET"),
@@ -142,18 +136,81 @@ impl AppState {
             session_secret: secret_from_env("SESSION_SECRET", allow_insecure_dev_defaults)?,
             setup_token,
             allowed_github_logins,
-            update_checks_enabled: !matches!(
-                std::env::var("HOSTLET_UPDATE_CHECKS")
-                    .unwrap_or_else(|_| "true".into())
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "0" | "false" | "no" | "off"
-            ),
+            update_checks_enabled: update_checks_enabled(),
             agents: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Arc::new(RateLimiter::default()),
             logs,
         })
     }
+}
+
+async fn connect_db() -> anyhow::Result<PgPool> {
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+    Ok(PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&database_url)
+        .await?)
+}
+
+async fn run_migrations(db: &PgPool) -> anyhow::Result<()> {
+    sqlx::migrate::Migrator::new(Path::new("apps/api/migrations"))
+        .await?
+        .run(db)
+        .await?;
+    Ok(())
+}
+
+/// Bails with `message` when running in secure mode and `condition` is unmet.
+///
+/// Centralizes the repeated
+/// "`if !allow_insecure_dev_defaults && missing { bail!() }`" pattern so each
+/// required-secret check reads as a single intent-revealing call.
+fn require_in_secure_mode(
+    allow_insecure_dev_defaults: bool,
+    condition: bool,
+    message: &'static str,
+) -> anyhow::Result<()> {
+    if !allow_insecure_dev_defaults && !condition {
+        bail!("{message}");
+    }
+    Ok(())
+}
+
+fn public_api_url() -> String {
+    std::env::var("PUBLIC_API_URL").unwrap_or_else(|_| "http://localhost:8080".into())
+}
+
+fn public_webhook_url(public_api_url: &str) -> String {
+    std::env::var("PUBLIC_WEBHOOK_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| public_api_url.trim_end_matches('/').to_string())
+}
+
+fn public_web_url() -> String {
+    std::env::var("PUBLIC_WEB_URL").unwrap_or_else(|_| "http://localhost:3000".into())
+}
+
+fn base_domain() -> Option<String> {
+    nonempty_env("HOSTLET_BASE_DOMAIN")
+        .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase())
+}
+
+fn domain_prefix() -> String {
+    std::env::var("HOSTLET_DOMAIN_PREFIX")
+        .unwrap_or_else(|_| "hostlet-".into())
+        .to_ascii_lowercase()
+}
+
+fn update_checks_enabled() -> bool {
+    !matches!(
+        std::env::var("HOSTLET_UPDATE_CHECKS")
+            .unwrap_or_else(|_| "true".into())
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 impl AppState {

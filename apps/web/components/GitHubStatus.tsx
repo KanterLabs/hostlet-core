@@ -30,18 +30,25 @@ export function GitHubStatus({ compact = false, showConnect = true }: { compact?
     });
   }, []);
 
-  const icon = !status ? <CircleDashed size={16} /> : status.oauthConfigured && (status.tokenValid === true || !status.authenticated)
-    ? <CheckCircle2 size={16} />
-    : <CircleAlert size={16} />;
-  const tone = !status ? "border-line bg-surface-alt text-muted" : status.oauthConfigured && (status.tokenValid === true || !status.authenticated)
-    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-    : "border-red-200 bg-red-50 text-red-900";
+  // OAuth is configured and either the token is valid or no token has been linked yet.
+  const healthy = Boolean(status?.oauthConfigured && (status.tokenValid === true || !status.authenticated));
+
+  const icon = !status ? <CircleDashed size={16} /> : healthy ? <CheckCircle2 size={16} /> : <CircleAlert size={16} />;
+  const tone = !status
+    ? "border-line bg-surface-alt text-muted"
+    : healthy
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+      : "border-red-200 bg-red-50 text-red-900";
+
+  let headline = "GitHub setup needed";
+  if (status?.tokenValid) headline = `GitHub connected as ${status.login}`;
+  else if (status?.oauthConfigured) headline = "GitHub Device Flow ready";
 
   return (
     <div className={`rounded-lg border p-3 text-sm shadow-sm shadow-neutral-950/5 ${tone}`}>
       <div className="flex items-center gap-2 font-medium">
         <GitBranch size={16} />
-        <span className="min-w-0 truncate">{status?.tokenValid ? `GitHub connected as ${status.login}` : status?.oauthConfigured ? "GitHub Device Flow ready" : "GitHub setup needed"}</span>
+        <span className="min-w-0 truncate">{headline}</span>
         <span className="ml-auto shrink-0">{icon}</span>
       </div>
       {!compact && <p className="mt-2">{status?.message || "Checking GitHub connection..."}</p>}

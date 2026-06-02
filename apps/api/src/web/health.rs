@@ -1,5 +1,16 @@
 use super::*;
 
+/// Aggregates app health snapshots into per-status counts. `{filter}` is spliced
+/// in to optionally scope the count to a single user; callers that splice a
+/// `WHERE` clause must also bind the matching parameters.
+const HEALTH_COUNTS_QUERY: &str = r#"
+        SELECT COALESCE(hs.status, 'unknown') AS status, count(*) AS count
+        FROM apps a
+        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        {filter}
+        GROUP BY COALESCE(hs.status, 'unknown')
+        "#;
+
 pub async fn health_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9,18 +20,10 @@ pub async fn health_summary(
         Err(response) => return response,
     };
     let user_id = context.user_id;
-    let rows = sqlx::query(
-        r#"
-        SELECT COALESCE(hs.status, 'unknown') AS status, count(*) AS count
-        FROM apps a
-        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
-        WHERE a.user_id=$1
-        GROUP BY COALESCE(hs.status, 'unknown')
-        "#,
-    )
-    .bind(user_id)
-    .fetch_all(&state.db)
-    .await;
+    let rows = sqlx::query(&HEALTH_COUNTS_QUERY.replace("{filter}", "WHERE a.user_id=$1"))
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await;
     match rows {
         Ok(rows) => Json(health_counts_json(rows)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -99,6 +102,7 @@ pub async fn app_resources(
     }))
     .into_response()
 }
+
 pub async fn app_health(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -173,26 +177,25 @@ pub async fn app_health_events(
     .fetch_all(&state.db)
     .await;
     match rows {
-        Ok(rows) => Json(
-            rows.into_iter()
-                .map(|row| {
-                    serde_json::json!({
-                        "id": row.get::<Uuid, _>("id"),
-                        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
-                        "containerName": row.get::<Option<String>, _>("container_name"),
-                        "status": row.get::<String, _>("status"),
-                        "checkedUrl": row.get::<Option<String>, _>("checked_url"),
-                        "httpStatus": row.get::<Option<i32>, _>("http_status"),
-                        "latencyMs": row.get::<Option<i32>, _>("latency_ms"),
-                        "error": row.get::<Option<String>, _>("error"),
-                        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+        Ok(rows) => {
+            Json(rows.into_iter().map(health_event_json).collect::<Vec<_>>()).into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+fn health_event_json(row: sqlx::postgres::PgRow) -> serde_json::Value {
+    serde_json::json!({
+        "id": row.get::<Uuid, _>("id"),
+        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
+        "containerName": row.get::<Option<String>, _>("container_name"),
+        "status": row.get::<String, _>("status"),
+        "checkedUrl": row.get::<Option<String>, _>("checked_url"),
+        "httpStatus": row.get::<Option<i32>, _>("http_status"),
+        "latencyMs": row.get::<Option<i32>, _>("latency_ms"),
+        "error": row.get::<Option<String>, _>("error"),
+        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+    })
 }
 
 pub async fn check_app_health_now(
@@ -267,16 +270,9 @@ pub async fn check_app_health_now(
 }
 
 pub(in crate::web) async fn system_health_counts(state: &AppState) -> serde_json::Value {
-    let rows = sqlx::query(
-        r#"
-        SELECT COALESCE(hs.status, 'unknown') AS status, count(*) AS count
-        FROM apps a
-        LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
-        GROUP BY COALESCE(hs.status, 'unknown')
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await;
+    let rows = sqlx::query(&HEALTH_COUNTS_QUERY.replace("{filter}", ""))
+        .fetch_all(&state.db)
+        .await;
     health_counts_json(rows.unwrap_or_default())
 }
 

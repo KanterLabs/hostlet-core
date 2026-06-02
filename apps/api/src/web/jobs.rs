@@ -117,6 +117,15 @@ pub(in crate::web) async fn enqueue_interactive_agent_job(
     }
 }
 
+/// Builds the SQL fragment that restricts agent-job visibility to jobs the
+/// caller is allowed to see.
+///
+/// `user_param` and `cloud_param` are 1-based bind-parameter indices that the
+/// fragment references as `${user_param}` / `${cloud_param}`. They must match
+/// the order in which the surrounding query binds the user id and the
+/// cloud-mode flag; see [`bind_job_mutation`], which keeps the canonical
+/// `$1 = job id, $2 = user id, $3 = cloud flag` layout in lockstep with the
+/// `(2, 3)` arguments passed here.
 fn agent_job_visibility_predicate(user_param: usize, cloud_param: usize) -> String {
     format!(
         r#"
@@ -166,23 +175,7 @@ pub async fn agent_job_status(
         .await;
     match row {
         Ok(Some(row)) => {
-            let mut finalized_delete = false;
-            if row.get::<String, _>("status") == "success"
-                && row.get::<String, _>("job_type") == "delete_app"
-                && row.get::<Option<Uuid>, _>("app_id").is_some()
-            {
-                finalized_delete = finalize_delete_app_from_job(&state, id)
-                    .await
-                    .unwrap_or(false);
-            }
-            let mut status = row.get::<String, _>("status");
-            if status == "success"
-                && row.get::<String, _>("job_type") == "delete_app"
-                && row.get::<Option<Uuid>, _>("app_id").is_some()
-                && !finalized_delete
-            {
-                status = "running".into();
-            }
+            let status = resolve_job_status(&state, id, &row).await;
             Json(serde_json::json!({
             "id": row.get::<Uuid, _>("id"),
             "status": status,
@@ -193,6 +186,28 @@ pub async fn agent_job_status(
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Resolves the reported status for a job row, performing the deferred
+/// finalization for `delete_app` jobs. A `delete_app` job that the agent
+/// reports as `success` is only truly finished once the app row has been
+/// removed; until then we keep reporting `running` so callers keep polling.
+async fn resolve_job_status(state: &AppState, id: Uuid, row: &sqlx::postgres::PgRow) -> String {
+    let status = row.get::<String, _>("status");
+    let is_pending_delete = status == "success"
+        && row.get::<String, _>("job_type") == "delete_app"
+        && row.get::<Option<Uuid>, _>("app_id").is_some();
+    if !is_pending_delete {
+        return status;
+    }
+    let finalized = finalize_delete_app_from_job(state, id)
+        .await
+        .unwrap_or(false);
+    if finalized {
+        status
+    } else {
+        "running".into()
     }
 }
 
@@ -261,8 +276,7 @@ pub async fn retry_agent_job(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let user_id = context.user_id;
-    let sql = format!(
+    let update = format!(
         r#"
         UPDATE agent_jobs j
         SET status='queued',
@@ -283,35 +297,18 @@ pub async fn retry_agent_job(
         "#,
         agent_job_visibility_predicate(2, 3)
     );
-    let result = sqlx::query(&sql)
-        .bind(id)
-        .bind(user_id)
-        .bind(false)
-        .fetch_optional(&state.db)
-        .await;
-    match result {
-        Ok(Some(row)) => {
-            record_audit_event(
-                &state,
-                AuditEventInput {
-                    actor_type: "owner",
-                    actor_id: None,
-                    event_type: "agent_job_retried",
-                    app_id: row.get::<Option<Uuid>, _>("app_id"),
-                    deployment_id: row.get::<Option<Uuid>, _>("deployment_id"),
-                    job_id: Some(id),
-                    metadata: serde_json::json!({}),
-                },
-            )
-            .await;
-            StatusCode::ACCEPTED.into_response()
-        }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, job_id = %id, "failed to retry agent job");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    run_job_mutation(
+        &state,
+        id,
+        context.user_id,
+        &update,
+        JobMutationOutcome {
+            event_type: "agent_job_retried",
+            failure_log: "failed to retry agent job",
+            success: StatusCode::ACCEPTED,
+        },
+    )
+    .await
 }
 
 pub async fn cancel_agent_job(
@@ -323,8 +320,7 @@ pub async fn cancel_agent_job(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let user_id = context.user_id;
-    let sql = format!(
+    let update = format!(
         r#"
         UPDATE agent_jobs j
         SET status='cancelled',
@@ -341,7 +337,44 @@ pub async fn cancel_agent_job(
         "#,
         agent_job_visibility_predicate(2, 3)
     );
-    let result = sqlx::query(&sql)
+    run_job_mutation(
+        &state,
+        id,
+        context.user_id,
+        &update,
+        JobMutationOutcome {
+            event_type: "agent_job_cancelled",
+            failure_log: "failed to cancel agent job",
+            success: StatusCode::NO_CONTENT,
+        },
+    )
+    .await
+}
+
+/// Describes how a job-mutation handler reports its result: the audit event to
+/// record on success, the warning message to log on a database error, and the
+/// status code returned when exactly one row was affected.
+struct JobMutationOutcome {
+    event_type: &'static str,
+    failure_log: &'static str,
+    success: StatusCode,
+}
+
+/// Runs an owner-scoped `UPDATE ... RETURNING j.app_id,j.deployment_id` against
+/// `agent_jobs`, binding the canonical `$1 = job id, $2 = user id, $3 = cloud
+/// flag` parameters expected by [`agent_job_visibility_predicate`]`(2, 3)`.
+///
+/// On a matched row it records the audit event and returns `outcome.success`;
+/// no matched row yields `NOT_FOUND`, and a database error is logged and yields
+/// `INTERNAL_SERVER_ERROR`.
+async fn run_job_mutation(
+    state: &AppState,
+    id: Uuid,
+    user_id: Uuid,
+    update_sql: &str,
+    outcome: JobMutationOutcome,
+) -> axum::response::Response {
+    let result = sqlx::query(update_sql)
         .bind(id)
         .bind(user_id)
         .bind(false)
@@ -350,11 +383,11 @@ pub async fn cancel_agent_job(
     match result {
         Ok(Some(row)) => {
             record_audit_event(
-                &state,
+                state,
                 AuditEventInput {
                     actor_type: "owner",
                     actor_id: None,
-                    event_type: "agent_job_cancelled",
+                    event_type: outcome.event_type,
                     app_id: row.get::<Option<Uuid>, _>("app_id"),
                     deployment_id: row.get::<Option<Uuid>, _>("deployment_id"),
                     job_id: Some(id),
@@ -362,11 +395,11 @@ pub async fn cancel_agent_job(
                 },
             )
             .await;
-            StatusCode::NO_CONTENT.into_response()
+            outcome.success.into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
-            tracing::warn!(error = %err, job_id = %id, "failed to cancel agent job");
+            tracing::warn!(error = %err, job_id = %id, message = outcome.failure_log);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

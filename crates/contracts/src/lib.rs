@@ -1,9 +1,57 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use uuid::Uuid;
 
+/// Defines a `snake_case` status enum whose wire string is shared by serde, the
+/// database, and the `as_str`/`FromStr` round trip.
+///
+/// Each variant lists its canonical string exactly once, so `as_str` and
+/// `from_str` can never drift apart (the previous hand-written impls duplicated
+/// every arm twice and had to be kept in sync by hand). The `#[serde(rename_all
+/// = "snake_case")]` attribute is applied so the JSON wire shape stays identical
+/// to the canonical strings, which are the same values persisted in Postgres.
+macro_rules! string_status_enum {
+    (
+        $(#[$enum_meta:meta])*
+        $vis:vis enum $name:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident => $wire:literal ),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+        #[serde(rename_all = "snake_case")]
+        $vis enum $name {
+            $( $(#[$variant_meta])* $variant ),+
+        }
+
+        impl $name {
+            /// Returns the canonical wire/database string for this status.
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $( Self::$variant => $wire ),+
+                }
+            }
+        }
+
+        impl ::std::str::FromStr for $name {
+            type Err = ();
+
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                match value {
+                    $( $wire => Ok(Self::$variant), )+
+                    _ => Err(()),
+                }
+            }
+        }
+    };
+}
+
+/// Validates a GitHub `owner/repo` identifier.
+///
+/// Mirrors GitHub's naming rules: exactly one `/` separator, each segment
+/// non-empty and at most 100 chars, restricted to alphanumerics plus `.`, `_`
+/// and `-`, and never beginning or ending with a dot.
 pub fn valid_repo_full_name(value: &str) -> bool {
     let mut parts = value.split('/');
     let Some(owner) = parts.next() else {
@@ -26,6 +74,13 @@ pub fn valid_repo_full_name(value: &str) -> bool {
     })
 }
 
+/// Validates a Git branch (ref) name against the subset of `git check-ref-format`
+/// rules that matter for deploys.
+///
+/// Rejects empty names, names longer than 255 chars, a leading `-` (which Git
+/// would treat as an option), leading/trailing `/`, the `..` and `@{` sequences
+/// that Git forbids in refs, and any character outside alphanumerics plus
+/// `/ . _ -`.
 pub fn valid_branch(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 255
@@ -39,6 +94,11 @@ pub fn valid_branch(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
 }
 
+/// Validates a deploy domain, which is either a bare hostname or `host:port`.
+///
+/// When a trailing `:port` is present the port must be a non-empty, parseable
+/// `u16` (the range Postgres/TCP allow); the host portion is checked with
+/// [`valid_hostname`].
 pub fn valid_domain(value: &str) -> bool {
     let Some((host, port)) = value.rsplit_once(':') else {
         return valid_hostname(value);
@@ -46,6 +106,11 @@ pub fn valid_domain(value: &str) -> bool {
     valid_hostname(host) && !port.is_empty() && port.parse::<u16>().is_ok()
 }
 
+/// Validates a DNS hostname per RFC 1035/1123 length and character limits.
+///
+/// The full name is capped at 253 chars and each dot-separated label at 63;
+/// labels must be non-empty, may not start or end with `-`, and may contain only
+/// alphanumerics and `-`. Leading/trailing dots are rejected.
 pub fn valid_hostname(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 253
@@ -60,115 +125,63 @@ pub fn valid_hostname(value: &str) -> bool {
         })
 }
 
+/// Validates an HTTP health-check path.
+///
+/// Must be an absolute path (leading `/`), at most 256 chars, and free of
+/// control characters and backslashes (which would be ambiguous or unsafe in a
+/// URL path).
 pub fn valid_health_path(value: &str) -> bool {
     value.starts_with('/')
         && value.len() <= 256
         && !value.chars().any(|c| c.is_control() || c == '\\')
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeploymentStatus {
-    Queued,
-    Running,
-    Building,
-    Starting,
-    HealthChecking,
-    Routing,
-    Success,
-    Failed,
-    RolledBack,
-    Canceled,
-}
-
-impl DeploymentStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Building => "building",
-            Self::Starting => "starting",
-            Self::HealthChecking => "health_checking",
-            Self::Routing => "routing",
-            Self::Success => "success",
-            Self::Failed => "failed",
-            Self::RolledBack => "rolled_back",
-            Self::Canceled => "canceled",
-        }
+string_status_enum! {
+    /// Lifecycle status of a single deployment, as persisted in the
+    /// `deployments` table and sent over the wire.
+    pub enum DeploymentStatus {
+        Queued => "queued",
+        Running => "running",
+        Building => "building",
+        Starting => "starting",
+        HealthChecking => "health_checking",
+        Routing => "routing",
+        Success => "success",
+        Failed => "failed",
+        RolledBack => "rolled_back",
+        Canceled => "canceled",
     }
 }
 
-impl FromStr for DeploymentStatus {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "queued" => Ok(Self::Queued),
-            "running" => Ok(Self::Running),
-            "building" => Ok(Self::Building),
-            "starting" => Ok(Self::Starting),
-            "health_checking" => Ok(Self::HealthChecking),
-            "routing" => Ok(Self::Routing),
-            "success" => Ok(Self::Success),
-            "failed" => Ok(Self::Failed),
-            "rolled_back" => Ok(Self::RolledBack),
-            "canceled" => Ok(Self::Canceled),
-            _ => Err(()),
-        }
+string_status_enum! {
+    /// Lifecycle status of a durable agent job, as persisted in the
+    /// `agent_jobs` table and sent over the wire.
+    ///
+    /// Note both `Canceled` (`"canceled"`) and `Cancelled` (`"cancelled"`)
+    /// exist on purpose: the agent-job pipeline persists the British spelling
+    /// `"cancelled"` (see `web/jobs.rs` and `web/cleanup.rs`), while
+    /// `"canceled"` is accepted/recognized for parity with [`DeploymentStatus`]
+    /// and the agent status validator. They are distinct wire strings, so
+    /// neither can be dropped without changing deserialization of existing rows.
+    pub enum AgentJobStatus {
+        Queued => "queued",
+        Claimed => "claimed",
+        Running => "running",
+        Success => "success",
+        Failed => "failed",
+        Canceled => "canceled",
+        Cancelled => "cancelled",
+        Expired => "expired",
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentJobStatus {
-    Queued,
-    Claimed,
-    Running,
-    Success,
-    Failed,
-    Canceled,
-    Cancelled,
-    Expired,
-}
-
-impl FromStr for AgentJobStatus {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "queued" => Ok(Self::Queued),
-            "claimed" => Ok(Self::Claimed),
-            "running" => Ok(Self::Running),
-            "success" => Ok(Self::Success),
-            "failed" => Ok(Self::Failed),
-            "canceled" => Ok(Self::Canceled),
-            "cancelled" => Ok(Self::Cancelled),
-            "expired" => Ok(Self::Expired),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeHealthStatus {
-    Healthy,
-    Degraded,
-    Unhealthy,
-    Unknown,
-}
-
-impl FromStr for RuntimeHealthStatus {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "healthy" => Ok(Self::Healthy),
-            "degraded" => Ok(Self::Degraded),
-            "unhealthy" => Ok(Self::Unhealthy),
-            "unknown" => Ok(Self::Unknown),
-            _ => Err(()),
-        }
+string_status_enum! {
+    /// Health classification reported for a running container.
+    pub enum RuntimeHealthStatus {
+        Healthy => "healthy",
+        Degraded => "degraded",
+        Unhealthy => "unhealthy",
+        Unknown => "unknown",
     }
 }
 
@@ -183,29 +196,47 @@ pub enum AgentJobPayload {
     DockerCleanup(Box<DockerCleanupJob>),
 }
 
+/// Full work order handed to an agent to build and launch one deployment.
+///
+/// The fields fall into a few logical groups (kept in a flat struct so the JSON
+/// wire shape is unchanged): identity/routing, source, networking, runtime
+/// configuration, build/run commands, resource limits, and secrets.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DeployJob {
+    // Identity and routing.
     pub deployment_id: Uuid,
     pub app_id: Uuid,
     pub route_key: String,
     pub app_name: String,
+
+    // Source to build from.
     pub repo: String,
     pub branch: String,
     pub commit_sha: String,
+
+    // Networking and health.
     pub container_port: i64,
     pub health_path: String,
     pub domain: String,
+
+    // Runtime configuration.
     pub env: BTreeMap<String, String>,
     pub runtime_kind: String,
     pub hostlet_config_path: String,
     pub runtime_config: Value,
     pub packaging_strategy: String,
     pub root_directory: String,
+
+    // Build and run commands (defaulted when absent).
     pub install_command: Option<String>,
     pub build_command: Option<String>,
     pub start_command: Option<String>,
+
+    // Resource limits.
     pub memory_limit_mb: Option<i32>,
     pub cpu_limit: Option<f64>,
+
+    // Secrets.
     pub github_token: Option<String>,
 }
 

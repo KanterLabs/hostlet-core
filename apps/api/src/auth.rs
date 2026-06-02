@@ -1,10 +1,9 @@
+mod device_flow;
+mod password;
+
 use crate::{
     crypto::{constant_time_eq, random_token, sign, verify_signature},
     state::AppState,
-};
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
 };
 use axum::{
     extract::State,
@@ -14,6 +13,8 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
+use device_flow::{delete_device_flow, load_device_flow, store_device_flow, StoredDeviceFlow};
+use password::{hash_password, valid_control_plane_password, verify_password};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
@@ -24,7 +25,6 @@ const UNLOCK_COOKIE: &str = "hostlet_unlock";
 const SESSION_TTL_DAYS: i64 = 14;
 const UNLOCK_TTL_HOURS: i64 = 12;
 const CONTROL_PLANE_PASSWORD_KEY: &str = "control_plane_password_hash";
-const DEVICE_FLOW_KEY_PREFIX: &str = "github_device_flow:";
 
 #[derive(Deserialize)]
 pub struct DevicePollBody {
@@ -49,14 +49,6 @@ struct GitHubUser {
     name: Option<String>,
     avatar_url: Option<String>,
     email: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredDeviceFlow {
-    device_code: String,
-    web_origin: String,
-    expires_at: i64,
-    interval: i64,
 }
 
 struct AuthorizedGitHubUser {
@@ -97,37 +89,24 @@ pub async fn github_device_start(
         .filter(|origin| state.web_origin_allowed(origin))
         .unwrap_or_else(|| state.public_web_url.clone());
 
-    let response = match state
+    let request = state
         .http
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
         .form(&[
             ("client_id", state.github_client_id.as_str()),
             ("scope", "repo read:user admin:repo_hook"),
-        ])
-        .send()
-        .await
+        ]);
+    let payload = match github_device_json(
+        request,
+        "GitHub device code request failed",
+        "GitHub device code response was not JSON",
+        "GitHub returned an unexpected device flow response",
+    )
+    .await
     {
-        Ok(response) => response,
-        Err(err) => {
-            tracing::warn!(error = %err, "GitHub device code request failed");
-            return (
-                StatusCode::BAD_GATEWAY,
-                "Could not reach GitHub device authorization endpoint",
-            )
-                .into_response();
-        }
-    };
-    let payload = match response.json::<Value>().await {
         Ok(payload) => payload,
-        Err(err) => {
-            tracing::warn!(error = %err, "GitHub device code response was not JSON");
-            return (
-                StatusCode::BAD_GATEWAY,
-                "GitHub returned an unexpected device flow response",
-            )
-                .into_response();
-        }
+        Err(response) => return response,
     };
     if let Some(error) = payload.get("error").and_then(|value| value.as_str()) {
         let description = payload
@@ -218,7 +197,7 @@ pub async fn github_device_poll(
         .into_response();
     }
 
-    let response = match state
+    let request = state
         .http
         .post("https://github.com/login/oauth/access_token")
         .header("Accept", "application/json")
@@ -226,30 +205,17 @@ pub async fn github_device_poll(
             ("client_id", state.github_client_id.as_str()),
             ("device_code", flow.device_code.as_str()),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ])
-        .send()
-        .await
+        ]);
+    let payload = match github_device_json(
+        request,
+        "GitHub device token poll failed",
+        "GitHub device token response was not JSON",
+        "GitHub returned an unexpected device authorization response",
+    )
+    .await
     {
-        Ok(response) => response,
-        Err(err) => {
-            tracing::warn!(error = %err, "GitHub device token poll failed");
-            return (
-                StatusCode::BAD_GATEWAY,
-                "Could not reach GitHub device authorization endpoint",
-            )
-                .into_response();
-        }
-    };
-    let payload = match response.json::<Value>().await {
         Ok(payload) => payload,
-        Err(err) => {
-            tracing::warn!(error = %err, "GitHub device token response was not JSON");
-            return (
-                StatusCode::BAD_GATEWAY,
-                "GitHub returned an unexpected device authorization response",
-            )
-                .into_response();
-        }
+        Err(response) => return response,
     };
 
     if let Some(access_token) = payload.get("access_token").and_then(|value| value.as_str()) {
@@ -354,7 +320,13 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
         .fetch_optional(&state.db)
         .await;
     match row {
-        Ok(Some(r)) => Json(serde_json::json!({"id": r.get::<Uuid,_>("id"), "login": r.get::<String,_>("login"), "name": r.get::<Option<String>,_>("name"), "avatarUrl": r.get::<Option<String>,_>("avatar_url")})).into_response(),
+        Ok(Some(r)) => Json(serde_json::json!({
+            "id": r.get::<Uuid, _>("id"),
+            "login": r.get::<String, _>("login"),
+            "name": r.get::<Option<String>, _>("name"),
+            "avatarUrl": r.get::<Option<String>, _>("avatar_url"),
+        }))
+        .into_response(),
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
@@ -483,6 +455,37 @@ pub async fn request_context(
     Ok(RequestContext { user_id })
 }
 
+/// Send a GitHub device-flow `POST` and parse the JSON body, mapping a
+/// transport failure or non-JSON body to the `502 Bad Gateway` response the
+/// handlers previously built inline. `send_fail_log` / `parse_fail_log` are the
+/// `tracing` messages and `parse_fail_message` is the client-facing body for a
+/// non-JSON response (the transport-failure body is identical for both flows).
+async fn github_device_json(
+    request: reqwest::RequestBuilder,
+    send_fail_log: &str,
+    parse_fail_log: &str,
+    parse_fail_message: &'static str,
+) -> Result<Value, Response> {
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::warn!(error = %err, "{send_fail_log}");
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "Could not reach GitHub device authorization endpoint",
+            )
+                .into_response());
+        }
+    };
+    match response.json::<Value>().await {
+        Ok(payload) => Ok(payload),
+        Err(err) => {
+            tracing::warn!(error = %err, "{parse_fail_log}");
+            Err((StatusCode::BAD_GATEWAY, parse_fail_message).into_response())
+        }
+    }
+}
+
 async fn store_github_access_token(
     state: &AppState,
     token: GitHubToken,
@@ -546,7 +549,12 @@ fn verify_signed_value(secret: &str, value: &str) -> Option<String> {
     verify_signed_value_v1(secret, value)
 }
 
-fn verify_signed_value_v2(secret: &str, value: &str) -> Option<String> {
+/// Parse and signature-check a `payload.expires_at.signature` token, where the
+/// signed data is `{prefix}{payload}.{expires_at}`. Returns the verified
+/// `payload` substring (still encoded) on success. The two cookie versions
+/// share this parsing/verification and differ only by `prefix` and how they
+/// interpret the returned payload (v2 base64-decodes it; v1 uses it verbatim).
+fn verify_signed_payload<'a>(secret: &str, value: &'a str, prefix: &str) -> Option<&'a str> {
     let mut parts = value.splitn(3, '.');
     let payload = parts.next()?;
     let expires_at = parts.next()?.parse::<i64>().ok()?;
@@ -554,24 +562,18 @@ fn verify_signed_value_v2(secret: &str, value: &str) -> Option<String> {
     if Utc::now().timestamp() > expires_at {
         return None;
     }
-    let data = format!("v2.{payload}.{expires_at}");
-    if !verify_signature(secret, data.as_bytes(), signature) {
-        return None;
-    }
+    let data = format!("{prefix}{payload}.{expires_at}");
+    verify_signature(secret, data.as_bytes(), signature).then_some(payload)
+}
+
+fn verify_signed_value_v2(secret: &str, value: &str) -> Option<String> {
+    let payload = verify_signed_payload(secret, value, "v2.")?;
     let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
     String::from_utf8(decoded).ok()
 }
 
 fn verify_signed_value_v1(secret: &str, value: &str) -> Option<String> {
-    let mut parts = value.splitn(3, '.');
-    let payload = parts.next()?;
-    let expires_at = parts.next()?.parse::<i64>().ok()?;
-    let signature = parts.next()?;
-    if Utc::now().timestamp() > expires_at {
-        return None;
-    }
-    let data = format!("{payload}.{expires_at}");
-    verify_signature(secret, data.as_bytes(), signature).then(|| payload.to_string())
+    verify_signed_payload(secret, value, "").map(str::to_string)
 }
 
 fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -697,46 +699,6 @@ async fn store_control_plane_password_hash(state: &AppState, hash: &str) -> anyh
     Ok(done.rows_affected() == 1)
 }
 
-async fn store_device_flow(
-    state: &AppState,
-    flow_id: &str,
-    flow: &StoredDeviceFlow,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO settings (key,value) VALUES ($1,$2)
-         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
-    )
-    .bind(format!("{DEVICE_FLOW_KEY_PREFIX}{flow_id}"))
-    .bind(serde_json::to_string(flow)?)
-    .execute(&state.db)
-    .await?;
-    Ok(())
-}
-
-async fn load_device_flow(
-    state: &AppState,
-    flow_id: &str,
-) -> anyhow::Result<Option<StoredDeviceFlow>> {
-    let row = sqlx::query("SELECT value FROM settings WHERE key=$1")
-        .bind(format!("{DEVICE_FLOW_KEY_PREFIX}{flow_id}"))
-        .fetch_optional(&state.db)
-        .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    Ok(Some(serde_json::from_str(
-        row.get::<String, _>("value").as_str(),
-    )?))
-}
-
-async fn delete_device_flow(state: &AppState, flow_id: &str) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM settings WHERE key=$1")
-        .bind(format!("{DEVICE_FLOW_KEY_PREFIX}{flow_id}"))
-        .execute(&state.db)
-        .await?;
-    Ok(())
-}
-
 async fn single_existing_user_id(state: &AppState) -> Option<Uuid> {
     let rows = sqlx::query("SELECT id FROM users ORDER BY created_at ASC LIMIT 2")
         .fetch_all(&state.db)
@@ -747,24 +709,4 @@ async fn single_existing_user_id(state: &AppState) -> Option<Uuid> {
     } else {
         None
     }
-}
-
-fn hash_password(password: &str) -> anyhow::Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|hash| hash.to_string())
-        .map_err(|err| anyhow::anyhow!("argon2 password hashing failed: {err}"))
-}
-
-fn verify_password(hash: &str, password: &str) -> anyhow::Result<bool> {
-    let parsed = PasswordHash::new(hash)
-        .map_err(|err| anyhow::anyhow!("stored password hash is invalid: {err}"))?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
-}
-
-fn valid_control_plane_password(password: &str) -> bool {
-    password.chars().count() >= 12 && !password.chars().any(|c| c.is_control())
 }

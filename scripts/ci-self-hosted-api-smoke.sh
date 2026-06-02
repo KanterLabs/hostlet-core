@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/ci-self-hosted-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 TMP_DIR="$(mktemp -d "/tmp/hostlet-self-api-${RUN_ID}.XXXXXX")"
 POSTGRES_CONTAINER="hostlet-ci-self-api-postgres-${RUN_ID}"
@@ -21,72 +23,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-json_get() {
-  node -e "let s=''; process.stdin.on('data', d => s += d); process.stdin.on('end', () => { const path = process.argv[1].split('.'); let v = JSON.parse(s); for (const key of path) v = v?.[key]; if (v === undefined || v === null) process.exit(2); process.stdout.write(String(v)); });" "$1"
-}
+# json_get, signed_cookie, expect_status, and the Postgres/env bootstrap helpers
+# are shared with ci-self-hosted-deploy-e2e.sh; see ci-self-hosted-lib.sh.
 
-signed_cookie() {
-  node -e '
-    const crypto = require("crypto");
-    const secret = process.argv[1];
-    const value = process.argv[2];
-    const payload = Buffer.from(value).toString("base64url");
-    const expires = Math.floor(Date.now() / 1000) + 3600;
-    const data = `v2.${payload}.${expires}`;
-    const sig = "sha256=" + crypto.createHmac("sha256", secret).update(data).digest("hex");
-    process.stdout.write(`${data}.${sig}`);
-  ' "${SESSION_SECRET}" "$1"
-}
+# Header building blocks for state-changing requests, populated once ${origin}
+# is known (below). ORIGIN_CSRF is the origin + CSRF guard pair every mutating
+# request must carry; JSON_CT adds the JSON content-type for requests with a
+# body. Expand into a curl invocation as "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}".
+ORIGIN_CSRF=()
+JSON_CT=(-H "content-type: application/json")
 
-expect_status() {
-  local expected="$1"
-  shift
-  local actual
-  actual="$(curl -sS -o "${TMP_DIR}/response.txt" -w "%{http_code}" "$@")"
-  if [ "${actual}" != "${expected}" ]; then
-    echo "Expected HTTP ${expected}, got ${actual}: $*" >&2
-    cat "${TMP_DIR}/response.txt" >&2 || true
-    exit 1
-  fi
-}
+# ---------------------------------------------------------------------------
+# Bring up Postgres and the self-hosted API under test.
+# ---------------------------------------------------------------------------
+start_postgres_container postgres:16-alpine
+wait_postgres_ready
+POSTGRES_PORT="$(discover_postgres_port)"
 
-docker run -d --name "${POSTGRES_CONTAINER}" \
-  -e POSTGRES_USER=hostlet \
-  -e POSTGRES_PASSWORD=ci-only-not-a-secret-postgres \
-  -e POSTGRES_DB=hostlet \
-  -p 127.0.0.1::5432 \
-  postgres:16-alpine >/dev/null
-
-for _ in $(seq 1 60); do
-  if docker exec "${POSTGRES_CONTAINER}" pg_isready -U hostlet -d hostlet >/dev/null 2>&1 &&
-    docker exec "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet -c 'select 1' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-POSTGRES_PORT="$(docker port "${POSTGRES_CONTAINER}" 5432/tcp | sed 's/.*://')"
-if [ -z "${POSTGRES_PORT}" ]; then
-  echo "Could not discover mapped Postgres port" >&2
-  exit 1
-fi
-
-export HOSTLET_MODE=self_hosted
-export DATABASE_URL="postgres://hostlet:ci-only-not-a-secret-postgres@127.0.0.1:${POSTGRES_PORT}/hostlet"
-export BIND_ADDR="127.0.0.1:${API_PORT}"
-export PUBLIC_API_URL="http://127.0.0.1:${API_PORT}"
-export PUBLIC_WEB_URL="http://127.0.0.1:3000"
-export PUBLIC_WEBHOOK_URL="http://127.0.0.1:${API_PORT}"
-export HOSTLET_ALLOWED_WEB_ORIGINS="http://127.0.0.1:3000"
-export HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS=false
-export HOSTLET_SETUP_TOKEN=ci-only-not-a-secret-setup-token-01
-export HOSTLET_ALLOWED_GITHUB_LOGINS=ci-user
-export ENCRYPTION_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
-export JOB_SIGNING_SECRET=ci-only-not-a-secret-job-signing-01
-export SESSION_SECRET=ci-only-not-a-secret-session-secret-01
-export LOCAL_AGENT_TOKEN=ci-only-not-a-secret-agent-token-01
-export GITHUB_WEBHOOK_SECRET=ci-only-not-a-secret-webhook-secret-01
-export HOSTLET_UPDATE_CHECKS=false
+export_self_hosted_env "${POSTGRES_PORT}" "${API_PORT}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hostlet-target}"
 
 cd "${ROOT}"
@@ -106,6 +60,11 @@ done
 
 base="http://127.0.0.1:${API_PORT}"
 origin="http://127.0.0.1:3000"
+ORIGIN_CSRF=(-H "origin: ${origin}" -H "x-hostlet-csrf: 1")
+
+# ---------------------------------------------------------------------------
+# First-run setup status: self-hosted mode, setup required.
+# ---------------------------------------------------------------------------
 status_payload="$(curl -fsS "${base}/api/setup/status")"
 if [ "$(printf '%s' "${status_payload}" | json_get mode)" != "self_hosted" ]; then
   echo "setup status did not report self_hosted mode" >&2
@@ -116,13 +75,19 @@ if [ "$(printf '%s' "${status_payload}" | json_get setupRequired)" != "true" ]; 
   exit 1
 fi
 
-expect_status 401 -X POST "${base}/api/setup" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' --data '{"password":"ci-self-hosted-password"}'
-expect_status 400 -X POST "${base}/api/setup" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -H "x-hostlet-setup-token: ${HOSTLET_SETUP_TOKEN}" --data '{"password":"short"}'
-expect_status 204 -c "${COOKIE_JAR}" -X POST "${base}/api/setup" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -H "x-hostlet-setup-token: ${HOSTLET_SETUP_TOKEN}" --data '{"password":"ci-self-hosted-password"}'
-expect_status 204 -b "${COOKIE_JAR}" -X POST "${base}/api/logout" -H "origin: ${origin}" -H "x-hostlet-csrf: 1"
-expect_status 401 -X POST "${base}/api/unlock" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' --data '{"password":"wrong-password"}'
-expect_status 204 -c "${COOKIE_JAR}" -X POST "${base}/api/unlock" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' --data '{"password":"ci-self-hosted-password"}'
+# ---------------------------------------------------------------------------
+# Auth: setup requires the setup token + a strong password; logout/unlock cycle.
+# ---------------------------------------------------------------------------
+expect_status 401 -X POST "${base}/api/setup" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"password":"ci-self-hosted-password"}'
+expect_status 400 -X POST "${base}/api/setup" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -H "x-hostlet-setup-token: ${HOSTLET_SETUP_TOKEN}" --data '{"password":"short"}'
+expect_status 204 -c "${COOKIE_JAR}" -X POST "${base}/api/setup" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -H "x-hostlet-setup-token: ${HOSTLET_SETUP_TOKEN}" --data '{"password":"ci-self-hosted-password"}'
+expect_status 204 -b "${COOKIE_JAR}" -X POST "${base}/api/logout" "${ORIGIN_CSRF[@]}"
+expect_status 401 -X POST "${base}/api/unlock" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"password":"wrong-password"}'
+expect_status 204 -c "${COOKIE_JAR}" -X POST "${base}/api/unlock" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"password":"ci-self-hosted-password"}'
 
+# ---------------------------------------------------------------------------
+# Authenticate a CI user and confirm the session reports self-hosted mode.
+# ---------------------------------------------------------------------------
 user_id="00000000-0000-0000-0000-000000000101"
 docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
 INSERT INTO users (id, github_id, login) VALUES ('${user_id}', 9001, 'ci-user') ON CONFLICT (github_id) DO UPDATE SET login=EXCLUDED.login;
@@ -154,7 +119,10 @@ create_payload='{
   "deploy_after_create":false,
   "env":[{"key":"CI_SECRET","value":"self-api-secret"}]
 }'
-app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${base}/api/apps" --data "${create_payload}")"
+# ---------------------------------------------------------------------------
+# App CRUD: create preserves resource limits; PATCH allows CPU/RAM controls.
+# ---------------------------------------------------------------------------
+app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${base}/api/apps" --data "${create_payload}")"
 app_id="$(printf '%s' "${app_payload}" | json_get id)"
 
 app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${base}/api/apps/${app_id}")"
@@ -167,20 +135,26 @@ if [ "$(printf '%s' "${app_detail}" | json_get cpuLimit)" != "0.5" ]; then
   exit 1
 fi
 
-expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PATCH "${base}/api/apps/${app_id}" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' --data '{"memory_limit_mb":1024,"cpu_limit":1,"health_path":"/ready","container_port":3000,"root_directory":"."}'
+expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PATCH "${base}/api/apps/${app_id}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"memory_limit_mb":1024,"cpu_limit":1,"health_path":"/ready","container_port":3000,"root_directory":"."}'
 updated_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${base}/api/apps/${app_id}")"
 if [ "$(printf '%s' "${updated_detail}" | json_get memoryLimitMb)" != "1024" ] || [ "$(printf '%s' "${updated_detail}" | json_get cpuLimit)" != "1" ]; then
   echo "self-hosted update did not allow CPU/RAM controls" >&2
   exit 1
 fi
 
-expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PUT "${base}/api/apps/${app_id}/env/CI_EXTRA" -H "origin: ${origin}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' --data '{"value":"extra-secret"}'
+# ---------------------------------------------------------------------------
+# App env vars: set, list, delete.
+# ---------------------------------------------------------------------------
+expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PUT "${base}/api/apps/${app_id}/env/CI_EXTRA" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"value":"extra-secret"}'
 env_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${base}/api/apps/${app_id}/env")"
 printf '%s' "${env_payload}" | grep -q 'CI_EXTRA'
-expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X DELETE "${base}/api/apps/${app_id}/env/CI_EXTRA" -H "origin: ${origin}" -H "x-hostlet-csrf: 1"
+expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X DELETE "${base}/api/apps/${app_id}/env/CI_EXTRA" "${ORIGIN_CSRF[@]}"
 
+# ---------------------------------------------------------------------------
+# Self-hosted mode disables OAuth/agent-install routes; clean up the app.
+# ---------------------------------------------------------------------------
 expect_status 403 -H "cookie: ${AUTH_COOKIE}" "${base}/auth/github/oauth/start"
 expect_status 410 -H "cookie: ${AUTH_COOKIE}" "${base}/api/servers/00000000-0000-0000-0000-000000000001/install"
-expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X DELETE "${base}/api/apps/${app_id}" -H "origin: ${origin}" -H "x-hostlet-csrf: 1"
+expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X DELETE "${base}/api/apps/${app_id}" "${ORIGIN_CSRF[@]}"
 
 echo "self-hosted API smoke passed"

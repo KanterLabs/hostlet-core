@@ -1,3 +1,6 @@
+mod access_token;
+mod inspection;
+
 use crate::{
     auth::{current_user_id, request_context},
     crypto::verify_signature,
@@ -11,6 +14,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use inspection::InspectionBase;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -38,11 +42,8 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
         })).into_response();
     };
 
-    let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await;
-    let Ok(Some(row)) = row else {
+    let ciphertext = access_token::latest_ciphertext(&state, user_id).await;
+    let Ok(Some(ciphertext)) = ciphertext else {
         return Json(serde_json::json!({
             "oauthConfigured": oauth_configured,
             "webhookConfigured": webhook_configured,
@@ -54,10 +55,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> impl I
         .into_response();
     };
 
-    let Ok(token) = state
-        .crypto
-        .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
-    else {
+    let Ok(token) = state.crypto.decrypt(&ciphertext) else {
         return Json(serde_json::json!({
             "oauthConfigured": oauth_configured,
             "webhookConfigured": webhook_configured,
@@ -114,14 +112,11 @@ pub async fn repos(State(state): State<AppState>, headers: HeaderMap) -> impl In
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let user_id = context.user_id;
-    let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1").bind(user_id).fetch_optional(&state.db).await;
-    let Ok(Some(row)) = row else {
+    let ciphertext = access_token::latest_ciphertext(&state, user_id).await;
+    let Ok(Some(ciphertext)) = ciphertext else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let Ok(token) = state
-        .crypto
-        .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
-    else {
+    let Ok(token) = state.crypto.decrypt(&ciphertext) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let res = state
@@ -199,16 +194,7 @@ pub async fn repo_inspect(
 }
 
 async fn github_access_token_for_user(state: &AppState, user_id: Uuid) -> Option<String> {
-    let row = sqlx::query("SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()?;
-    state
-        .crypto
-        .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
-        .ok()
+    access_token::latest_decrypted(state, user_id).await
 }
 
 async fn inspect_repo(
@@ -245,26 +231,22 @@ async fn inspect_repo(
 
     if let Some(contents) = github_file_text(state, repo, branch, "Dockerfile", token).await? {
         let inference = infer_dockerfile(&contents);
-        return Ok(json!({
-            "repoFullName": repo,
-            "defaultBranch": default_branch,
-            "branch": branch,
-            "appName": repo.split('/').nth(1).unwrap_or("app"),
-            "deployable": true,
-            "runtimeKind": "single",
-            "rootDirectory": ".",
-            "containerPort": inference.port.unwrap_or(3000),
-            "healthPath": "/",
-            "hostletConfigPath": "hostlet.yml",
-            "runtimeConfig": {},
-            "packagingStrategy": "auto",
-            "packagingOptions": ["auto", "dockerfile", "generated"],
-            "recommendedPackagingStrategy": "auto",
-            "env": inference.env,
-            "warnings": inference.warnings,
-            "summary": "Dockerfile detected. Hostlet inferred a single-container runtime.",
-            "autoDeployAvailable": false
-        }));
+        return Ok(Value::Object(
+            InspectionBase {
+                repo,
+                default_branch,
+                branch,
+                deployable: true,
+                container_port: json!(inference.port.unwrap_or(3000)),
+                packaging_options: json!(["auto", "dockerfile", "generated"]),
+                recommended_packaging_strategy: "auto",
+                env: json!(inference.env),
+                warnings: json!(inference.warnings),
+                summary: "Dockerfile detected. Hostlet inferred a single-container runtime."
+                    .to_string(),
+            }
+            .build(),
+        ));
     }
 
     if let Some(package_text) = github_file_text(state, repo, branch, "package.json", token).await?
@@ -278,50 +260,42 @@ async fn inspect_repo(
                 .await?
                 .is_some(),
         );
-        return Ok(json!({
-            "repoFullName": repo,
-            "defaultBranch": default_branch,
-            "branch": branch,
-            "appName": repo.split('/').nth(1).unwrap_or("app"),
-            "deployable": true,
-            "runtimeKind": "single",
-            "rootDirectory": ".",
-            "containerPort": 3000,
-            "healthPath": "/",
-            "hostletConfigPath": "hostlet.yml",
-            "runtimeConfig": {},
-            "packagingStrategy": "auto",
-            "packagingOptions": ["auto", "generated"],
-            "recommendedPackagingStrategy": "generated",
-            "detectedFramework": inference.framework,
-            "packageManager": inference.package_manager,
-            "env": [],
-            "warnings": ["Node app detected. Hostlet will infer install/build/start commands during deployment; set custom commands if the preview is incomplete."],
-            "summary": format!("{} app detected. Hostlet will use optimized generated Docker with {}.", inference.framework, inference.package_manager),
-            "autoDeployAvailable": false
-        }));
+        let mut result = InspectionBase {
+            repo,
+            default_branch,
+            branch,
+            deployable: true,
+            container_port: json!(3000),
+            packaging_options: json!(["auto", "generated"]),
+            recommended_packaging_strategy: "generated",
+            env: json!([]),
+            warnings: json!(["Node app detected. Hostlet will infer install/build/start commands during deployment; set custom commands if the preview is incomplete."]),
+            summary: format!(
+                "{} app detected. Hostlet will use optimized generated Docker with {}.",
+                inference.framework, inference.package_manager
+            ),
+        }
+        .build();
+        result.insert("detectedFramework".into(), json!(inference.framework));
+        result.insert("packageManager".into(), json!(inference.package_manager));
+        return Ok(Value::Object(result));
     }
 
-    Ok(json!({
-        "repoFullName": repo,
-        "defaultBranch": default_branch,
-        "branch": branch,
-        "appName": repo.split('/').nth(1).unwrap_or("app"),
-        "deployable": false,
-        "runtimeKind": "single",
-        "rootDirectory": ".",
-        "containerPort": 3000,
-        "healthPath": "/",
-        "hostletConfigPath": "hostlet.yml",
-        "runtimeConfig": {},
-        "packagingStrategy": "auto",
-        "packagingOptions": ["auto"],
-        "recommendedPackagingStrategy": "auto",
-        "env": [],
-        "warnings": ["No root Dockerfile or package.json was found. Add a Dockerfile, package.json, or Hostlet Compose manifest before deploying."],
-        "summary": "Hostlet could not infer a runnable app shape.",
-        "autoDeployAvailable": false
-    }))
+    Ok(Value::Object(
+        InspectionBase {
+            repo,
+            default_branch,
+            branch,
+            deployable: false,
+            container_port: json!(3000),
+            packaging_options: json!(["auto"]),
+            recommended_packaging_strategy: "auto",
+            env: json!([]),
+            warnings: json!(["No root Dockerfile or package.json was found. Add a Dockerfile, package.json, or Hostlet Compose manifest before deploying."]),
+            summary: "Hostlet could not infer a runnable app shape.".to_string(),
+        }
+        .build(),
+    ))
 }
 
 async fn github_file_text(
@@ -468,6 +442,27 @@ fn infer_dockerfile(contents: &str) -> DockerfileInference {
     }
 }
 
+/// The generated Hostlet Compose manifest Hostlet proposes for a Gitea deploy.
+/// Kept as a readable raw literal (rather than an escaped one-line JSON string)
+/// so the YAML can be reviewed and edited directly. The trailing newline is
+/// significant and matches the previous escaped form byte-for-byte.
+const GITEA_GENERATED_COMPOSE: &str = "\
+services:
+  server:
+    image: docker.gitea.com/gitea:latest-rootless
+    restart: unless-stopped
+    environment:
+      GITEA__server__DOMAIN: localhost
+      GITEA__server__HTTP_PORT: \"3000\"
+      GITEA__database__DB_TYPE: sqlite3
+    volumes:
+      - gitea-data:/var/lib/gitea
+      - gitea-config:/etc/gitea
+volumes:
+  gitea-data:
+  gitea-config:
+";
+
 fn gitea_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
     json!({
         "repoFullName": repo,
@@ -486,7 +481,7 @@ fn gitea_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
                 "webService": "server",
                 "port": 3000,
                 "healthPath": "/",
-                "compose": "services:\n  server:\n    image: docker.gitea.com/gitea:latest-rootless\n    restart: unless-stopped\n    environment:\n      GITEA__server__DOMAIN: localhost\n      GITEA__server__HTTP_PORT: \"3000\"\n      GITEA__database__DB_TYPE: sqlite3\n    volumes:\n      - gitea-data:/var/lib/gitea\n      - gitea-config:/etc/gitea\nvolumes:\n  gitea-data:\n  gitea-config:\n"
+                "compose": GITEA_GENERATED_COMPOSE
             }
         },
         "packagingStrategy": "auto",
@@ -629,16 +624,12 @@ pub async fn ensure_repo_webhook(
 }
 
 async fn github_access_token(state: &AppState, user_id: Uuid) -> anyhow::Result<String> {
-    let row = sqlx::query(
-        "SELECT access_token_ciphertext FROM github_accounts WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("connect GitHub before enabling auto deploy"))?;
+    let ciphertext = access_token::latest_ciphertext(state, user_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("connect GitHub before enabling auto deploy"))?;
     state
         .crypto
-        .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
+        .decrypt(&ciphertext)
         .map_err(|_| anyhow::anyhow!("stored GitHub token could not be decrypted"))
 }
 
@@ -703,21 +694,18 @@ pub async fn webhook(
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            let _ = sqlx::query("UPDATE webhook_events SET branch=$2, commit_sha=$3, ignored_reason='branch was deleted', processed=true, processed_at=now() WHERE github_delivery_id=$1")
-                .bind(delivery)
-                .bind(branch)
-                .bind(sha)
-                .execute(&state.db)
-                .await;
+            mark_push_processed(&state, delivery, branch, sha, Some("branch was deleted")).await;
             return StatusCode::ACCEPTED.into_response();
         }
         if !valid_commit_sha(sha) {
-            let _ = sqlx::query("UPDATE webhook_events SET branch=$2, commit_sha=$3, ignored_reason='push did not include a valid commit SHA', processed=true, processed_at=now() WHERE github_delivery_id=$1")
-                .bind(delivery)
-                .bind(branch)
-                .bind(sha)
-                .execute(&state.db)
-                .await;
+            mark_push_processed(
+                &state,
+                delivery,
+                branch,
+                sha,
+                Some("push did not include a valid commit SHA"),
+            )
+            .await;
             return StatusCode::ACCEPTED.into_response();
         }
         let apps = sqlx::query(
@@ -729,12 +717,14 @@ pub async fn webhook(
         .await
         .unwrap_or_default();
         if apps.is_empty() {
-            let _ = sqlx::query("UPDATE webhook_events SET branch=$2, commit_sha=$3, ignored_reason='no apps matched this repository and branch', processed=true, processed_at=now() WHERE github_delivery_id=$1")
-                .bind(delivery)
-                .bind(branch)
-                .bind(sha)
-                .execute(&state.db)
-                .await;
+            mark_push_processed(
+                &state,
+                delivery,
+                branch,
+                sha,
+                Some("no apps matched this repository and branch"),
+            )
+            .await;
             return StatusCode::ACCEPTED.into_response();
         }
         for app in apps {
@@ -785,12 +775,7 @@ pub async fn webhook(
                 }
             }
         }
-        let _ = sqlx::query("UPDATE webhook_events SET branch=$2, commit_sha=$3, processed=true, processed_at=now() WHERE github_delivery_id=$1")
-            .bind(delivery)
-            .bind(branch)
-            .bind(sha)
-            .execute(&state.db)
-            .await;
+        mark_push_processed(&state, delivery, branch, sha, None).await;
     } else {
         let _ = sqlx::query("UPDATE webhook_events SET ignored_reason='unsupported event type', processed=true, processed_at=now() WHERE github_delivery_id=$1")
             .bind(delivery)
@@ -798,6 +783,31 @@ pub async fn webhook(
             .await;
     }
     StatusCode::ACCEPTED.into_response()
+}
+
+/// Mark a `push` webhook event processed, recording the resolved branch/commit
+/// and an optional reason it produced no deployments. Consolidates the four
+/// previously-inline `UPDATE webhook_events SET ...` statements that differed
+/// only by their `ignored_reason`.
+async fn mark_push_processed(
+    state: &AppState,
+    delivery: &str,
+    branch: &str,
+    sha: &str,
+    ignored_reason: Option<&str>,
+) {
+    let sql = if ignored_reason.is_some() {
+        "UPDATE webhook_events SET branch=$2, commit_sha=$3, ignored_reason=$4, \
+         processed=true, processed_at=now() WHERE github_delivery_id=$1"
+    } else {
+        "UPDATE webhook_events SET branch=$2, commit_sha=$3, \
+         processed=true, processed_at=now() WHERE github_delivery_id=$1"
+    };
+    let mut query = sqlx::query(sql).bind(delivery).bind(branch).bind(sha);
+    if let Some(reason) = ignored_reason {
+        query = query.bind(reason);
+    }
+    let _ = query.execute(&state.db).await;
 }
 
 #[allow(clippy::too_many_arguments)]

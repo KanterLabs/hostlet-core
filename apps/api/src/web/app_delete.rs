@@ -1,3 +1,4 @@
+use super::apps::request_context_or_response;
 use super::*;
 
 pub async fn delete_app(
@@ -5,12 +6,9 @@ pub async fn delete_app(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let context = match request_context(&headers, &state).await {
+    let context = match request_context_or_response(&headers, &state).await {
         Ok(context) => context,
-        Err(err) if err.to_string() == "sign in required" => {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
+        Err(response) => return response,
     };
     let user_id = context.user_id;
     let app =
@@ -38,40 +36,60 @@ pub async fn delete_app(
         }
     };
     if deployment_rows.is_empty() {
-        if public_exposure {
-            if let Err(err) = delete_cloudflare_app_dns(&state, id, &domain).await {
-                tracing::warn!(error = %err, domain = %domain, "failed to remove public tunnel DNS while deleting app");
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    "failed to close public tunnel for app domain",
-                )
-                    .into_response();
-            }
-        }
-        return match delete_app_records(&state, id, user_id, &[]).await {
-            Ok(true) => StatusCode::NO_CONTENT.into_response(),
-            Ok(false) => StatusCode::NOT_FOUND.into_response(),
-            Err(err) => {
-                tracing::warn!(error = %err, app_id = %id, "failed to delete app records");
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        };
+        return delete_app_synchronously(&state, id, user_id, &domain, public_exposure).await;
     }
+    enqueue_app_teardown(
+        &state,
+        &app,
+        id,
+        user_id,
+        &domain,
+        public_exposure,
+        &deployment_rows,
+    )
+    .await
+}
+
+/// Tear an app down immediately when it has no deployments to clean up: close
+/// any public DNS, then delete its records in one transaction.
+async fn delete_app_synchronously(
+    state: &AppState,
+    id: Uuid,
+    user_id: Uuid,
+    domain: &str,
+    public_exposure: bool,
+) -> Response {
+    if public_exposure {
+        if let Err(response) = close_public_app_dns(state, id, domain).await {
+            return response;
+        }
+    }
+    match delete_app_records(state, id, user_id, &[]).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, app_id = %id, "failed to delete app records");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Enqueue an asynchronous teardown job for an app that has deployments (and
+/// therefore containers/images that an agent must remove off-box first).
+async fn enqueue_app_teardown(
+    state: &AppState,
+    app: &sqlx::postgres::PgRow,
+    id: Uuid,
+    user_id: Uuid,
+    domain: &str,
+    public_exposure: bool,
+    deployment_rows: &[sqlx::postgres::PgRow],
+) -> Response {
     if public_exposure && state.cloudflare_api_token.is_none() {
         tracing::warn!(app_id = %id, domain = %domain, "public app deletion will require Cloudflare DNS cleanup but Cloudflare is not configured");
     }
-    let mut containers = deployment_rows
-        .iter()
-        .filter_map(|row| row.get::<Option<String>, _>("container_name"))
-        .collect::<Vec<_>>();
-    containers.sort();
-    containers.dedup();
-    let mut images = deployment_rows
-        .iter()
-        .filter_map(|row| row.get::<Option<String>, _>("image_tag"))
-        .collect::<Vec<_>>();
-    images.sort();
-    images.dedup();
+    let containers = dedup_column(deployment_rows, "container_name");
+    let images = dedup_column(deployment_rows, "image_tag");
     let server_id = app.get::<Uuid, _>("server_id");
     let payload = serde_json::json!({
         "type": "delete_app",
@@ -81,28 +99,21 @@ pub async fn delete_app(
         "user_id": user_id,
         "public_exposure": public_exposure,
         "compose_project": format!("hostlet-app-{}", id.simple()),
-        "containers": containers.clone(),
+        "containers": containers,
         "images": images,
     });
-    let job_id = match deploy::enqueue_agent_job(
-        &state,
-        server_id,
-        Some(id),
-        None,
-        "delete_app",
-        payload,
-        5,
-    )
-    .await
-    {
-        Ok(job_id) => job_id,
-        Err(err) => {
-            tracing::warn!(error = %err, app_id = %id, "failed to enqueue app teardown job");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let job_id =
+        match deploy::enqueue_agent_job(state, server_id, Some(id), None, "delete_app", payload, 5)
+            .await
+        {
+            Ok(job_id) => job_id,
+            Err(err) => {
+                tracing::warn!(error = %err, app_id = %id, "failed to enqueue app teardown job");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
     record_audit_event(
-        &state,
+        state,
         AuditEventInput {
             actor_type: "owner",
             actor_id: None,
@@ -119,6 +130,31 @@ pub async fn delete_app(
         Json(serde_json::json!({"jobId": job_id})),
     )
         .into_response()
+}
+
+/// Collect a sorted, de-duplicated list of the non-null string values in
+/// `column` across all `rows`.
+fn dedup_column(rows: &[sqlx::postgres::PgRow], column: &str) -> Vec<String> {
+    let mut values = rows
+        .iter()
+        .filter_map(|row| row.get::<Option<String>, _>(column))
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
+/// Close the public tunnel DNS for a deleting app, mapping a failure onto the
+/// `502 Bad Gateway` response the handler returns to the caller.
+async fn close_public_app_dns(state: &AppState, id: Uuid, domain: &str) -> Result<(), Response> {
+    delete_cloudflare_app_dns(state, id, domain).await.map_err(|err| {
+        tracing::warn!(error = %err, domain = %domain, "failed to remove public tunnel DNS while deleting app");
+        (
+            StatusCode::BAD_GATEWAY,
+            "failed to close public tunnel for app domain",
+        )
+            .into_response()
+    })
 }
 
 pub(in crate::web) async fn finalize_delete_app_from_job(
@@ -229,10 +265,7 @@ pub(in crate::web) async fn delete_app_records(
     user_id: Uuid,
     containers: &[String],
 ) -> anyhow::Result<bool> {
-    let mut tx = match state.db.begin().await {
-        Ok(tx) => tx,
-        Err(err) => return Err(err.into()),
-    };
+    let mut tx = state.db.begin().await?;
     if !containers.is_empty()
         && sqlx::query("DELETE FROM app_resource_snapshots WHERE container_name = ANY($1)")
             .bind(containers)
@@ -272,23 +305,16 @@ pub(in crate::web) async fn app_domain_in_use(
     domain: &str,
     except_app_id: Option<Uuid>,
 ) -> bool {
-    match except_app_id {
-        Some(app_id) => matches!(
-            sqlx::query("SELECT 1 FROM apps WHERE lower(domain)=lower($1) AND id<>$2 LIMIT 1")
-                .bind(domain)
-                .bind(app_id)
-                .fetch_optional(&state.db)
-                .await,
-            Ok(Some(_))
-        ),
-        None => matches!(
-            sqlx::query("SELECT 1 FROM apps WHERE lower(domain)=lower($1) LIMIT 1")
-                .bind(domain)
-                .fetch_optional(&state.db)
-                .await,
-            Ok(Some(_))
-        ),
+    let sql = if except_app_id.is_some() {
+        "SELECT 1 FROM apps WHERE lower(domain)=lower($1) AND id<>$2 LIMIT 1"
+    } else {
+        "SELECT 1 FROM apps WHERE lower(domain)=lower($1) LIMIT 1"
+    };
+    let mut query = sqlx::query(sql).bind(domain);
+    if let Some(app_id) = except_app_id {
+        query = query.bind(app_id);
     }
+    matches!(query.fetch_optional(&state.db).await, Ok(Some(_)))
 }
 
 pub(in crate::web) async fn delete_created_app_row(state: &AppState, app_id: Uuid) {

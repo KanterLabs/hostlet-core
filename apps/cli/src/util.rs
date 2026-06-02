@@ -1,4 +1,5 @@
 use super::*;
+use std::process::Output;
 
 pub(crate) fn compose_args(dev: bool) -> Vec<String> {
     vec![
@@ -42,33 +43,33 @@ pub(crate) fn command_ok(bin: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn compose_config_ok(root: &Path, dev: bool) -> bool {
+/// Runs `docker compose <subcommand...>` in `root` with output suppressed and
+/// reports whether the resulting output satisfies `accept`.
+fn compose_status(
+    root: &Path,
+    dev: bool,
+    subcommand: &[&str],
+    accept: impl Fn(&Output) -> bool,
+) -> bool {
     let mut args = compose_args(dev);
-    args.push("config".into());
+    args.extend(subcommand.iter().map(|arg| arg.to_string()));
     Command::new("docker")
         .current_dir(root)
         .args(args)
-        .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
+        .output()
+        .map(|output| accept(&output))
         .unwrap_or(false)
 }
 
+pub(crate) fn compose_config_ok(root: &Path, dev: bool) -> bool {
+    compose_status(root, dev, &["config"], |output| output.status.success())
+}
+
 pub(crate) fn compose_services_running(root: &Path, dev: bool) -> bool {
-    let mut args = compose_args(dev);
-    args.extend([
-        "ps".into(),
-        "--status".into(),
-        "running".into(),
-        "-q".into(),
-    ]);
-    Command::new("docker")
-        .current_dir(root)
-        .args(args)
-        .output()
-        .map(|output| output.status.success() && !output.stdout.is_empty())
-        .unwrap_or(false)
+    compose_status(root, dev, &["ps", "--status", "running", "-q"], |output| {
+        output.status.success() && !output.stdout.is_empty()
+    })
 }
 
 pub(crate) fn disk_space_ok(root: &Path) -> bool {
@@ -131,38 +132,51 @@ pub(crate) fn check(label: &str, ok: bool) {
 
 pub(crate) fn default_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
+    let mut set = |key: &str, value: String| {
+        env.insert(key.to_string(), value);
+    };
+
+    // Database: the generated Postgres password is reused inside DATABASE_URL.
     let postgres_password = hex_secret(24);
-    env.insert("POSTGRES_USER".into(), "hostlet".into());
-    env.insert("POSTGRES_PASSWORD".into(), postgres_password.clone());
-    env.insert("POSTGRES_DB".into(), "hostlet".into());
-    env.insert("DOCKER_GID".into(), docker_gid());
-    env.insert(
-        "HOSTLET_IMAGE_TAG".into(),
-        format!("v{}", env!("CARGO_PKG_VERSION")),
-    );
-    env.insert(
-        "DATABASE_URL".into(),
+    set("POSTGRES_USER", "hostlet".into());
+    set("POSTGRES_PASSWORD", postgres_password.clone());
+    set("POSTGRES_DB", "hostlet".into());
+    set(
+        "DATABASE_URL",
         format!("postgres://hostlet:{postgres_password}@localhost:5432/hostlet"),
     );
-    env.insert("BIND_ADDR".into(), "0.0.0.0:8080".into());
-    env.insert("HOSTLET_BASE_DOMAIN".into(), String::new());
-    env.insert("HOSTLET_DOMAIN_PREFIX".into(), "hostlet-".into());
-    env.insert("HOSTLET_CONTROL_PLANE_HOST".into(), "localhost".into());
-    env.insert("CLOUDFLARE_API_TOKEN".into(), String::new());
-    env.insert("CLOUDFLARE_ZONE_ID".into(), String::new());
-    env.insert("CLOUDFLARE_TUNNEL_TARGET".into(), String::new());
-    env.insert("CLOUDFLARE_TUNNEL_TOKEN".into(), String::new());
-    env.insert("HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS".into(), "false".into());
-    env.insert("HOSTLET_SETUP_TOKEN".into(), hex_secret(32));
-    env.insert("ENCRYPTION_KEY".into(), base64_secret(32));
-    env.insert("JOB_SIGNING_SECRET".into(), hex_secret(32));
-    env.insert("SESSION_SECRET".into(), hex_secret(32));
-    env.insert(
-        "LOCAL_SERVER_ID".into(),
+
+    // Runtime configuration (non-secret): wiring for Docker, image pinning and binding.
+    set("DOCKER_GID", docker_gid());
+    set(
+        "HOSTLET_IMAGE_TAG",
+        format!("v{}", env!("CARGO_PKG_VERSION")),
+    );
+    set("BIND_ADDR", "0.0.0.0:8080".into());
+    set("HOSTLET_BASE_DOMAIN", String::new());
+    set("HOSTLET_DOMAIN_PREFIX", "hostlet-".into());
+    set("HOSTLET_CONTROL_PLANE_HOST", "localhost".into());
+    set("HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS", "false".into());
+    set(
+        "LOCAL_SERVER_ID",
         "00000000-0000-0000-0000-000000000001".into(),
     );
-    env.insert("LOCAL_AGENT_TOKEN".into(), hex_secret(32));
-    env.insert("GITHUB_WEBHOOK_SECRET".into(), hex_secret(32));
+
+    // Cloudflare integration (operator-supplied; left blank by default).
+    set("CLOUDFLARE_API_TOKEN", String::new());
+    set("CLOUDFLARE_ZONE_ID", String::new());
+    set("CLOUDFLARE_TUNNEL_TARGET", String::new());
+    set("CLOUDFLARE_TUNNEL_TOKEN", String::new());
+
+    // Secrets: generated per-install. ENCRYPTION_KEY needs raw 32-byte entropy
+    // (base64), the rest are hex tokens.
+    set("HOSTLET_SETUP_TOKEN", hex_secret(32));
+    set("ENCRYPTION_KEY", base64_secret(32));
+    set("JOB_SIGNING_SECRET", hex_secret(32));
+    set("SESSION_SECRET", hex_secret(32));
+    set("LOCAL_AGENT_TOKEN", hex_secret(32));
+    set("GITHUB_WEBHOOK_SECRET", hex_secret(32));
+
     env
 }
 
@@ -260,11 +274,10 @@ pub(crate) fn docker_gid() -> String {
     }
 }
 
+/// Returns a UTC timestamp suffix (e.g. `20260601T143000Z`) for naming backup
+/// and update-state directories. Shells out to `date -u` rather than pulling in
+/// a datetime crate; falls back to the literal `backup` if that fails.
 pub(crate) fn timestamp_suffix() -> String {
-    chrono_like_timestamp()
-}
-
-pub(crate) fn chrono_like_timestamp() -> String {
     Command::new("date")
         .arg("-u")
         .arg("+%Y%m%dT%H%M%SZ")

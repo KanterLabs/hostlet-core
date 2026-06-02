@@ -1,35 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { HardDrive, Server } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, EmptyState, Metric, MetricsGrid, PageHeader, Panel, StatusPill } from "@/components/ui";
-
-type ServerRow = { id: string; name: string; publicIp?: string; kind: string; status: string; lastSeenAt?: string };
+import {
+  SERVERS_POLL_INTERVAL_MS,
+  deriveServerCounts,
+  formatLastSeen,
+  useVisibilityPoll,
+  type ServerRow,
+} from "./servers-data";
 
 export default function Servers() {
   const [servers, setServers] = useState<ServerRow[]>([]);
-  const [message, setMessage] = useState("Loading machines...");
+  const [emptyMessage, setEmptyMessage] = useState("Loading machines...");
+  const [error, setError] = useState("");
 
-  useEffect(() => {
-    loadServers();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") loadServers();
-    }, 10000);
-    return () => window.clearInterval(timer);
-  }, []);
+  useVisibilityPoll(loadServers, SERVERS_POLL_INTERVAL_MS);
 
   function loadServers() {
     api<ServerRow[]>("/api/servers")
       .then((rows) => {
         setServers(rows);
-        setMessage(rows.length ? "" : "No machines yet.");
+        setError("");
+        setEmptyMessage(rows.length ? "" : "No machines yet.");
       })
-      .catch((error) => setMessage(`Could not load machines. ${error instanceof Error ? error.message : "Sign in again."}`));
+      .catch((err) => setError(`Could not load machines. ${err instanceof Error ? err.message : "Sign in again."}`));
   }
 
-  const online = servers.filter((server) => server.status === "online").length;
-  const local = servers.filter((server) => server.kind === "local").length;
+  const { online, local } = deriveServerCounts(servers);
 
   return (
     <AppShell>
@@ -60,7 +60,7 @@ export default function Servers() {
                     </div>
                     <div className="text-right text-sm">
                       <div className="eyebrow">Last seen</div>
-                      <div className="mt-1 font-medium">{server.lastSeenAt ? new Date(server.lastSeenAt).toLocaleString() : "Not seen yet"}</div>
+                      <div className="mt-1 font-medium">{formatLastSeen(server.lastSeenAt)}</div>
                     </div>
                   </div>
                 </Panel>
@@ -69,7 +69,7 @@ export default function Servers() {
           ) : (
             <EmptyState
               icon={Server}
-              title={message}
+              title={error || emptyMessage}
               description="The local agent should appear here when Hostlet is running."
             />
           )}

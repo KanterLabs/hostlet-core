@@ -1,88 +1,25 @@
 "use client";
 
-import { use, useEffect, useMemo, useState } from "react";
+import { use, useMemo } from "react";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
-import { api, apiUrl } from "@/lib/api";
 import { AppShell, DataList, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
-
-type Deployment = {
-  id: string;
-  appId?: string;
-  status: string;
-  commitSha?: string | null;
-  failure?: string | null;
-  runtimeMetadata?: RuntimeMetadata | null;
-};
-
-type RuntimeMetadata = {
-  packagingStrategy?: string | null;
-  generatedDockerfile?: boolean | null;
-  detectedFramework?: string | null;
-  runtimeKind?: string | null;
-  packageManager?: string | null;
-  buildDurationMs?: number | null;
-  imageSizeBytes?: number | null;
-};
-
-type LogLine = {
-  stream: string;
-  line: string;
-};
+import {
+  DEPLOYMENT_STEPS,
+  formatBytes,
+  formatDuration,
+  humanStatus,
+  socketLabel,
+  statusHelp,
+} from "./deploymentStatus";
+import { useDeploymentLogs } from "./useDeploymentLogs";
 
 export default function DeploymentDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const [deployment, setDeployment] = useState<Deployment | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [socketState, setSocketState] = useState<"connecting" | "connected" | "reconnecting" | "closed">("connecting");
-  const [socketMessage, setSocketMessage] = useState("");
+  const { deployment, logs, socketState, socketMessage } = useDeploymentLogs(id);
 
-  useEffect(() => {
-    const loadDeployment = () => api<Deployment>(`/api/deployments/${id}`).then(setDeployment).catch(() => setDeployment({ id, status: "unknown", failure: "Deployment could not be loaded." }));
-    loadDeployment();
-    const poll = setInterval(loadDeployment, 2500);
-    api<LogLine[]>(`/api/deployments/${id}/logs`).then((rows) => setLogs(rows.map((row) => `${row.stream}: ${row.line}`))).catch(() => {});
-    let closed = false;
-    let retry: ReturnType<typeof setTimeout> | undefined;
-    let ws: WebSocket | undefined;
-    const connect = () => {
-      setSocketState((current) => current === "closed" ? "connecting" : current);
-      ws = new WebSocket(`${apiUrl().replace("http", "ws")}/ws/logs/${id}`);
-      ws.onopen = () => {
-        setSocketState("connected");
-        setSocketMessage("");
-      };
-      ws.onmessage = (event) => {
-        try {
-          const row = JSON.parse(event.data);
-          setLogs((current) => [...current, `${row.stream}: ${row.line}`].slice(-1000));
-        } catch {
-          setSocketMessage("A log event could not be parsed.");
-        }
-      };
-      ws.onerror = () => {
-        setSocketMessage("Live log connection had an error.");
-      };
-      ws.onclose = () => {
-        if (closed) return;
-        setSocketState("reconnecting");
-        setSocketMessage("Live logs disconnected. Reconnecting...");
-        retry = setTimeout(connect, 2000);
-      };
-    };
-    connect();
-    return () => {
-      closed = true;
-      clearInterval(poll);
-      if (retry) clearTimeout(retry);
-      ws?.close();
-      setSocketState("closed");
-    };
-  }, [id]);
-
-  const steps = ["queued", "running", "building", "starting", "health_checking", "routing", "success"];
   const status = deployment?.status || "loading";
-  const activeIndex = steps.indexOf(status);
+  const activeIndex = DEPLOYMENT_STEPS.indexOf(status as (typeof DEPLOYMENT_STEPS)[number]);
   const groupedLogs = useMemo(() => logs.join("\n"), [logs]);
 
   return (
@@ -104,7 +41,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
               <Panel>
                 <SectionHeader icon={ScrollText} title="Status" action={<StatusPill status={status} />} />
                 <div className="space-y-3">
-                  {steps.map((step, index) => {
+                  {DEPLOYMENT_STEPS.map((step, index) => {
                     const done = status === "failed" ? index < Math.max(activeIndex, 0) : activeIndex >= index;
                     const current = status === step;
                     return (
@@ -163,47 +100,4 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
           </div>
     </AppShell>
   );
-}
-
-function formatDuration(ms?: number | null) {
-  if (!ms || ms < 0) return "n/a";
-  if (ms < 1000) return `${ms} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
-}
-
-function formatBytes(bytes?: number | null) {
-  if (!bytes || bytes < 0) return "n/a";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-function socketLabel(state: "connecting" | "connected" | "reconnecting" | "closed") {
-  switch (state) {
-    case "connected": return "live";
-    case "reconnecting": return "reconnecting";
-    case "closed": return "closed";
-    default: return "connecting";
-  }
-}
-
-function humanStatus(status: string) {
-  return status.replaceAll("_", " ");
-}
-
-function statusHelp(status: string) {
-  switch (status) {
-    case "building": return "Hostlet is installing dependencies and building the container image.";
-    case "starting": return "The new container is starting. The previous working version is preserved.";
-    case "health_checking": return "Hostlet is waiting for the app to answer on the configured port and health path.";
-    case "routing": return "The app passed health checks. Hostlet is making it reachable.";
-    case "success": return "Deployment succeeded.";
-    case "failed": return "Deployment failed. The previous working version was preserved.";
-    default: return "Deployment is queued or running.";
-  }
 }

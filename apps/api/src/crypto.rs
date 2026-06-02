@@ -23,6 +23,11 @@ impl Crypto {
             }
         };
         let crypto = Self::new(&key)?;
+        // `new` already guarantees the key decodes to exactly 32 bytes. This
+        // extra check rejects short *base64* strings (e.g. obvious dev
+        // placeholders) outside of explicit dev-defaults mode: a real 32-byte
+        // key encodes to a 44-character base64 string, so any value this short
+        // is a placeholder even if it happened to decode to 32 bytes.
         if !allow_insecure_dev_defaults && key.len() < 32 {
             bail!("ENCRYPTION_KEY must not be a short development value");
         }
@@ -37,6 +42,8 @@ impl Crypto {
             bail!("ENCRYPTION_KEY must decode to 32 bytes");
         }
         Ok(Self {
+            // Safe: the length check above guarantees `key` is exactly the
+            // 32 bytes AES-256 requires, so the only error variant cannot occur.
             cipher: Aes256Gcm::new_from_slice(&key).unwrap(),
         })
     }
@@ -77,6 +84,7 @@ pub fn verify_token(token: &str, expected_hash: &str) -> bool {
 }
 
 pub fn sign(secret: &str, payload: &[u8]) -> String {
+    // Safe: HMAC accepts a key of any length, so construction never fails.
     let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(payload);
     format!("sha256={}", hex_bytes(&mac.finalize().into_bytes()))

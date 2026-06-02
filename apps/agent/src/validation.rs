@@ -1,25 +1,15 @@
 use super::*;
 
-pub(crate) fn valid_hostlet_image(value: &str) -> bool {
-    value.starts_with("hostlet/")
-        && value.len() <= 300
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '_' | '-'))
-}
+mod docker_resources;
+mod redaction;
 
-pub(crate) fn verify_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(payload);
-    let expected = format!(
-        "sha256={}",
-        mac.finalize()
-            .into_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    );
-    constant_time_eq(expected.as_bytes(), signature.as_bytes())
+pub(crate) use docker_resources::*;
+pub(crate) use redaction::*;
+
+pub(crate) fn valid_hostlet_image(value: &str) -> bool {
+    valid_prefixed_name(value, "hostlet/", 300, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '_' | '-')
+    })
 }
 
 pub(crate) fn env(key: &str) -> anyhow::Result<String> {
@@ -61,107 +51,15 @@ pub(crate) fn safe_name(s: &str) -> String {
         })
         .collect()
 }
-pub(crate) async fn docker_published_port(
-    container: &str,
-    container_port: u16,
-) -> anyhow::Result<u16> {
-    let target = format!("{container_port}/tcp");
-    let output = command_output(
-        "docker",
-        &["port", container, &target],
-        Duration::from_secs(15),
-    )
-    .await
-    .context("failed to inspect Docker published port")?;
-    if !output.status.success() {
-        bail!("could not inspect Docker published port");
-    }
-    let stdout =
-        String::from_utf8(output.stdout).context("Docker port output was not valid UTF-8")?;
-    stdout
-        .lines()
-        .filter_map(|line| line.rsplit(':').next())
-        .filter_map(|port| port.trim().parse::<u16>().ok())
-        .next()
-        .context("Docker did not report a published port")
-}
-
-pub(crate) async fn compose_service_container(
-    dir: &Path,
-    project: &str,
-    compose_file: &Path,
-    override_file: &Path,
-    service: &str,
-) -> anyhow::Result<String> {
-    let output = command_output_in_dir(
-        dir,
-        "docker",
-        &[
-            "compose",
-            "-p",
-            project,
-            "-f",
-            compose_file.to_str().unwrap(),
-            "-f",
-            override_file.to_str().unwrap(),
-            "ps",
-            "-q",
-            service,
-        ],
-        Duration::from_secs(30),
-    )
-    .await?;
-    if !output.status.success() {
-        bail!("docker compose ps failed");
-    }
-    let id = String::from_utf8(output.stdout)?.trim().to_string();
-    if id.is_empty() {
-        bail!("compose web service did not create a container");
-    }
-    let name_output = command_output(
-        "docker",
-        &["inspect", "-f", "{{.Name}}", &id],
-        Duration::from_secs(15),
-    )
-    .await?;
-    if !name_output.status.success() {
-        bail!("failed to inspect compose web container");
-    }
-    let name = String::from_utf8(name_output.stdout)?
-        .trim()
-        .trim_start_matches('/')
-        .to_string();
-    if !valid_container_name(&name) {
-        bail!("compose web container name is not Hostlet-managed");
-    }
-    Ok(name)
-}
-
-pub(crate) async fn command_output_in_dir(
-    dir: &Path,
-    bin: &str,
-    args: &[&str],
-    timeout: Duration,
-) -> anyhow::Result<Output> {
-    let mut cmd = Command::new(bin);
-    cmd.current_dir(dir).args(args).kill_on_drop(true);
-    match tokio::time::timeout(timeout, cmd.output()).await {
-        Ok(output) => output.with_context(|| format!("failed to start {bin}")),
-        Err(_) => bail!("{bin} timed out after {} seconds", timeout.as_secs()),
-    }
-}
 
 pub(crate) fn compose_project_name(app_id: Uuid) -> String {
     format!("hostlet-app-{}", app_id.simple())
 }
 
-pub(crate) fn compose_override_yaml(
-    web_service: &str,
-    port: u16,
-    app_id: Uuid,
-    deployment_id: Uuid,
-    payload: &Value,
-) -> String {
+/// Builds the `environment:` block body for the compose override: the
+/// Hostlet-injected variables followed by the validated env entries from the
+/// payload, each rendered as a YAML-escaped `- KEY=VALUE` list item.
+fn compose_override_env_block(app_id: Uuid, deployment_id: Uuid, payload: &Value) -> String {
     let mut env = vec![
         format!("HOSTLET_APP_ID={app_id}"),
         format!("HOSTLET_DEPLOYMENT_ID={deployment_id}"),
@@ -176,14 +74,33 @@ pub(crate) fn compose_override_yaml(
             }
         }
     }
-    let env_yaml = env
-        .iter()
+    env.iter()
         .map(|item| format!("      - {}", serde_yaml::to_string(item).unwrap().trim()))
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+pub(crate) fn compose_override_yaml(
+    web_service: &str,
+    port: u16,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    payload: &Value,
+) -> String {
+    let env_yaml = compose_override_env_block(app_id, deployment_id, payload);
     format!(
         "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
     )
+}
+
+/// Look up a string key in a YAML mapping without repeatedly allocating a
+/// `serde_yaml::Value::String` at every call site.
+fn yaml_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
+    mapping.get(serde_yaml::Value::String(key.to_string()))
+}
+
+fn yaml_contains_key(mapping: &serde_yaml::Mapping, key: &str) -> bool {
+    mapping.contains_key(serde_yaml::Value::String(key.to_string()))
 }
 
 pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
@@ -193,7 +110,7 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
         .get("services")
         .and_then(|v| v.as_mapping())
         .context("compose file must define services")?;
-    if !services.contains_key(serde_yaml::Value::String(web_service.to_string())) {
+    if !yaml_contains_key(services, web_service) {
         bail!("compose file does not contain declared web service {web_service}");
     }
     for (name, raw_service) in services {
@@ -214,14 +131,11 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
             "networks",
             "ports",
         ] {
-            if service.contains_key(serde_yaml::Value::String(key.to_string())) {
+            if yaml_contains_key(service, key) {
                 bail!("compose service {service_name} uses unsupported field {key}");
             }
         }
-        if let Some(volumes) = service
-            .get(serde_yaml::Value::String("volumes".into()))
-            .and_then(|v| v.as_sequence())
-        {
+        if let Some(volumes) = yaml_get(service, "volumes").and_then(|v| v.as_sequence()) {
             for volume in volumes {
                 if let Some(value) = volume.as_str() {
                     if value.starts_with('/') || value.contains("../") {
@@ -230,13 +144,11 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
                     continue;
                 }
                 if let Some(mapping) = volume.as_mapping() {
-                    let volume_type = mapping
-                        .get(serde_yaml::Value::String("type".into()))
+                    let volume_type = yaml_get(mapping, "type")
                         .and_then(|value| value.as_str())
                         .unwrap_or("");
-                    let source = mapping
-                        .get(serde_yaml::Value::String("source".into()))
-                        .or_else(|| mapping.get(serde_yaml::Value::String("src".into())))
+                    let source = yaml_get(mapping, "source")
+                        .or_else(|| yaml_get(mapping, "src"))
                         .and_then(|value| value.as_str())
                         .unwrap_or("");
                     if volume_type == "bind" || source.starts_with('/') || source.contains("../") {
@@ -286,79 +198,6 @@ pub(crate) fn valid_env_key(key: &str) -> bool {
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
-pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-pub(crate) fn redact(line: &str) -> String {
-    if let Some(redacted) = redact_url_credentials(line) {
-        return redacted;
-    }
-    let lowered = line.to_lowercase();
-    let sensitive = [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "api_key",
-        "apikey",
-        "access_key",
-        "private key",
-        "authorization:",
-        "bearer ",
-        "credential",
-    ];
-    if sensitive.iter().any(|needle| lowered.contains(needle)) {
-        "[redacted]".into()
-    } else {
-        line.into()
-    }
-}
-
-pub(crate) fn redact_url_credentials(value: &str) -> Option<String> {
-    let scheme = "https://";
-    let start = value.find(scheme)?;
-    let credentials_start = start + scheme.len();
-    let at = value[credentials_start..].find('@')? + credentials_start;
-    let mut redacted = String::with_capacity(value.len());
-    redacted.push_str(&value[..start]);
-    redacted.push_str("https://[redacted]@");
-    redacted.push_str(&value[at + 1..]);
-    Some(redacted)
-}
-
-pub(crate) fn command_args_for_log(args: &[&str]) -> Vec<String> {
-    let mut output = Vec::with_capacity(args.len());
-    let mut redact_next = false;
-    for arg in args {
-        if redact_next {
-            output.push(redact_env_arg(arg));
-            redact_next = false;
-            continue;
-        }
-        if *arg == "-e" || *arg == "--env" {
-            output.push((*arg).to_string());
-            redact_next = true;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--env=") {
-            output.push(format!("--env={}", redact_env_arg(value)));
-            continue;
-        }
-        output.push(redact(arg));
-    }
-    output
-}
-
-pub(crate) fn redact_env_arg(arg: &str) -> String {
-    match arg.split_once('=') {
-        Some((key, _)) if !key.is_empty() => format!("{key}=[redacted]"),
-        _ => "[redacted]".into(),
-    }
-}
 
 pub(crate) fn env_args(p: &Value) -> Vec<String> {
     p.get("env")
@@ -378,123 +217,27 @@ pub(crate) fn env_pairs_has_key(pairs: &[String], key: &str) -> bool {
         .any(|(existing, _)| existing == key)
 }
 
-pub(crate) fn app_data_volume(app_id: Uuid) -> String {
-    format!("hostlet-app-data-{app_id}")
-}
-
-pub(crate) async fn ensure_app_data_volume(
-    cfg: &Config,
-    deployment_id: Uuid,
-    volume: &str,
-) -> anyhow::Result<()> {
-    run_log(cfg, deployment_id, "docker", &["volume", "create", volume]).await?;
-    let volume_mount = format!("{volume}:/data");
-    run_log(
-        cfg,
-        deployment_id,
-        "docker",
-        &[
-            "run",
-            "--rm",
-            "-v",
-            &volume_mount,
-            "alpine:3.20",
-            "sh",
-            "-lc",
-            "chmod 0777 /data",
-        ],
-    )
-    .await
-}
-
-pub(crate) async fn remove_app_data_volume(app_id: Uuid) -> anyhow::Result<()> {
-    let volume = app_data_volume(app_id);
-    run_quiet_absent_ok(
-        "docker",
-        &["volume", "rm", "-f", &volume],
-        &["No such volume"],
-    )
-    .await
-}
-
-pub(crate) async fn remove_compose_project_resources(project: &str) -> anyhow::Result<()> {
-    if !valid_compose_project_name(project) {
-        bail!("refusing to remove invalid compose project");
-    }
-    let containers = docker_names_by_label(
-        "ps",
-        &[
-            "-a",
-            "--filter",
-            &format!("label=com.docker.compose.project={project}"),
-        ],
-        "{{.Names}}",
-    )
-    .await?;
-    for container in containers {
-        if valid_container_name(&container) {
-            run_quiet_absent_ok("docker", &["rm", "-f", &container], &["No such container"])
-                .await?;
-        }
-    }
-    let volumes = docker_names_by_label(
-        "volume",
-        &[
-            "ls",
-            "--filter",
-            &format!("label=com.docker.compose.project={project}"),
-        ],
-        "{{.Name}}",
-    )
-    .await?;
-    for volume in volumes {
-        if valid_compose_volume_name(&volume) {
-            run_quiet_absent_ok(
-                "docker",
-                &["volume", "rm", "-f", &volume],
-                &["No such volume"],
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn docker_names_by_label(
-    cmd: &str,
-    args: &[&str],
-    format: &str,
-) -> anyhow::Result<Vec<String>> {
-    let mut full = vec![cmd];
-    full.extend(args);
-    full.push("--format");
-    full.push(format);
-    let output = command_output("docker", &full, Duration::from_secs(30)).await?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8(output.stdout)?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
+/// Shared shape for Hostlet-managed Docker resource names: a required prefix,
+/// a maximum length, and a per-character allowlist.
+fn valid_prefixed_name(
+    value: &str,
+    prefix: &str,
+    max_len: usize,
+    char_allowed: impl Fn(char) -> bool,
+) -> bool {
+    value.starts_with(prefix) && value.len() <= max_len && value.chars().all(char_allowed)
 }
 
 pub(crate) fn valid_compose_project_name(value: &str) -> bool {
-    value.starts_with("hostlet-app-")
-        && value.len() <= 64
-        && value
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    valid_prefixed_name(value, "hostlet-app-", 64, |c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+    })
 }
 
 pub(crate) fn valid_compose_volume_name(value: &str) -> bool {
-    value.starts_with("hostlet-app-")
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    valid_prefixed_name(value, "hostlet-app-", 128, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+    })
 }
 
 pub(crate) fn validate_repo(value: &str) -> anyhow::Result<()> {

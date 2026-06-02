@@ -1,5 +1,25 @@
 use super::super::*;
 
+/// Builds the shared Cloudflare-status JSON envelope, varying only the
+/// `configured`/`tokenValid`/`message` fields between the distinct outcomes.
+fn cloudflare_status_envelope(
+    state: &AppState,
+    configured: bool,
+    token_valid: serde_json::Value,
+    message: impl Into<serde_json::Value>,
+) -> Response {
+    Json(serde_json::json!({
+        "configured": configured,
+        "tokenValid": token_valid,
+        "baseDomain": state.base_domain.as_deref(),
+        "domainPrefix": state.domain_prefix,
+        "defaultDomainPattern": default_domain_pattern(state),
+        "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
+        "message": message.into(),
+    }))
+    .into_response()
+}
+
 pub async fn cloudflare_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -12,28 +32,20 @@ pub async fn cloudflare_status(
         && state.cloudflare_tunnel_target.is_some()
         && state.base_domain.is_some();
     let Some(token) = state.cloudflare_api_token.as_ref() else {
-        return Json(serde_json::json!({
-            "configured": false,
-            "tokenValid": null,
-            "baseDomain": state.base_domain.as_deref(),
-            "domainPrefix": state.domain_prefix,
-            "defaultDomainPattern": default_domain_pattern(&state),
-            "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
-            "message": "CLOUDFLARE_API_TOKEN is not set."
-        }))
-        .into_response();
+        return cloudflare_status_envelope(
+            &state,
+            false,
+            serde_json::Value::Null,
+            "CLOUDFLARE_API_TOKEN is not set.",
+        );
     };
     let Some(zone_id) = state.cloudflare_zone_id.as_ref() else {
-        return Json(serde_json::json!({
-            "configured": false,
-            "tokenValid": null,
-            "baseDomain": state.base_domain.as_deref(),
-            "domainPrefix": state.domain_prefix,
-            "defaultDomainPattern": default_domain_pattern(&state),
-            "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
-            "message": "CLOUDFLARE_ZONE_ID is not set."
-        }))
-        .into_response();
+        return cloudflare_status_envelope(
+            &state,
+            false,
+            serde_json::Value::Null,
+            "CLOUDFLARE_ZONE_ID is not set.",
+        );
     };
     let resp = state
         .http
@@ -44,37 +56,66 @@ pub async fn cloudflare_status(
         .send()
         .await;
     match resp {
-        Ok(resp) if resp.status().is_success() => Json(serde_json::json!({
-            "configured": configured,
-            "tokenValid": true,
-            "baseDomain": state.base_domain.as_deref(),
-            "domainPrefix": state.domain_prefix,
-            "defaultDomainPattern": default_domain_pattern(&state),
-            "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
-            "message": "Cloudflare API token can access the configured zone."
-        }))
-        .into_response(),
-        Ok(resp) => Json(serde_json::json!({
-            "configured": configured,
-            "tokenValid": false,
-            "baseDomain": state.base_domain.as_deref(),
-            "domainPrefix": state.domain_prefix,
-            "defaultDomainPattern": default_domain_pattern(&state),
-            "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
-            "message": format!("Cloudflare zone check failed with status {}.", resp.status())
-        }))
-        .into_response(),
-        Err(_) => Json(serde_json::json!({
-            "configured": configured,
-            "tokenValid": false,
-            "baseDomain": state.base_domain.as_deref(),
-            "domainPrefix": state.domain_prefix,
-            "defaultDomainPattern": default_domain_pattern(&state),
-            "tunnelTargetConfigured": state.cloudflare_tunnel_target.is_some(),
-            "message": "Could not reach Cloudflare from the API container."
-        }))
-        .into_response(),
+        Ok(resp) if resp.status().is_success() => cloudflare_status_envelope(
+            &state,
+            configured,
+            serde_json::Value::Bool(true),
+            "Cloudflare API token can access the configured zone.",
+        ),
+        Ok(resp) => cloudflare_status_envelope(
+            &state,
+            configured,
+            serde_json::Value::Bool(false),
+            format!(
+                "Cloudflare zone check failed with status {}.",
+                resp.status()
+            ),
+        ),
+        Err(_) => cloudflare_status_envelope(
+            &state,
+            configured,
+            serde_json::Value::Bool(false),
+            "Could not reach Cloudflare from the API container.",
+        ),
     }
+}
+
+/// Issues a Cloudflare DELETE for a single DNS record, treating an already-gone
+/// record (404) as success so cleanup is idempotent.
+async fn cloudflare_delete_record(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    record_id: &str,
+) -> anyhow::Result<()> {
+    let resp = client
+        .delete(format!("{base}/{record_id}"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
+        resp.error_for_status()?;
+    }
+    Ok(())
+}
+
+/// Lists the Cloudflare CNAME records currently registered for `host`.
+async fn cloudflare_list_cname_records(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    host: &str,
+) -> anyhow::Result<Vec<CloudflareRecord>> {
+    let listed = client
+        .get(base)
+        .bearer_auth(token)
+        .query(&[("type", "CNAME"), ("name", host)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<CloudflareListResponse>()
+        .await?;
+    Ok(listed.result)
 }
 
 pub(in crate::web) async fn ensure_cloudflare_app_dns(
@@ -93,15 +134,7 @@ pub(in crate::web) async fn ensure_cloudflare_app_dns(
 
     let client = &state.http;
     let base = format!("https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records");
-    let existing = client
-        .get(&base)
-        .bearer_auth(token)
-        .query(&[("type", "CNAME"), ("name", host.as_str())])
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<CloudflareListResponse>()
-        .await?;
+    let existing = cloudflare_list_cname_records(client, &base, token, &host).await?;
 
     let owned = sqlx::query(
         "SELECT app_id, cloudflare_record_id
@@ -127,7 +160,7 @@ pub(in crate::web) async fn ensure_cloudflare_app_dns(
         }
     }
 
-    let record_id = if let Some(record) = existing.result.first() {
+    let record_id = if let Some(record) = existing.first() {
         if owned.is_none() && !hostlet_legacy_prefixed_host(state, &host) {
             anyhow::bail!(
                 "{host} already has a Cloudflare CNAME record not managed by this Hostlet app"
@@ -197,16 +230,11 @@ pub(in crate::web) async fn delete_cloudflare_app_dns(
     .fetch_optional(&state.db)
     .await?;
 
+    // Primary path: a record this app owns in our DB. Delete it from Cloudflare
+    // (tolerating an already-removed record) and drop the ownership row.
     if let Some(record) = owned {
         let record_id = record.get::<String, _>("cloudflare_record_id");
-        let resp = client
-            .delete(format!("{base}/{record_id}"))
-            .bearer_auth(token)
-            .send()
-            .await?;
-        if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
-            resp.error_for_status()?;
-        }
+        cloudflare_delete_record(client, &base, token, &record_id).await?;
         sqlx::query(
             "DELETE FROM app_public_dns_records WHERE app_id=$1 AND zone_id=$2 AND hostname=$3",
         )
@@ -218,29 +246,15 @@ pub(in crate::web) async fn delete_cloudflare_app_dns(
         return Ok(());
     }
 
+    // No owned record. We only touch unmanaged Cloudflare records when the host
+    // carries our legacy prefix; anything else is left untouched.
     if !hostlet_legacy_prefixed_host(state, &host) {
         return Ok(());
     }
 
-    let existing = client
-        .get(&base)
-        .bearer_auth(token)
-        .query(&[("type", "CNAME"), ("name", host.as_str())])
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<CloudflareListResponse>()
-        .await?;
-
-    for record in existing.result {
-        let resp = client
-            .delete(format!("{base}/{}", record.id))
-            .bearer_auth(token)
-            .send()
-            .await?;
-        if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
-            resp.error_for_status()?;
-        }
+    // Legacy-prefixed fallback: sweep any matching CNAME records directly.
+    for record in cloudflare_list_cname_records(client, &base, token, &host).await? {
+        cloudflare_delete_record(client, &base, token, &record.id).await?;
     }
 
     Ok(())

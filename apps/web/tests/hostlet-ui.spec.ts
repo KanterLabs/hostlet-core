@@ -19,26 +19,46 @@ test("settings show self-hosted provider status", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Cloudflare" })).toBeVisible();
 });
 
+// Deterministic id for the synthetic "This machine" server so the fixture
+// stays stable across runs.
+const LOCAL_SERVER_ID = "00000000-0000-0000-0000-000000000001";
+
+// Maps a backend path to the JSON body the mock should return. Several paths
+// share a fixture, so they are grouped onto the same entry.
+const API_FIXTURES: Record<string, unknown> = {
+  "/api/session": { authenticated: true, mode: "self_hosted", cloud: null, unlocked: true },
+  "/api/setup/status": { authenticated: true, mode: "self_hosted", cloud: null, unlocked: true },
+  "/api/apps": [],
+  "/api/servers": [{ id: LOCAL_SERVER_ID, name: "This machine", kind: "local", status: "online" }],
+  "/api/github/status": { oauthConfigured: true, webhookConfigured: true, authenticated: true, tokenValid: true, login: "ci-user", message: "GitHub Device Flow is configured." },
+  "/api/github/repos": [],
+  "/api/cloudflare/status": { configured: true, tokenValid: true, baseDomain: "example.test", defaultDomainPattern: "*.example.test", domainPrefix: "hostlet-", tunnelTargetConfigured: true, message: "Cloudflare DNS is configured." },
+  "/api/system/version": { currentVersion: "0.2.0", updateChecksEnabled: true },
+  "/api/system/cleanup": { database: {}, docker: { keepContainers: 1, keepImages: 1, jobWillRun: true } },
+  "/api/system/backups/latest": null,
+  "/api/agent-jobs": [],
+  "/api/audit-events": [],
+};
+
+function isBackendPath(path: string): boolean {
+  return path.startsWith("/api") || path.startsWith("/auth");
+}
+
 async function mockApi(page: Page) {
   await page.route("**/*", async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (!url.pathname.startsWith("/api") && !url.pathname.startsWith("/auth")) return route.continue();
-    return handleApi(route, url.pathname);
+    const path = new URL(route.request().url()).pathname;
+    if (!isBackendPath(path)) return route.continue();
+    return handleApi(route, path);
   });
 }
 
 async function handleApi(route: Route, path: string) {
-  const json = (body: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
-  if (path === "/api/session" || path === "/api/setup/status") return json({ authenticated: true, mode: "self_hosted", cloud: null, unlocked: true });
-  if (path === "/api/apps") return json([]);
-  if (path === "/api/servers") return json([{ id: "00000000-0000-0000-0000-000000000001", name: "This machine", kind: "local", status: "online" }]);
-  if (path === "/api/github/status") return json({ oauthConfigured: true, webhookConfigured: true, authenticated: true, tokenValid: true, login: "ci-user", message: "GitHub Device Flow is configured." });
-  if (path === "/api/github/repos") return json([]);
-  if (path === "/api/cloudflare/status") return json({ configured: true, tokenValid: true, baseDomain: "example.test", defaultDomainPattern: "*.example.test", domainPrefix: "hostlet-", tunnelTargetConfigured: true, message: "Cloudflare DNS is configured." });
-  if (path === "/api/system/version") return json({ currentVersion: "0.2.0", updateChecksEnabled: true });
-  if (path === "/api/system/cleanup") return json({ database: {}, docker: { keepContainers: 1, keepImages: 1, jobWillRun: true } });
-  if (path === "/api/system/backups/latest") return json(null);
-  if (path === "/api/agent-jobs" || path === "/api/audit-events") return json([]);
+  if (path in API_FIXTURES) {
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(API_FIXTURES[path]),
+    });
+  }
   return route.fulfill({ status: 404, body: "not mocked" });
 }

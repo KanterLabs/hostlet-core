@@ -36,18 +36,18 @@ pub use dns::cloudflare::cloudflare_status;
 pub use health::{
     app_health, app_health_events, app_resources, check_app_health_now, health_summary,
 };
-pub use jobs::restart_app_container;
-pub use jobs::{agent_job_status, cancel_agent_job, list_agent_jobs, retry_agent_job};
+pub use jobs::{
+    agent_job_status, cancel_agent_job, list_agent_jobs, restart_app_container, retry_agent_job,
+};
 pub use servers::{create_server, list_servers, server_install_command};
 pub use system::{
-    backup_metadata, operator_status, refresh_update_check_if_stale, system_update_check,
-    system_version,
+    backup_metadata, operator_cleanup_preview, operator_run_cleanup, operator_status,
+    refresh_update_check_if_stale, system_update_check, system_version,
 };
-pub use system::{operator_cleanup_preview, operator_run_cleanup};
 
-pub(in crate::web) use app_delete::{app_belongs_to_user, finalize_delete_app_from_job};
 pub(in crate::web) use app_delete::{
-    app_domain_in_use, compensate_failed_app_update_dns, delete_created_app_row,
+    app_belongs_to_user, app_domain_in_use, compensate_failed_app_update_dns,
+    delete_created_app_row, finalize_delete_app_from_job,
 };
 pub(in crate::web) use cleanup::{cleanup_plan, run_cleanup_inner};
 pub(in crate::web) use dns::cloudflare::{delete_cloudflare_app_dns, ensure_cloudflare_app_dns};
@@ -56,12 +56,15 @@ pub(in crate::web) use jobs::enqueue_interactive_agent_job;
 pub(in crate::web) use system::domain_host;
 pub(in crate::web) use validation::*;
 
+/// Payload for creating a new app. Optional fields fall back to runtime/server
+/// defaults when omitted.
 #[derive(Deserialize)]
 pub struct CreateApp {
     name: String,
     repo_full_name: String,
     branch: String,
     server_id: Option<Uuid>,
+    /// Port the container listens on inside its network namespace.
     container_port: i32,
     health_path: String,
     domain: String,
@@ -73,7 +76,9 @@ pub struct CreateApp {
     install_command: Option<String>,
     build_command: Option<String>,
     start_command: Option<String>,
+    /// Hard memory limit in mebibytes; `None` leaves the container unconstrained.
     memory_limit_mb: Option<i32>,
+    /// Fractional CPU core allowance (e.g. `1.5` = one and a half cores).
     cpu_limit: Option<f64>,
     public_exposure: Option<bool>,
     auto_deploy: Option<bool>,
@@ -87,6 +92,10 @@ pub struct EnvVar {
     value: String,
 }
 
+/// Partial update for an existing app. The outer `Option` distinguishes "field
+/// not present in the request" (`None`, leave unchanged) from "field present".
+/// For the command/limit fields the inner `Option` then distinguishes an
+/// explicit clear-to-null (`Some(None)`) from a new value (`Some(Some(v))`).
 #[derive(Deserialize)]
 pub struct UpdateApp {
     domain: Option<String>,
@@ -100,7 +109,9 @@ pub struct UpdateApp {
     build_command: Option<Option<String>>,
     start_command: Option<Option<String>>,
     container_port: Option<i32>,
+    /// Hard memory limit in mebibytes; `Some(None)` clears the limit.
     memory_limit_mb: Option<Option<i32>>,
+    /// Fractional CPU core allowance; `Some(None)` clears the limit.
     cpu_limit: Option<Option<f64>>,
     public_exposure: Option<bool>,
     auto_deploy: Option<bool>,

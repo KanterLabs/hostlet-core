@@ -13,60 +13,83 @@ type App = {
   latestDeployment?: { id: string; status?: string | null; finishedAt?: string | null; startedAt?: string | null } | null;
 };
 
+// Distinct fallback states the page can be in when there are no log rows to show.
+// Each maps to a single user-visible headline rendered in the empty state.
+type LoadState =
+  | { kind: "loading" }
+  | { kind: "empty" }
+  | { kind: "error"; reason: string };
+
+function loadStateHeadline(state: LoadState): string {
+  switch (state.kind) {
+    case "loading":
+      return "Loading deployments...";
+    case "empty":
+      return "No deployment logs yet.";
+    case "error":
+      return `Could not load logs. ${state.reason}`;
+  }
+}
+
 export default function Logs() {
   const [apps, setApps] = useState<App[]>([]);
-  const [message, setMessage] = useState("Loading deployments...");
+  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
 
   useEffect(() => {
     api<App[]>("/api/apps")
       .then((rows) => {
         const withDeploys = rows.filter((app) => app.latestDeployment?.id);
         setApps(withDeploys);
-        setMessage(withDeploys.length ? "" : "No deployment logs yet.");
+        setLoadState({ kind: "empty" });
       })
-      .catch((error) => setMessage(`Could not load logs. ${error instanceof Error ? error.message : "Sign in again."}`));
+      .catch((error) =>
+        setLoadState({
+          kind: "error",
+          reason: error instanceof Error ? error.message : "Sign in again.",
+        }),
+      );
   }, []);
 
   return (
     <AppShell>
-          <PageHeader
-            eyebrow="Deployments"
-            title="Logs"
-            description="Jump into the latest deployment output for each self-hosted app."
-            actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
-          />
+      <PageHeader
+        eyebrow="Deployments"
+        title="Logs"
+        description="Jump into the latest deployment output for each self-hosted app."
+        actions={<Link className="button" href="/apps/new"><Plus size={16} />Create app</Link>}
+      />
 
-          {apps.length > 0 ? (
-            <div className="grid gap-4">
-              {apps.map((app) => (
-                <Panel key={app.id} className="transition hover:border-action">
-                  <Link href={`/deployments/${app.latestDeployment?.id}`} className="block">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <ScrollText size={18} />
-                        <div className="truncate text-lg font-semibold">{app.name}</div>
-                      </div>
-                      <p className="muted mt-1 truncate">{app.repoFullName}</p>
+      {apps.length > 0 ? (
+        <div className="grid gap-4">
+          {apps.map((app) => (
+            <Panel key={app.id} className="transition hover:border-action">
+              <Link href={`/deployments/${app.latestDeployment?.id}`} className="block">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <ScrollText size={18} />
+                      <div className="truncate text-lg font-semibold">{app.name}</div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <StatusPill status={app.latestDeployment?.status || "unknown"} />
-                      <span className="text-sm text-muted">{formatTime(app.latestDeployment?.finishedAt || app.latestDeployment?.startedAt)}</span>
-                    </div>
+                    <p className="muted mt-1 truncate">{app.repoFullName}</p>
                   </div>
-                  </Link>
-                </Panel>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              icon={ScrollText}
-              title={message}
-              description="Deploy an app on this machine to generate build, health check, routing, and runtime logs."
-              actionHref="/apps"
-              actionLabel="View apps"
-            />
-          )}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <StatusPill status={app.latestDeployment?.status || "unknown"} />
+                    <span className="text-sm text-muted">{formatTime(app.latestDeployment?.finishedAt || app.latestDeployment?.startedAt)}</span>
+                  </div>
+                </div>
+              </Link>
+            </Panel>
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={ScrollText}
+          title={loadStateHeadline(loadState)}
+          description="Deploy an app on this machine to generate build, health check, routing, and runtime logs."
+          actionHref="/apps"
+          actionLabel="View apps"
+        />
+      )}
     </AppShell>
   );
 }

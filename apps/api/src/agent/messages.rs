@@ -1,109 +1,181 @@
 use super::*;
 
+/// Max bytes retained from a single deployment log line before truncation.
+const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
+/// Cap on stored log lines per deployment to bound table growth.
+const MAX_LOG_LINES_PER_DEPLOYMENT: i64 = 20_000;
+/// Cap on retained health events per app (older rows are pruned).
+const MAX_HEALTH_EVENTS_PER_APP: i64 = 500;
+
+/// Valid TCP port range for an agent-published container port.
+const PORT_RANGE: std::ops::RangeInclusive<i64> = 1..=65_535;
+/// Plausible HTTP status codes reported by a health probe.
+const HTTP_STATUS_RANGE: std::ops::RangeInclusive<i64> = 100..=599;
+/// Upper bound on a reported probe latency, in milliseconds (5 minutes).
+const LATENCY_MS_RANGE: std::ops::RangeInclusive<i64> = 0..=300_000;
+/// Sanity cap on reported consecutive success/failure counters.
+const HEALTH_COUNTER_RANGE: std::ops::RangeInclusive<i64> = 0..=1_000_000;
+/// Max characters kept from short resource-stat fields (e.g. "12.3%").
+const RESOURCE_STAT_MAX_CHARS: usize = 128;
+/// Max characters kept from free-form health text (checked URL, error).
+const HEALTH_TEXT_MAX_CHARS: usize = 512;
+
+/// Parse a UUID-valued field from an agent message.
+fn msg_uuid(msg: &serde_json::Value, key: &str) -> Option<Uuid> {
+    msg.get(key)
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+}
+
+/// Read an integer field and accept it only when it falls inside `range`,
+/// returning it narrowed to `i32` for binding to the DB.
+fn bounded_i32(
+    msg: &serde_json::Value,
+    key: &str,
+    range: std::ops::RangeInclusive<i64>,
+) -> Option<i32> {
+    msg.get(key)
+        .and_then(|v| v.as_i64())
+        .and_then(|v| range.contains(&v).then_some(v as i32))
+}
+
+/// Read a string field and truncate it to at most `max_chars` characters.
+fn capped_str(msg: &serde_json::Value, key: &str, max_chars: usize) -> Option<String> {
+    msg.get(key)
+        .and_then(|v| v.as_str())
+        .map(|value| value.chars().take(max_chars).collect())
+}
+
 pub(in crate::agent) async fn handle_agent_message(
     state: &AppState,
     server_id: Uuid,
     msg: serde_json::Value,
 ) {
     match msg.get("type").and_then(|v| v.as_str()) {
-        Some("heartbeat") => {
-            let _ =
-                sqlx::query("UPDATE servers SET status='online', last_seen_at=now() WHERE id=$1")
-                    .bind(server_id)
-                    .execute(&state.db)
-                    .await;
-        }
-        Some("deployment_status") => {
-            if let (Some(id), Some(status)) = (
-                msg.get("deployment_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|v| Uuid::parse_str(v).ok()),
-                msg.get("status").and_then(|v| v.as_str()),
-            ) {
-                if !valid_deployment_status(status) {
-                    return;
-                }
-                let updated = sqlx::query("UPDATE deployments SET status=$1, image_tag=COALESCE($2,image_tag), container_name=COALESCE($3,container_name), published_port=COALESCE($4,published_port), failure_summary=$5, compose_project=COALESCE($6,compose_project), runtime_metadata=CASE WHEN $7::jsonb IS NULL THEN runtime_metadata ELSE $7::jsonb END, finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END WHERE id=$8 AND server_id=$9")
-                    .bind(status)
-                    .bind(msg.get("image_tag").and_then(|v| v.as_str()))
-                    .bind(msg.get("container_name").and_then(|v| v.as_str()))
-                    .bind(msg.get("published_port").and_then(|v| v.as_i64()).and_then(|v| {
-                        (1..=65_535).contains(&v).then_some(v as i32)
-                    }))
-                    .bind(msg.get("failure").and_then(|v| v.as_str()))
-                    .bind(msg.get("compose_project").and_then(|v| v.as_str()))
-                    .bind(msg.get("runtime_metadata").cloned())
-                    .bind(id)
-                    .bind(server_id)
-                    .execute(&state.db).await
-                    .map(|done| done.rows_affected())
-                    .unwrap_or(0);
-                if matches!(status, "success" | "rolled_back") && updated == 1 {
-                    let _ = sqlx::query("UPDATE apps SET current_deployment_id=$1, domain=COALESCE($2, domain) WHERE id=(SELECT app_id FROM deployments WHERE id=$1)")
-                        .bind(id)
-                        .bind(msg.get("local_url").and_then(|v| v.as_str()))
-                        .execute(&state.db)
-                        .await;
-                }
-            }
-        }
-        Some("log") => {
-            if let (Some(id), Some(line)) = (
-                msg.get("deployment_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|v| Uuid::parse_str(v).ok()),
-                msg.get("line").and_then(|v| v.as_str()),
-            ) {
-                let stream = msg
-                    .get("stream")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("stdout");
-                if !matches!(stream, "stdout" | "stderr" | "git" | "docker" | "caddy") {
-                    return;
-                }
-                let line = truncate_log_line(line, MAX_LOG_LINE_BYTES);
-                let inserted = sqlx::query(
-                    "INSERT INTO deployment_logs (deployment_id,stream,line)
+        Some("heartbeat") => handle_heartbeat(state, server_id).await,
+        Some("deployment_status") => handle_deployment_status(state, server_id, &msg).await,
+        Some("log") => handle_log(state, server_id, &msg).await,
+        Some("resource_stats") => handle_resource_stats(state, &msg).await,
+        Some("health_status") => handle_health_status(state, server_id, &msg).await,
+        Some("job_status") => handle_job_status(state, server_id, &msg).await,
+        _ => {}
+    }
+}
+
+async fn handle_heartbeat(state: &AppState, server_id: Uuid) {
+    let _ = sqlx::query("UPDATE servers SET status='online', last_seen_at=now() WHERE id=$1")
+        .bind(server_id)
+        .execute(&state.db)
+        .await;
+}
+
+async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+    let (Some(id), Some(status)) = (
+        msg_uuid(msg, "deployment_id"),
+        msg.get("status").and_then(|v| v.as_str()),
+    ) else {
+        return;
+    };
+    if !valid_deployment_status(status) {
+        return;
+    }
+    // Update the deployment in place: COALESCE keeps existing columns when the
+    // agent omits a field, runtime_metadata is replaced only when supplied, and
+    // finished_at is stamped once the deployment reaches a terminal status.
+    let updated = sqlx::query(
+        "UPDATE deployments SET \
+         status=$1, \
+         image_tag=COALESCE($2,image_tag), \
+         container_name=COALESCE($3,container_name), \
+         published_port=COALESCE($4,published_port), \
+         failure_summary=$5, \
+         compose_project=COALESCE($6,compose_project), \
+         runtime_metadata=CASE WHEN $7::jsonb IS NULL THEN runtime_metadata ELSE $7::jsonb END, \
+         finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END \
+         WHERE id=$8 AND server_id=$9",
+    )
+    .bind(status)
+    .bind(msg.get("image_tag").and_then(|v| v.as_str()))
+    .bind(msg.get("container_name").and_then(|v| v.as_str()))
+    .bind(bounded_i32(msg, "published_port", PORT_RANGE))
+    .bind(msg.get("failure").and_then(|v| v.as_str()))
+    .bind(msg.get("compose_project").and_then(|v| v.as_str()))
+    .bind(msg.get("runtime_metadata").cloned())
+    .bind(id)
+    .bind(server_id)
+    .execute(&state.db)
+    .await
+    .map(|done| done.rows_affected())
+    .unwrap_or(0);
+    if matches!(status, "success" | "rolled_back") && updated == 1 {
+        let _ = sqlx::query("UPDATE apps SET current_deployment_id=$1, domain=COALESCE($2, domain) WHERE id=(SELECT app_id FROM deployments WHERE id=$1)")
+            .bind(id)
+            .bind(msg.get("local_url").and_then(|v| v.as_str()))
+            .execute(&state.db)
+            .await;
+    }
+}
+
+async fn handle_log(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+    let (Some(id), Some(line)) = (
+        msg_uuid(msg, "deployment_id"),
+        msg.get("line").and_then(|v| v.as_str()),
+    ) else {
+        return;
+    };
+    let stream = msg
+        .get("stream")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stdout");
+    if !matches!(stream, "stdout" | "stderr" | "git" | "docker" | "caddy") {
+        return;
+    }
+    let line = truncate_log_line(line, MAX_LOG_LINE_BYTES);
+    // Insert only if the deployment belongs to this server and the per-deployment
+    // log cap has not been reached; the row count tells us whether it was stored.
+    let inserted = sqlx::query(
+        "INSERT INTO deployment_logs (deployment_id,stream,line)
                      SELECT $1,$2,$3
                      WHERE EXISTS (SELECT 1 FROM deployments WHERE id=$1 AND server_id=$4)
                        AND (SELECT count(*) FROM deployment_logs WHERE deployment_id=$1) < $5",
-                )
-                .bind(id)
-                .bind(stream)
-                .bind(&line)
-                .bind(server_id)
-                .bind(MAX_LOG_LINES_PER_DEPLOYMENT)
-                .execute(&state.db)
-                .await
-                .map(|done| done.rows_affected())
-                .unwrap_or(0);
-                if inserted == 0 {
-                    return;
-                }
-                let _ = state.logs.send(crate::state::LogEvent {
-                    deployment_id: id,
-                    stream: stream.into(),
-                    line,
-                });
-            }
-        }
-        Some("resource_stats") => {
-            let Some(container) = msg.get("container").and_then(|v| v.as_str()) else {
-                return;
-            };
-            if !valid_container_name(container) {
-                return;
-            }
-            let value = |key: &str, default: &str| {
-                msg.get(key)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(default)
-                    .chars()
-                    .take(128)
-                    .collect::<String>()
-            };
-            let _ = sqlx::query(
-                r#"
+    )
+    .bind(id)
+    .bind(stream)
+    .bind(&line)
+    .bind(server_id)
+    .bind(MAX_LOG_LINES_PER_DEPLOYMENT)
+    .execute(&state.db)
+    .await
+    .map(|done| done.rows_affected())
+    .unwrap_or(0);
+    if inserted == 0 {
+        return;
+    }
+    let _ = state.logs.send(crate::state::LogEvent {
+        deployment_id: id,
+        stream: stream.into(),
+        line,
+    });
+}
+
+async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
+    let Some(container) = msg.get("container").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if !valid_container_name(container) {
+        return;
+    }
+    let value = |key: &str, default: &str| {
+        msg.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or(default)
+            .chars()
+            .take(RESOURCE_STAT_MAX_CHARS)
+            .collect::<String>()
+    };
+    // Keep the latest sample per container (upsert keyed on container_name).
+    let _ = sqlx::query(
+        r#"
                 INSERT INTO app_resource_snapshots
                   (container_name,cpu_percent,memory_usage,memory_percent,network_io,block_io,pids,sampled_at)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,now())
@@ -116,67 +188,44 @@ pub(in crate::agent) async fn handle_agent_message(
                   pids=EXCLUDED.pids,
                   sampled_at=EXCLUDED.sampled_at
                 "#,
-            )
-            .bind(container)
-            .bind(value("cpuPercent", "0%"))
-            .bind(value("memoryUsage", "0B / 0B"))
-            .bind(value("memoryPercent", "0%"))
-            .bind(value("networkIo", "0B / 0B"))
-            .bind(value("blockIo", "0B / 0B"))
-            .bind(value("pids", "0"))
-            .execute(&state.db)
-            .await;
-        }
-        Some("health_status") => {
-            let Some(app_id) = msg
-                .get("app_id")
-                .and_then(|v| v.as_str())
-                .and_then(|v| Uuid::parse_str(v).ok())
-            else {
-                return;
-            };
-            let Some(status) = msg.get("status").and_then(|v| v.as_str()) else {
-                return;
-            };
-            if !valid_health_status(status) {
-                return;
-            }
-            let deployment_id = msg
-                .get("deployment_id")
-                .and_then(|v| v.as_str())
-                .and_then(|v| Uuid::parse_str(v).ok());
-            let container = msg.get("container_name").and_then(|v| v.as_str());
-            if container.is_some_and(|value| !valid_container_name(value)) {
-                return;
-            }
-            let http_status = msg
-                .get("http_status")
-                .and_then(|v| v.as_i64())
-                .and_then(|v| (100..=599).contains(&v).then_some(v as i32));
-            let latency_ms = msg
-                .get("latency_ms")
-                .and_then(|v| v.as_i64())
-                .and_then(|v| (0..=300_000).contains(&v).then_some(v as i32));
-            let failure_count = msg
-                .get("failure_count")
-                .and_then(|v| v.as_i64())
-                .and_then(|v| (0..=1_000_000).contains(&v).then_some(v as i32))
-                .unwrap_or(0);
-            let success_count = msg
-                .get("success_count")
-                .and_then(|v| v.as_i64())
-                .and_then(|v| (0..=1_000_000).contains(&v).then_some(v as i32))
-                .unwrap_or(0);
-            let checked_url = msg
-                .get("checked_url")
-                .and_then(|v| v.as_str())
-                .map(|value| value.chars().take(512).collect::<String>());
-            let error = msg
-                .get("error")
-                .and_then(|v| v.as_str())
-                .map(|value| value.chars().take(512).collect::<String>());
-            let updated = sqlx::query(
-                r#"
+    )
+    .bind(container)
+    .bind(value("cpuPercent", "0%"))
+    .bind(value("memoryUsage", "0B / 0B"))
+    .bind(value("memoryPercent", "0%"))
+    .bind(value("networkIo", "0B / 0B"))
+    .bind(value("blockIo", "0B / 0B"))
+    .bind(value("pids", "0"))
+    .execute(&state.db)
+    .await;
+}
+
+async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+    let Some(app_id) = msg_uuid(msg, "app_id") else {
+        return;
+    };
+    let Some(status) = msg.get("status").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if !valid_health_status(status) {
+        return;
+    }
+    let deployment_id = msg_uuid(msg, "deployment_id");
+    let container = msg.get("container_name").and_then(|v| v.as_str());
+    if container.is_some_and(|value| !valid_container_name(value)) {
+        return;
+    }
+    let http_status = bounded_i32(msg, "http_status", HTTP_STATUS_RANGE);
+    let latency_ms = bounded_i32(msg, "latency_ms", LATENCY_MS_RANGE);
+    let failure_count = bounded_i32(msg, "failure_count", HEALTH_COUNTER_RANGE).unwrap_or(0);
+    let success_count = bounded_i32(msg, "success_count", HEALTH_COUNTER_RANGE).unwrap_or(0);
+    let checked_url = capped_str(msg, "checked_url", HEALTH_TEXT_MAX_CHARS);
+    let error = capped_str(msg, "error", HEALTH_TEXT_MAX_CHARS);
+    // Upsert the latest health snapshot for the app (one row per app_id), but only
+    // when the app belongs to this server. last_healthy_at advances only on a
+    // 'healthy' status and is otherwise preserved.
+    let updated = sqlx::query(
+        r#"
                 INSERT INTO app_health_snapshots
                   (app_id,deployment_id,container_name,status,checked_url,http_status,latency_ms,
                    failure_count,success_count,last_error,last_checked_at,last_healthy_at,updated_at)
@@ -201,60 +250,60 @@ pub(in crate::agent) async fn handle_agent_message(
                   END,
                   updated_at=EXCLUDED.updated_at
                 "#,
-            )
-            .bind(app_id)
-            .bind(deployment_id)
-            .bind(container)
-            .bind(status)
-            .bind(checked_url.as_deref())
-            .bind(http_status)
-            .bind(latency_ms)
-            .bind(failure_count)
-            .bind(success_count)
-            .bind(error.as_deref())
-            .bind(server_id)
-            .execute(&state.db)
-            .await
-            .map(|done| done.rows_affected())
-            .unwrap_or(0);
-            if updated == 0 {
-                return;
-            }
-            let _ = sqlx::query(
-                r#"
+    )
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(container)
+    .bind(status)
+    .bind(checked_url.as_deref())
+    .bind(http_status)
+    .bind(latency_ms)
+    .bind(failure_count)
+    .bind(success_count)
+    .bind(error.as_deref())
+    .bind(server_id)
+    .execute(&state.db)
+    .await
+    .map(|done| done.rows_affected())
+    .unwrap_or(0);
+    if updated == 0 {
+        return;
+    }
+    // Append an immutable history event, then trim the per-app event log.
+    let _ = sqlx::query(
+        r#"
                 INSERT INTO app_health_events
                   (app_id,deployment_id,container_name,status,checked_url,http_status,latency_ms,error)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                 "#,
-            )
-            .bind(app_id)
-            .bind(deployment_id)
-            .bind(container)
-            .bind(status)
-            .bind(checked_url.as_deref())
-            .bind(http_status)
-            .bind(latency_ms)
-            .bind(error.as_deref())
-            .execute(&state.db)
-            .await;
-            prune_health_events(state, app_id).await;
-        }
-        Some("job_status") => {
-            let Some(job_id) = msg
-                .get("job_id")
-                .and_then(|v| v.as_str())
-                .and_then(|v| Uuid::parse_str(v).ok())
-            else {
-                return;
-            };
-            let Some(status) = msg.get("status").and_then(|v| v.as_str()) else {
-                return;
-            };
-            if !valid_agent_job_status(status) {
-                return;
-            }
-            let _ = sqlx::query(
-                "UPDATE agent_jobs
+    )
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(container)
+    .bind(status)
+    .bind(checked_url.as_deref())
+    .bind(http_status)
+    .bind(latency_ms)
+    .bind(error.as_deref())
+    .execute(&state.db)
+    .await;
+    prune_health_events(state, app_id).await;
+}
+
+async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+    let Some(job_id) = msg_uuid(msg, "job_id") else {
+        return;
+    };
+    let Some(status) = msg.get("status").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if !valid_agent_job_status(status) {
+        return;
+    }
+    // Refresh the lease on active statuses, clear it on terminal ones, and stamp
+    // finished_at when the job ends.
+    let _ = sqlx::query(
+        "UPDATE agent_jobs
                  SET status=$1,
                      failure_summary=$2,
                      updated_at=now(),
@@ -265,16 +314,13 @@ pub(in crate::agent) async fn handle_agent_message(
                      END,
                      finished_at=CASE WHEN $1 IN ('success','failed') THEN now() ELSE finished_at END
                  WHERE id=$3 AND server_id=$4",
-            )
-            .bind(status)
-            .bind(msg.get("failure").and_then(|v| v.as_str()))
-            .bind(job_id)
-            .bind(server_id)
-            .execute(&state.db)
-            .await;
-        }
-        _ => {}
-    }
+    )
+    .bind(status)
+    .bind(msg.get("failure").and_then(|v| v.as_str()))
+    .bind(job_id)
+    .bind(server_id)
+    .execute(&state.db)
+    .await;
 }
 
 pub(in crate::agent) async fn prune_health_events(state: &AppState, app_id: Uuid) {

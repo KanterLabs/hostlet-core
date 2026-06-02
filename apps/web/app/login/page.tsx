@@ -5,13 +5,13 @@ import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
 import { TerminalSquare } from "lucide-react";
 import { useEffect, useState } from "react";
 import { IconFrame, Notice, Panel } from "@/components/ui";
+import { loginErrorFromParams } from "./loginError";
 
 export default function Login() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    setError(params.get("error") || "");
+    setError(loginErrorFromParams(window.location.search));
   }, []);
 
   return (

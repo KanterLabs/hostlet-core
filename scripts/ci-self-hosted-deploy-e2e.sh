@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/ci-self-hosted-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 TMP_DIR="$(mktemp -d "/tmp/hostlet-self-deploy-${RUN_ID}.XXXXXX")"
 POSTGRES_CONTAINER="hostlet-ci-self-deploy-postgres-${RUN_ID}"
@@ -35,35 +37,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-json_get() {
-  node -e "let s=''; process.stdin.on('data', d => s += d); process.stdin.on('end', () => { const path = process.argv[1].split('.'); let v = JSON.parse(s); for (const key of path) v = v?.[key]; if (v === undefined || v === null) process.exit(2); process.stdout.write(String(v)); });" "$1"
-}
+# json_get, signed_cookie, expect_status, and the Postgres/env bootstrap helpers
+# are shared with ci-self-hosted-api-smoke.sh; see ci-self-hosted-lib.sh.
 
-signed_cookie() {
-  node -e '
-    const crypto = require("crypto");
-    const secret = process.argv[1];
-    const value = process.argv[2];
-    const payload = Buffer.from(value).toString("base64url");
-    const expires = Math.floor(Date.now() / 1000) + 3600;
-    const data = `v2.${payload}.${expires}`;
-    const sig = "sha256=" + crypto.createHmac("sha256", secret).update(data).digest("hex");
-    process.stdout.write(`${data}.${sig}`);
-  ' "${SESSION_SECRET}" "$1"
-}
-
-expect_status() {
-  local expected="$1"
-  shift
-  local actual
-  actual="$(curl -sS -o "${TMP_DIR}/response.txt" -w "%{http_code}" "$@")"
-  if [ "${actual}" != "${expected}" ]; then
-    echo "Expected HTTP ${expected}, got ${actual}: $*" >&2
-    cat "${TMP_DIR}/response.txt" >&2 || true
-    exit 1
-  fi
-}
-
+# wait_deployment_status <deployment_id>: poll a deployment (up to ~180 * 2s)
+# until it reaches a success/rolled_back terminal state; on `failed` dump the
+# deployment logs plus the agent and API logs before failing.
 wait_deployment_status() {
   local deployment_id="$1"
   local status=""
@@ -91,6 +70,8 @@ wait_deployment_status() {
   return 1
 }
 
+# wait_job_status <job_id>: poll an agent job (up to ~90 * 2s) until it reaches
+# `success`; on `failed`/`canceled` print the job payload and agent log tail.
 wait_job_status() {
   local job_id="$1"
   local status=""
@@ -161,45 +142,20 @@ EOF
 EOF
 }
 
-docker run -d --name "${POSTGRES_CONTAINER}" \
-  -e POSTGRES_USER=hostlet \
-  -e POSTGRES_PASSWORD=ci-only-not-a-secret-postgres \
-  -e POSTGRES_DB=hostlet \
-  -p 127.0.0.1::5432 \
-  postgres:16-alpine >/dev/null
-
-for _ in $(seq 1 60); do
-  if docker exec "${POSTGRES_CONTAINER}" pg_isready -U hostlet -d hostlet >/dev/null 2>&1 &&
-    docker exec "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet -c 'select 1' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-POSTGRES_PORT="$(docker port "${POSTGRES_CONTAINER}" 5432/tcp | sed 's/.*://')"
-if [ -z "${POSTGRES_PORT}" ]; then
-  echo "Could not discover mapped Postgres port" >&2
-  exit 1
-fi
+# ---------------------------------------------------------------------------
+# Bring up Postgres and the git fixture repo.
+# ---------------------------------------------------------------------------
+start_postgres_container postgres:16-alpine
+wait_postgres_ready
+POSTGRES_PORT="$(discover_postgres_port)"
 
 make_fixture_repo
 
-export HOSTLET_MODE=self_hosted
-export DATABASE_URL="postgres://hostlet:ci-only-not-a-secret-postgres@127.0.0.1:${POSTGRES_PORT}/hostlet"
-export BIND_ADDR="127.0.0.1:${API_PORT}"
-export PUBLIC_API_URL="http://127.0.0.1:${API_PORT}"
-export PUBLIC_WEB_URL="http://127.0.0.1:3000"
-export PUBLIC_WEBHOOK_URL="http://127.0.0.1:${API_PORT}"
-export HOSTLET_ALLOWED_WEB_ORIGINS="http://127.0.0.1:3000"
-export HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS=false
-export HOSTLET_SETUP_TOKEN=ci-only-not-a-secret-setup-token-01
-export HOSTLET_ALLOWED_GITHUB_LOGINS=ci-user
-export ENCRYPTION_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
-export JOB_SIGNING_SECRET=ci-only-not-a-secret-job-signing-01
-export SESSION_SECRET=ci-only-not-a-secret-session-secret-01
-export LOCAL_AGENT_TOKEN=ci-only-not-a-secret-agent-token-01
-export GITHUB_WEBHOOK_SECRET=ci-only-not-a-secret-webhook-secret-01
-export HOSTLET_UPDATE_CHECKS=false
+# ---------------------------------------------------------------------------
+# Environment: shared self-hosted API config plus the agent-side config this
+# E2E adds on top (agent token, job-signing secret, workdir, local mode).
+# ---------------------------------------------------------------------------
+export_self_hosted_env "${POSTGRES_PORT}" "${API_PORT}"
 export HOSTLET_API_URL="http://127.0.0.1:${API_PORT}"
 export HOSTLET_SERVER_ID="00000000-0000-0000-0000-000000000001"
 export HOSTLET_AGENT_TOKEN="${LOCAL_AGENT_TOKEN}"
@@ -216,6 +172,10 @@ API_PID="$!"
 
 BASE_URL="http://127.0.0.1:${API_PORT}"
 ORIGIN="http://127.0.0.1:3000"
+# Header building blocks for state-changing requests: ORIGIN_CSRF is the origin +
+# CSRF guard pair, JSON_CT adds the JSON content-type for requests with a body.
+ORIGIN_CSRF=(-H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1")
+JSON_CT=(-H "content-type: application/json")
 for _ in $(seq 1 90); do
   if curl -fsS "${BASE_URL}/health" >/dev/null 2>&1; then
     break
@@ -227,7 +187,21 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 
-expect_status 204 -c "${COOKIE_JAR}" -X POST "${BASE_URL}/api/setup" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -H "x-hostlet-setup-token: ${HOSTLET_SETUP_TOKEN}" --data '{"password":"ci-self-hosted-password"}'
+# published_app_serves <expected-substring>: read the app's current published
+# port and assert the running container serves a body containing the substring.
+# Used to confirm which app version is live after deploy/redeploy/rollback.
+published_app_serves() {
+  local expected="$1"
+  local detail port
+  detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+  port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
+  curl -fsS "http://127.0.0.1:${port}/" | grep -q "${expected}"
+}
+
+# ---------------------------------------------------------------------------
+# First-run setup + authenticate a CI user.
+# ---------------------------------------------------------------------------
+expect_status 204 -c "${COOKIE_JAR}" -X POST "${BASE_URL}/api/setup" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -H "x-hostlet-setup-token: ${HOSTLET_SETUP_TOKEN}" --data '{"password":"ci-self-hosted-password"}'
 
 user_id="00000000-0000-0000-0000-000000000101"
 docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
@@ -236,6 +210,9 @@ SQL
 unlock_cookie="$(awk '$6 == "hostlet_unlock" { print $7 }' "${COOKIE_JAR}" | tail -1)"
 AUTH_COOKIE="hostlet_unlock=${unlock_cookie}; hostlet_session=$(signed_cookie "${user_id}")"
 
+# ---------------------------------------------------------------------------
+# Start the agent and wait for it to register online.
+# ---------------------------------------------------------------------------
 cargo run -p hostlet-agent >"${AGENT_LOG}" 2>&1 &
 AGENT_PID="$!"
 
@@ -271,11 +248,18 @@ create_payload="$(cat <<JSON
 }
 JSON
 )"
-app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps" --data "${create_payload}")"
+# ---------------------------------------------------------------------------
+# Create the app.
+# ---------------------------------------------------------------------------
+app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps" --data "${create_payload}")"
 app_id="$(printf '%s' "${app_payload}" | json_get id)"
 CREATED_APP_ID="${app_id}"
 
-deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+# ---------------------------------------------------------------------------
+# Deploy v1: container comes up healthy, serves v1, logs redact the secret, and
+# the published port is bound to loopback only.
+# ---------------------------------------------------------------------------
+deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
 deployment_id="$(printf '%s' "${deploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${deployment_id}"
 
@@ -292,30 +276,39 @@ if printf '%s' "${logs_payload}" | grep -q 'secret-value-for-redaction'; then
 fi
 docker ps --filter "name=hostlet-app-${CREATED_APP_ID}" --format '{{.Ports}}' | grep -q '127.0.0.1'
 
-expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PUT "${BASE_URL}/api/apps/${app_id}/env/APP_VERSION" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' --data '{"value":"v2"}'
-redeploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+# ---------------------------------------------------------------------------
+# Redeploy v2: bumping APP_VERSION and redeploying serves v2 (data volume keeps
+# the original v1 marker).
+# ---------------------------------------------------------------------------
+expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PUT "${BASE_URL}/api/apps/${app_id}/env/APP_VERSION" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"value":"v2"}'
+redeploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
 redeploy_id="$(printf '%s' "${redeploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${redeploy_id}"
-app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
-curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v2-v1'
+published_app_serves 'hostlet-ci-v2-v1'
 
-rollback_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -X POST "${BASE_URL}/api/apps/${app_id}/rollback" --data '{}')"
+# ---------------------------------------------------------------------------
+# Rollback: reverts to the v1 image.
+# ---------------------------------------------------------------------------
+rollback_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/rollback" --data '{}')"
 rollback_id="$(printf '%s' "${rollback_payload}" | json_get rollbackDeploymentId)"
 wait_deployment_status "${rollback_id}"
-app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
-curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
+published_app_serves 'hostlet-ci-v1-v1'
 
-restart_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps/${app_id}/restart" --data '{}')"
+# ---------------------------------------------------------------------------
+# Restart + on-demand health check: both run as agent jobs that succeed.
+# ---------------------------------------------------------------------------
+restart_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/restart" --data '{}')"
 restart_job="$(printf '%s' "${restart_payload}" | json_get jobId)"
 wait_job_status "${restart_job}"
 
-health_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X POST "${BASE_URL}/api/apps/${app_id}/health/check-now" --data '{}')"
+health_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/health/check-now" --data '{}')"
 health_job="$(printf '%s' "${health_payload}" | json_get jobId)"
 wait_job_status "${health_job}"
 
-delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" -H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1" -H 'content-type: application/json' -X DELETE "${BASE_URL}/api/apps/${app_id}")"
+# ---------------------------------------------------------------------------
+# Delete: the teardown job completes and the app 404s afterward.
+# ---------------------------------------------------------------------------
+delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${app_id}")"
 delete_job="$(printf '%s' "${delete_payload}" | json_get jobId)"
 wait_job_status "${delete_job}"
 expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}"

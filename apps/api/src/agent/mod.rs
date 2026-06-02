@@ -18,10 +18,6 @@ use sqlx::Row;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
-const MAX_LOG_LINES_PER_DEPLOYMENT: i64 = 20_000;
-const MAX_HEALTH_EVENTS_PER_APP: i64 = 500;
-
 mod auth;
 mod messages;
 mod routes;

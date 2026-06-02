@@ -1,15 +1,13 @@
+use super::apps::request_context_or_response;
 use super::*;
 
 pub async fn cleanup_preview(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let user_id = match request_context(&headers, &state).await {
+    let user_id = match request_context_or_response(&headers, &state).await {
         Ok(context) => context.user_id,
-        Err(err) if err.to_string() == "sign in required" => {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
+        Err(response) => return response,
     };
     match cleanup_plan(&state, user_id).await {
         Ok(plan) => Json(plan).into_response(),
@@ -21,12 +19,9 @@ pub async fn cleanup_preview(
 }
 
 pub async fn run_cleanup(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let context = match request_context(&headers, &state).await {
+    let context = match request_context_or_response(&headers, &state).await {
         Ok(context) => context,
-        Err(err) if err.to_string() == "sign in required" => {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
+        Err(response) => return response,
     };
     run_cleanup_inner(&state, Some(context.user_id)).await
 }
@@ -167,12 +162,12 @@ pub(in crate::web) async fn cleanup_plan(
     _user_id: Uuid,
 ) -> anyhow::Result<CleanupPlan> {
     let database = CleanupDatabasePreview {
-        deployment_logs: cleanup_count(state, CLEANUP_DEPLOYMENT_LOGS).await?,
-        health_events: cleanup_count(state, CLEANUP_HEALTH_EVENTS).await?,
-        resource_snapshots: cleanup_count(state, CLEANUP_RESOURCE_SNAPSHOTS).await?,
-        webhook_events: cleanup_count(state, CLEANUP_WEBHOOK_EVENTS).await?,
-        completed_agent_jobs: cleanup_count(state, CLEANUP_COMPLETED_AGENT_JOBS).await?,
-        failed_agent_jobs: cleanup_count(state, CLEANUP_FAILED_AGENT_JOBS).await?,
+        deployment_logs: cleanup_count(state, &cleanup_deployment_logs_sql()).await?,
+        health_events: cleanup_count(state, &HEALTH_EVENTS_RULE.count_sql()).await?,
+        resource_snapshots: cleanup_count(state, &RESOURCE_SNAPSHOTS_RULE.count_sql()).await?,
+        webhook_events: cleanup_count(state, &WEBHOOK_EVENTS_RULE.count_sql()).await?,
+        completed_agent_jobs: cleanup_count(state, &COMPLETED_AGENT_JOBS_RULE.count_sql()).await?,
+        failed_agent_jobs: cleanup_count(state, &FAILED_AGENT_JOBS_RULE.count_sql()).await?,
     };
     let keep_rows = sqlx::query(
         r#"
@@ -237,20 +232,45 @@ async fn cleanup_delete(state: &AppState, sql: &str) -> anyhow::Result<u64> {
 
 async fn apply_database_cleanup(state: &AppState) -> anyhow::Result<CleanupDatabaseDeleted> {
     Ok(CleanupDatabaseDeleted {
-        deployment_logs: cleanup_delete(state, DELETE_DEPLOYMENT_LOGS).await?,
-        health_events: cleanup_delete(state, DELETE_HEALTH_EVENTS).await?,
-        resource_snapshots: cleanup_delete(state, DELETE_RESOURCE_SNAPSHOTS).await?,
-        webhook_events: cleanup_delete(state, DELETE_WEBHOOK_EVENTS).await?,
-        completed_agent_jobs: cleanup_delete(state, DELETE_COMPLETED_AGENT_JOBS).await?,
-        failed_agent_jobs: cleanup_delete(state, DELETE_FAILED_AGENT_JOBS).await?,
+        deployment_logs: cleanup_delete(state, &delete_deployment_logs_sql()).await?,
+        health_events: cleanup_delete(state, &HEALTH_EVENTS_RULE.delete_sql()).await?,
+        resource_snapshots: cleanup_delete(state, &RESOURCE_SNAPSHOTS_RULE.delete_sql()).await?,
+        webhook_events: cleanup_delete(state, &WEBHOOK_EVENTS_RULE.delete_sql()).await?,
+        completed_agent_jobs: cleanup_delete(state, &COMPLETED_AGENT_JOBS_RULE.delete_sql())
+            .await?,
+        failed_agent_jobs: cleanup_delete(state, &FAILED_AGENT_JOBS_RULE.delete_sql()).await?,
     })
 }
 
-const CLEANUP_DEPLOYMENT_LOGS: &str = r#"
-SELECT count(*)::bigint
-FROM deployment_logs l
-JOIN deployments d ON d.id=l.deployment_id
-WHERE l.created_at < now() - interval '30 days'
+/// A retention rule expressed as a single SQL predicate that selects the rows
+/// to purge from one table. The matching count and delete statements are then
+/// derived from this one definition so a rule change only edits one place.
+struct RetentionRule {
+    /// `FROM`-clause target including its alias, e.g. `app_health_events e`.
+    from: &'static str,
+    /// The shared `WHERE` body identifying the rows to remove.
+    predicate: &'static str,
+}
+
+impl RetentionRule {
+    /// `SELECT count(*)::bigint FROM <from> WHERE <predicate>`.
+    fn count_sql(&self) -> String {
+        format!(
+            "SELECT count(*)::bigint\nFROM {}\nWHERE {}\n",
+            self.from, self.predicate
+        )
+    }
+
+    /// `DELETE FROM <from> WHERE <predicate>`.
+    fn delete_sql(&self) -> String {
+        format!("DELETE FROM {}\nWHERE {}\n", self.from, self.predicate)
+    }
+}
+
+/// Deployment-log retention cannot share one `from`/`predicate` because the
+/// count uses a `JOIN` while the delete uses `USING`; the shared `WHERE` body
+/// still lives in one place.
+const DEPLOYMENT_LOGS_PREDICATE: &str = r#"l.created_at < now() - interval '30 days'
   AND d.id NOT IN (
     SELECT id FROM (
       SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
@@ -260,103 +280,54 @@ WHERE l.created_at < now() - interval '30 days'
   AND NOT EXISTS (
     SELECT 1 FROM agent_jobs j
     WHERE j.deployment_id=d.id AND j.status IN ('queued','claimed','running')
-  )
-"#;
+  )"#;
 
-const DELETE_DEPLOYMENT_LOGS: &str = r#"
-DELETE FROM deployment_logs l
-USING deployments d
-WHERE d.id=l.deployment_id
-  AND l.created_at < now() - interval '30 days'
-  AND d.id NOT IN (
-    SELECT id FROM (
-      SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
-      FROM deployments
-    ) ranked WHERE rn <= 20
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM agent_jobs j
-    WHERE j.deployment_id=d.id AND j.status IN ('queued','claimed','running')
-  )
-"#;
+fn cleanup_deployment_logs_sql() -> String {
+    format!(
+        "SELECT count(*)::bigint\nFROM deployment_logs l\nJOIN deployments d ON d.id=l.deployment_id\nWHERE {DEPLOYMENT_LOGS_PREDICATE}\n"
+    )
+}
 
-const CLEANUP_HEALTH_EVENTS: &str = r#"
-SELECT count(*)::bigint
-FROM app_health_events e
-WHERE e.created_at < now() - interval '7 days'
+fn delete_deployment_logs_sql() -> String {
+    format!(
+        "DELETE FROM deployment_logs l\nUSING deployments d\nWHERE d.id=l.deployment_id\n  AND {DEPLOYMENT_LOGS_PREDICATE}\n"
+    )
+}
+
+const HEALTH_EVENTS_RULE: RetentionRule = RetentionRule {
+    from: "app_health_events e",
+    predicate: r#"e.created_at < now() - interval '7 days'
    OR e.id IN (
       SELECT id FROM (
         SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
         FROM app_health_events
       ) ranked WHERE rn > 500
-   )
-"#;
+   )"#,
+};
 
-const DELETE_HEALTH_EVENTS: &str = r#"
-DELETE FROM app_health_events e
-WHERE e.created_at < now() - interval '7 days'
-   OR e.id IN (
-      SELECT id FROM (
-        SELECT id,row_number() OVER (PARTITION BY app_id ORDER BY created_at DESC) AS rn
-        FROM app_health_events
-      ) ranked WHERE rn > 500
-   )
-"#;
-
-const CLEANUP_RESOURCE_SNAPSHOTS: &str = r#"
-SELECT count(*)::bigint
-FROM app_resource_snapshots s
-WHERE s.sampled_at < now() - interval '7 days'
+const RESOURCE_SNAPSHOTS_RULE: RetentionRule = RetentionRule {
+    from: "app_resource_snapshots s",
+    predicate: r#"s.sampled_at < now() - interval '7 days'
   AND NOT EXISTS (
     SELECT 1 FROM deployments d
     JOIN apps a ON a.current_deployment_id=d.id
     WHERE d.container_name=s.container_name
-  )
-"#;
+  )"#,
+};
 
-const DELETE_RESOURCE_SNAPSHOTS: &str = r#"
-DELETE FROM app_resource_snapshots s
-WHERE s.sampled_at < now() - interval '7 days'
-  AND NOT EXISTS (
-    SELECT 1 FROM deployments d
-    JOIN apps a ON a.current_deployment_id=d.id
-    WHERE d.container_name=s.container_name
-  )
-"#;
+const WEBHOOK_EVENTS_RULE: RetentionRule = RetentionRule {
+    from: "webhook_events e",
+    predicate: "e.created_at < now() - interval '14 days'",
+};
 
-const CLEANUP_WEBHOOK_EVENTS: &str = r#"
-SELECT count(*)::bigint
-FROM webhook_events e
-WHERE e.created_at < now() - interval '14 days'
-"#;
+const COMPLETED_AGENT_JOBS_RULE: RetentionRule = RetentionRule {
+    from: "agent_jobs j",
+    predicate: r#"j.status IN ('success','cancelled')
+  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '30 days'"#,
+};
 
-const DELETE_WEBHOOK_EVENTS: &str = r#"
-DELETE FROM webhook_events e
-WHERE e.created_at < now() - interval '14 days'
-"#;
-
-const CLEANUP_COMPLETED_AGENT_JOBS: &str = r#"
-SELECT count(*)::bigint
-FROM agent_jobs j
-WHERE j.status IN ('success','cancelled')
-  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '30 days'
-"#;
-
-const DELETE_COMPLETED_AGENT_JOBS: &str = r#"
-DELETE FROM agent_jobs j
-WHERE j.status IN ('success','cancelled')
-  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '30 days'
-"#;
-
-const CLEANUP_FAILED_AGENT_JOBS: &str = r#"
-SELECT count(*)::bigint
-FROM agent_jobs j
-WHERE j.status IN ('failed','expired')
-  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '90 days'
-"#;
-
-const DELETE_FAILED_AGENT_JOBS: &str = r#"
-DELETE FROM agent_jobs j
-WHERE j.status IN ('failed','expired')
-  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '90 days'
-"#;
+const FAILED_AGENT_JOBS_RULE: RetentionRule = RetentionRule {
+    from: "agent_jobs j",
+    predicate: r#"j.status IN ('failed','expired')
+  AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '90 days'"#,
+};

@@ -1,12 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Box, CheckCircle2, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
+import {
+  CreateAppForm,
+  RepoInspection,
+  createAppDisabledReason,
+  defaultCreateAppForm,
+  envValuesFromInspection,
+  mergeInspectionIntoForm,
+  parseGitHubRepo,
+  slugAppName,
+} from "./createAppForm";
 
 type Repo = { full_name: string; private: boolean; default_branch: string; updated_at?: string };
 type ServerRow = { id: string; name: string; kind: string; status: string };
@@ -14,73 +24,17 @@ type CloudflareStatus = {
   baseDomain?: string | null;
   defaultDomainPattern?: string | null;
 };
-type InspectEnv = { key: string; required?: boolean; value?: string; source?: string };
-type RepoInspection = {
-  repoFullName: string;
-  defaultBranch: string;
-  branch: string;
-  appName: string;
-  deployable: boolean;
-  runtimeKind: string;
-  rootDirectory: string;
-  containerPort: number;
-  healthPath: string;
-  hostletConfigPath: string;
-  runtimeConfig: Record<string, unknown>;
-  packagingStrategy?: string;
-  packagingOptions?: string[];
-  recommendedPackagingStrategy?: string;
-  detectedFramework?: string;
-  packageManager?: string;
-  env: InspectEnv[];
-  warnings: string[];
-  summary: string;
-};
-type CreateAppForm = {
-  name: string;
-  repo_full_name: string;
-  branch: string;
-  server_id: string;
-  container_port: number;
-  health_path: string;
-  domain: string;
-  runtime_kind: string;
-  hostlet_config_path: string;
-  root_directory: string;
-  install_command: string;
-  build_command: string;
-  start_command: string;
-  memory_limit_mb: number;
-  cpu_limit: number;
-  public_exposure: boolean;
-  auto_deploy: boolean;
-  runtime_config: Record<string, unknown>;
-  packaging_strategy: string;
-};
 
 export default function CreateApp() {
   const router = useRouter();
-  const [form, setForm] = useState({
-    name: "",
-    repo_full_name: "",
-    branch: "main",
-    server_id: "",
-    container_port: 3000,
-    health_path: "/",
-    domain: "",
-    runtime_kind: "single",
-    hostlet_config_path: "hostlet.yml",
-    root_directory: ".",
-    install_command: "",
-    build_command: "",
-    start_command: "",
-    memory_limit_mb: 512,
-    cpu_limit: 1,
-    public_exposure: false,
-    auto_deploy: false,
-    runtime_config: {} as Record<string, unknown>,
-    packaging_strategy: "auto",
-  });
+  const [form, setForm] = useState<CreateAppForm>(defaultCreateAppForm);
+  // Typed, single-field updater: avoids repeated `{ ...form, x }` spreads in JSX
+  // and uses the functional updater form to sidestep stale-closure bugs.
+  const setField = useCallback(
+    <K extends keyof CreateAppForm>(key: K, value: CreateAppForm[K]) =>
+      setForm((current) => ({ ...current, [key]: value })),
+    [],
+  );
   const [inspection, setInspection] = useState<RepoInspection | null>(null);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [inspecting, setInspecting] = useState(false);
@@ -156,19 +110,8 @@ export default function CreateApp() {
         body: JSON.stringify({ repo_full_name: form.repo_full_name, branch: form.branch }),
       });
       setInspection(result);
-      setEnvValues(Object.fromEntries((result.env || []).map((item) => [item.key, item.value || ""])));
-      setForm((current) => ({
-        ...current,
-        name: current.name || result.appName,
-        branch: result.branch || current.branch,
-        runtime_kind: result.runtimeKind || current.runtime_kind,
-        root_directory: result.rootDirectory || current.root_directory,
-        container_port: result.containerPort || current.container_port,
-        health_path: result.healthPath || current.health_path,
-        hostlet_config_path: result.hostletConfigPath || current.hostlet_config_path,
-        runtime_config: result.runtimeConfig || {},
-        packaging_strategy: result.recommendedPackagingStrategy || result.packagingStrategy || current.packaging_strategy,
-      }));
+      setEnvValues(envValuesFromInspection(result));
+      setForm((current) => mergeInspectionIntoForm(current, result));
       setMessage(result.deployable ? "Review the inferred runtime, then create and deploy." : "Hostlet could not infer a deployable runtime.");
     } catch (error) {
       setMessage(`Inspect failed. ${error instanceof Error ? error.message : "Check the public GitHub URL."}`);
@@ -303,9 +246,9 @@ export default function CreateApp() {
               <Panel>
                 <SectionHeader icon={Server} title="Local target and route" />
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="App name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} placeholder="my-app" />
-                  <Field label="Branch" value={form.branch} onChange={(value) => setForm({ ...form, branch: value })} placeholder="main" />
-                  <SelectField label="Deploy target" value={form.server_id} onChange={(value) => setForm({ ...form, server_id: value })}>
+                  <Field label="App name" value={form.name} onChange={(value) => setField("name", value)} placeholder="my-app" />
+                  <Field label="Branch" value={form.branch} onChange={(value) => setField("branch", value)} placeholder="main" />
+                  <SelectField label="Deploy target" value={form.server_id} onChange={(value) => setField("server_id", value)}>
                     {servers.map((server) => <option key={server.id} value={server.id}>{server.name} (local)</option>)}
                     {servers.length === 0 && <option value="">This machine</option>}
                   </SelectField>
@@ -313,42 +256,42 @@ export default function CreateApp() {
                     <Field
                       label="Domain"
                       value={form.domain}
-                      onChange={(value) => setForm({ ...form, domain: value })}
+                      onChange={(value) => setField("domain", value)}
                       placeholder={generatedDomain || cloudflare?.defaultDomainPattern || "optional for local deploys"}
                     />
                     {generatedDomain && <p className="muted mt-2 text-sm">Default route: {generatedDomain}</p>}
                   </div>
                 </div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <ToggleCard checked={form.public_exposure} onChange={(value) => setForm({ ...form, public_exposure: value })} icon={Lock} label="Publish app URL" />
-                  <ToggleCard checked={form.auto_deploy} onChange={(value) => setForm({ ...form, auto_deploy: value })} icon={GitBranch} label="Auto redeploy" />
+                  <ToggleCard checked={form.public_exposure} onChange={(value) => setField("public_exposure", value)} icon={Lock} label="Publish app URL" />
+                  <ToggleCard checked={form.auto_deploy} onChange={(value) => setField("auto_deploy", value)} icon={GitBranch} label="Auto redeploy" />
                 </div>
               </Panel>
 
               <Panel>
                 <SectionHeader icon={Box} title="Runtime" />
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Root directory" value={form.root_directory} onChange={(value) => setForm({ ...form, root_directory: value })} placeholder="." />
-                  <Field label="Container port" type="number" value={String(form.container_port)} onChange={(value) => setForm({ ...form, container_port: Number(value) })} />
-                  <Field label="Health path" value={form.health_path} onChange={(value) => setForm({ ...form, health_path: value })} />
-                  <SelectField label="Runtime" value={form.runtime_kind} onChange={(value) => setForm({ ...form, runtime_kind: value })}>
+                  <Field label="Root directory" value={form.root_directory} onChange={(value) => setField("root_directory", value)} placeholder="." />
+                  <Field label="Container port" type="number" value={String(form.container_port)} onChange={(value) => setField("container_port", Number(value))} />
+                  <Field label="Health path" value={form.health_path} onChange={(value) => setField("health_path", value)} />
+                  <SelectField label="Runtime" value={form.runtime_kind} onChange={(value) => setField("runtime_kind", value)}>
                     <option value="single">Dockerfile or Node</option>
                     <option value="compose">Docker Compose</option>
                   </SelectField>
-                  <SelectField label="Package with" value={form.packaging_strategy} onChange={(value) => setForm({ ...form, packaging_strategy: value })}>
+                  <SelectField label="Package with" value={form.packaging_strategy} onChange={(value) => setField("packaging_strategy", value)}>
                     <option value="auto">Auto</option>
                     <option value="dockerfile">Repository Dockerfile</option>
                     <option value="generated">Hostlet optimized Dockerfile</option>
                   </SelectField>
-                  {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setForm({ ...form, hostlet_config_path: value })} placeholder="hostlet.yml" />}
-                  <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setForm({ ...form, memory_limit_mb: Number(value) })}>
+                  {form.runtime_kind === "compose" && <Field label="Hostlet config" value={form.hostlet_config_path} onChange={(value) => setField("hostlet_config_path", value)} placeholder="hostlet.yml" />}
+                  <SelectField label="Memory limit" value={form.memory_limit_mb} onChange={(value) => setField("memory_limit_mb", Number(value))}>
                     <option value={256}>256 MB</option>
                     <option value={512}>512 MB</option>
                     <option value={1024}>1 GB</option>
                     <option value={2048}>2 GB</option>
                     <option value={4096}>4 GB</option>
                   </SelectField>
-                  <SelectField label="CPU limit" value={form.cpu_limit} onChange={(value) => setForm({ ...form, cpu_limit: Number(value) })}>
+                  <SelectField label="CPU limit" value={form.cpu_limit} onChange={(value) => setField("cpu_limit", Number(value))}>
                     <option value={0.25}>0.25 CPU</option>
                     <option value={0.5}>0.5 CPU</option>
                     <option value={1}>1 CPU</option>
@@ -357,9 +300,9 @@ export default function CreateApp() {
                   </SelectField>
                 </div>
                 <div className="mt-4 grid gap-4">
-                  <Field label="Install command" value={form.install_command} onChange={(value) => setForm({ ...form, install_command: value })} placeholder="auto, npm install, pnpm install" />
-                  <Field label="Build command" value={form.build_command} onChange={(value) => setForm({ ...form, build_command: value })} placeholder="optional, npm run build" />
-                  <Field label="Start command" value={form.start_command} onChange={(value) => setForm({ ...form, start_command: value })} placeholder="npm start, vite preview --host 0.0.0.0 --port $PORT" />
+                  <Field label="Install command" value={form.install_command} onChange={(value) => setField("install_command", value)} placeholder="auto, npm install, pnpm install" />
+                  <Field label="Build command" value={form.build_command} onChange={(value) => setField("build_command", value)} placeholder="optional, npm run build" />
+                  <Field label="Start command" value={form.start_command} onChange={(value) => setField("start_command", value)} placeholder="npm start, vite preview --host 0.0.0.0 --port $PORT" />
                 </div>
               </Panel>
             </div>
@@ -397,50 +340,4 @@ export default function CreateApp() {
           </div>
     </AppShell>
   );
-}
-
-function parseGitHubRepo(input: string): string | null {
-  const trimmed = input.trim().replace(/\.git$/, "");
-  const shorthand = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
-  if (shorthand) return `${shorthand[1]}/${shorthand[2]}`;
-
-  const ssh = trimmed.match(/^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
-  if (ssh) return `${ssh[1]}/${ssh[2]}`;
-
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname !== "github.com") return null;
-    const [owner, repo] = url.pathname.split("/").filter(Boolean);
-    if (!owner || !repo) return null;
-    return `${owner}/${repo}`;
-  } catch {
-    return null;
-  }
-}
-
-function slugAppName(value: string) {
-  const slug = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "app";
-}
-
-function createAppDisabledReason({
-  form,
-  requiredEnvMissing,
-  inspection,
-}: {
-  form: CreateAppForm;
-  requiredEnvMissing: boolean;
-  inspection: RepoInspection | null;
-}) {
-  if (!form.repo_full_name) return "Choose a GitHub repository.";
-  if (!form.name.trim()) return "Enter an app name.";
-  if (!form.branch.trim()) return "Enter a branch.";
-  if (!form.server_id) return "Choose a local deploy target.";
-  if (requiredEnvMissing) return "Fill required environment values from the repo inspection.";
-  if (inspection?.deployable === false) return "This repo is not deployable yet. Add a Dockerfile or package.json, then inspect again.";
-  return "";
 }

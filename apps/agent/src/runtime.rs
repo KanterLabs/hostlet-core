@@ -127,20 +127,7 @@ pub(crate) async fn claim_and_run_job(cfg: &Config) {
         Ok(()) => complete_claimed_job(cfg, job_id, "success", None).await,
         Err(err) => {
             let message = format!("{err}");
-            if let Some(deployment_id) = payload
-                .get("deployment_id")
-                .and_then(|v| v.as_str())
-                .and_then(|v| Uuid::parse_str(v).ok())
-            {
-                log(cfg, deployment_id, "stderr", &message).await;
-                status(
-                    cfg,
-                    deployment_id,
-                    "failed",
-                    Some(&format!("{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run.")),
-                )
-                .await;
-            }
+            report_deployment_failure(cfg, &payload, &message).await;
             complete_claimed_job(cfg, job_id, "failed", Some(&message)).await;
             tracing::warn!("claimed job failed: {message}");
         }
@@ -218,26 +205,36 @@ pub(crate) async fn handle_ws_text(cfg: &Config, text: &str) {
         }
         Err(err) => {
             let message = format!("{err}");
-            if let Some(deployment_id) = payload
-                .get("deployment_id")
-                .and_then(|v| v.as_str())
-                .and_then(|v| Uuid::parse_str(v).ok())
-            {
-                log(cfg, deployment_id, "stderr", &message).await;
-                status(
-                    cfg,
-                    deployment_id,
-                    "failed",
-                    Some(&format!("{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run.")),
-                )
-                .await;
-            }
+            report_deployment_failure(cfg, &payload, &message).await;
             if let Some(job_id) = job_id {
                 job_status(cfg, job_id, "failed", Some(&message)).await;
             }
             tracing::warn!("job failed: {message}");
         }
     }
+}
+
+/// Reports a failed job back to the API as a `failed` deployment status (when the
+/// payload carries a deployment id), mirroring the stderr log and status update
+/// shared by the claim and websocket job paths.
+async fn report_deployment_failure(cfg: &Config, payload: &Value, message: &str) {
+    let Some(deployment_id) = payload
+        .get("deployment_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+    else {
+        return;
+    };
+    log(cfg, deployment_id, "stderr", message).await;
+    status(
+        cfg,
+        deployment_id,
+        "failed",
+        Some(&format!(
+            "{message}. Add a Dockerfile, or add package.json build/start scripts Hostlet can run."
+        )),
+    )
+    .await;
 }
 
 pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
@@ -256,6 +253,81 @@ pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()
         Some("docker_cleanup") => docker_cleanup_job(&payload).await,
         _ => Ok(()),
     }
+}
+
+/// Runs `git` against the checkout directory, streaming output as deployment logs.
+async fn run_git(
+    cfg: &Config,
+    deployment_id: Uuid,
+    checkout: &Path,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    let mut full = vec!["-C", checkout.to_str().unwrap()];
+    full.extend_from_slice(args);
+    run_log(cfg, deployment_id, "git", &full).await
+}
+
+/// Checks out the requested ref: the branch tip (`commit_sha == "HEAD"`) is reset
+/// to `FETCH_HEAD`, otherwise the exact commit is checked out detached. Shared by
+/// the existing-checkout and fresh-clone paths so the ref logic lives in one place.
+async fn checkout_fetched_ref(
+    cfg: &Config,
+    deployment_id: Uuid,
+    checkout: &Path,
+    branch: &str,
+    commit_sha: &str,
+) -> anyhow::Result<()> {
+    if commit_sha == "HEAD" {
+        run_git(
+            cfg,
+            deployment_id,
+            checkout,
+            &["checkout", "-B", branch, "FETCH_HEAD"],
+        )
+        .await
+    } else {
+        run_git(
+            cfg,
+            deployment_id,
+            checkout,
+            &["checkout", "--detach", commit_sha],
+        )
+        .await
+    }
+}
+
+/// Ensures `checkout` contains the requested branch/commit, reusing an existing
+/// clone when present or initializing a fresh one otherwise.
+async fn sync_checkout(
+    cfg: &Config,
+    deployment_id: Uuid,
+    checkout: &Path,
+    expected_remote: &str,
+    fetch_remote: &str,
+    branch: &str,
+    commit_sha: &str,
+) -> anyhow::Result<()> {
+    if checkout.exists() {
+        ensure_checkout_remote(cfg, deployment_id, checkout, expected_remote).await?;
+    } else {
+        tokio::fs::create_dir_all(checkout).await?;
+        run_git(cfg, deployment_id, checkout, &["init"]).await?;
+        run_git(
+            cfg,
+            deployment_id,
+            checkout,
+            &["remote", "add", "origin", expected_remote],
+        )
+        .await?;
+    }
+    run_git(
+        cfg,
+        deployment_id,
+        checkout,
+        &["fetch", fetch_remote, branch],
+    )
+    .await?;
+    checkout_fetched_ref(cfg, deployment_id, checkout, branch, commit_sha).await
 }
 
 pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
@@ -291,118 +363,16 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let checkout = cfg.workdir.join("repos").join(&app_name);
     let expected_remote = format!("https://github.com/{repo}.git");
     let fetch_remote = git_fetch_remote(repo, github_token);
-    if checkout.exists() {
-        ensure_checkout_remote(&cfg, deployment_id, &checkout, &expected_remote).await?;
-        run_log(
-            &cfg,
-            deployment_id,
-            "git",
-            &[
-                "-C",
-                checkout.to_str().unwrap(),
-                "fetch",
-                &fetch_remote,
-                branch,
-            ],
-        )
-        .await?;
-        if commit_sha == "HEAD" {
-            run_log(
-                &cfg,
-                deployment_id,
-                "git",
-                &[
-                    "-C",
-                    checkout.to_str().unwrap(),
-                    "checkout",
-                    "-B",
-                    branch,
-                    "FETCH_HEAD",
-                ],
-            )
-            .await?;
-        } else {
-            run_log(
-                &cfg,
-                deployment_id,
-                "git",
-                &[
-                    "-C",
-                    checkout.to_str().unwrap(),
-                    "checkout",
-                    "--detach",
-                    commit_sha,
-                ],
-            )
-            .await?;
-        }
-    } else {
-        tokio::fs::create_dir_all(&checkout).await?;
-        run_log(
-            &cfg,
-            deployment_id,
-            "git",
-            &["-C", checkout.to_str().unwrap(), "init"],
-        )
-        .await?;
-        run_log(
-            &cfg,
-            deployment_id,
-            "git",
-            &[
-                "-C",
-                checkout.to_str().unwrap(),
-                "remote",
-                "add",
-                "origin",
-                &expected_remote,
-            ],
-        )
-        .await?;
-        run_log(
-            &cfg,
-            deployment_id,
-            "git",
-            &[
-                "-C",
-                checkout.to_str().unwrap(),
-                "fetch",
-                &fetch_remote,
-                branch,
-            ],
-        )
-        .await?;
-        if commit_sha != "HEAD" {
-            run_log(
-                &cfg,
-                deployment_id,
-                "git",
-                &[
-                    "-C",
-                    checkout.to_str().unwrap(),
-                    "checkout",
-                    "--detach",
-                    commit_sha,
-                ],
-            )
-            .await?;
-        } else {
-            run_log(
-                &cfg,
-                deployment_id,
-                "git",
-                &[
-                    "-C",
-                    checkout.to_str().unwrap(),
-                    "checkout",
-                    "-B",
-                    branch,
-                    "FETCH_HEAD",
-                ],
-            )
-            .await?;
-        }
-    }
+    sync_checkout(
+        &cfg,
+        deployment_id,
+        &checkout,
+        &expected_remote,
+        &fetch_remote,
+        branch,
+        commit_sha,
+    )
+    .await?;
     if commit_sha != "HEAD" {
         verify_git_head(&cfg, deployment_id, &checkout, commit_sha).await?;
     }
@@ -423,126 +393,29 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         )
         .await;
     }
-    let build = prepare_build(&cfg, deployment_id, &project_dir, port, &p).await?;
-    if build.generated {
-        tokio::fs::write(project_dir.join(".dockerignore"), generated_dockerignore()).await?;
-    }
-    let build_started = Instant::now();
-    if docker_buildx_available().await {
-        let cache_root = cfg.workdir.join("build-cache").join(&app_name);
-        let cache_next = cfg
-            .workdir
-            .join("build-cache")
-            .join(format!("{app_name}-{deployment_id}"));
-        tokio::fs::create_dir_all(&cache_root).await?;
-        tokio::fs::create_dir_all(&cache_next).await?;
-        let cache_from = format!("type=local,src={}", cache_root.to_string_lossy());
-        let cache_to = format!("type=local,dest={},mode=max", cache_next.to_string_lossy());
-        let args = buildx_args(
-            &image,
-            build.dockerfile.to_str().unwrap(),
-            build.context.to_str().unwrap(),
-            &cache_from,
-            &cache_to,
-        );
-        run_log(&cfg, deployment_id, "docker", &args).await?;
-        let _ = tokio::fs::remove_dir_all(&cache_root).await;
-        let _ = tokio::fs::rename(&cache_next, &cache_root).await;
-    } else {
-        log(
-            &cfg,
-            deployment_id,
-            "stdout",
-            "Docker BuildKit buildx is unavailable; falling back to docker build without local cache.",
-        )
-        .await;
-        let args = docker_build_args(
-            &image,
-            build.dockerfile.to_str().unwrap(),
-            build.context.to_str().unwrap(),
-        );
-        run_log(&cfg, deployment_id, "docker", &args).await?;
-    }
-    let build_duration_ms = build_started.elapsed().as_millis();
-    let image_size = image_size_bytes(&image).await.ok();
-    if let Some(size) = image_size {
-        log(
-            &cfg,
-            deployment_id,
-            "stdout",
-            &format!("Built image size: {size} bytes."),
-        )
-        .await;
-    }
-    let runtime_metadata = build_runtime_metadata(&build, build_duration_ms, image_size);
-    status(&cfg, deployment_id, "starting", None).await;
-    let container = format!("hostlet-{app_name}-{deployment_id}");
-    let port_map = docker_port_map(port as u16);
-    let data_volume = app_data_volume(app_id);
-    ensure_app_data_volume(&cfg, deployment_id, &data_volume).await?;
-    let data_mount = format!("type=volume,source={data_volume},target=/data");
-    let mut args = vec![
-        "run",
-        "-d",
-        "--name",
-        &container,
-        "--restart",
-        "unless-stopped",
-        "--security-opt",
-        "no-new-privileges",
-        "--cap-drop",
-        "ALL",
-        "--pids-limit",
-        "256",
-        "-p",
-        &port_map,
-        "--mount",
-        &data_mount,
-    ];
-    let memory_limit = p
-        .get("memory_limit_mb")
-        .and_then(|v| v.as_i64())
-        .map(|mb| format!("{mb}m"));
-    let cpu_limit = p
-        .get("cpu_limit")
-        .and_then(|v| v.as_f64())
-        .map(|cpus| format!("{cpus:.2}"));
-    if let Some(memory) = memory_limit.as_deref() {
-        args.push("--memory");
-        args.push(memory);
-        args.push("--memory-swap");
-        args.push(memory);
-    }
-    if let Some(cpus) = cpu_limit.as_deref() {
-        args.push("--cpus");
-        args.push(cpus);
-    }
-    if !build.generated {
-        args.push("--read-only");
-        args.push("--tmpfs");
-        args.push("/tmp");
-    }
-    let mut env_pairs = env_args(&p);
-    if !env_pairs_has_key(&env_pairs, "HOSTLET_DATA_DIR") {
-        env_pairs.push("HOSTLET_DATA_DIR=/data".into());
-    }
-    if !env_pairs_has_key(&env_pairs, "DATA_DIR") {
-        env_pairs.push("DATA_DIR=/data".into());
-    }
-    for pair in &env_pairs {
-        args.push("-e");
-        args.push(pair);
-    }
-    args.push(&image);
-    run_log(&cfg, deployment_id, "docker", &args).await?;
-    let internal_port = docker_published_port(&container, port as u16).await?;
-    log(
+    let built = build_image(
         &cfg,
         deployment_id,
-        "stdout",
-        &format!("Docker assigned local port {internal_port} for container port {port}."),
+        &app_name,
+        &image,
+        &project_dir,
+        port,
+        &p,
     )
-    .await;
+    .await?;
+    status(&cfg, deployment_id, "starting", None).await;
+    let container = format!("hostlet-{app_name}-{deployment_id}");
+    let internal_port = run_app_container(
+        &cfg,
+        deployment_id,
+        app_id,
+        &image,
+        &container,
+        port,
+        built.generated,
+        &p,
+    )
+    .await?;
     status(&cfg, deployment_id, "health_checking", None).await;
     if let Err(err) = wait_health(&cfg, deployment_id, &container, internal_port, health_path).await
     {
@@ -603,10 +476,168 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
             container: Some(&container),
             local_url: local_url.as_deref(),
             published_port: Some(internal_port),
-            runtime_metadata: Some(runtime_metadata),
+            runtime_metadata: Some(built.runtime_metadata),
             ..StatusDetails::default()
         },
     )
     .await;
     Ok(())
+}
+
+/// Outcome of building the deployment image: the metadata reported to the API
+/// plus whether the Dockerfile was Hostlet-generated (which relaxes the
+/// read-only container hardening at run time).
+struct BuiltImage {
+    runtime_metadata: Value,
+    generated: bool,
+}
+
+/// Prepares the build plan, writes the `.dockerignore` for generated builds, and
+/// builds the image via buildx (with a local cache) or a plain `docker build`.
+async fn build_image(
+    cfg: &Config,
+    deployment_id: Uuid,
+    app_name: &str,
+    image: &str,
+    project_dir: &Path,
+    port: i64,
+    p: &Value,
+) -> anyhow::Result<BuiltImage> {
+    let build = prepare_build(cfg, deployment_id, project_dir, port, p).await?;
+    if build.generated {
+        tokio::fs::write(project_dir.join(".dockerignore"), generated_dockerignore()).await?;
+    }
+    let build_started = Instant::now();
+    if docker_buildx_available().await {
+        let cache_root = cfg.workdir.join("build-cache").join(app_name);
+        let cache_next = cfg
+            .workdir
+            .join("build-cache")
+            .join(format!("{app_name}-{deployment_id}"));
+        tokio::fs::create_dir_all(&cache_root).await?;
+        tokio::fs::create_dir_all(&cache_next).await?;
+        let cache_from = format!("type=local,src={}", cache_root.to_string_lossy());
+        let cache_to = format!("type=local,dest={},mode=max", cache_next.to_string_lossy());
+        let args = buildx_args(
+            image,
+            build.dockerfile.to_str().unwrap(),
+            build.context.to_str().unwrap(),
+            &cache_from,
+            &cache_to,
+        );
+        run_log(cfg, deployment_id, "docker", &args).await?;
+        let _ = tokio::fs::remove_dir_all(&cache_root).await;
+        let _ = tokio::fs::rename(&cache_next, &cache_root).await;
+    } else {
+        log(
+            cfg,
+            deployment_id,
+            "stdout",
+            "Docker BuildKit buildx is unavailable; falling back to docker build without local cache.",
+        )
+        .await;
+        let args = docker_build_args(
+            image,
+            build.dockerfile.to_str().unwrap(),
+            build.context.to_str().unwrap(),
+        );
+        run_log(cfg, deployment_id, "docker", &args).await?;
+    }
+    let build_duration_ms = build_started.elapsed().as_millis();
+    let image_size = image_size_bytes(image).await.ok();
+    if let Some(size) = image_size {
+        log(
+            cfg,
+            deployment_id,
+            "stdout",
+            &format!("Built image size: {size} bytes."),
+        )
+        .await;
+    }
+    Ok(BuiltImage {
+        runtime_metadata: build_runtime_metadata(&build, build_duration_ms, image_size),
+        generated: build.generated,
+    })
+}
+
+/// Starts the application container with Hostlet's hardening, resource limits, and
+/// env wiring, then returns the loopback port Docker published for it.
+#[allow(clippy::too_many_arguments)]
+async fn run_app_container(
+    cfg: &Config,
+    deployment_id: Uuid,
+    app_id: Uuid,
+    image: &str,
+    container: &str,
+    port: i64,
+    generated: bool,
+    p: &Value,
+) -> anyhow::Result<u16> {
+    let port_map = docker_port_map(port as u16);
+    let data_volume = app_data_volume(app_id);
+    ensure_app_data_volume(cfg, deployment_id, &data_volume).await?;
+    let data_mount = format!("type=volume,source={data_volume},target=/data");
+    let mut args = vec![
+        "run",
+        "-d",
+        "--name",
+        container,
+        "--restart",
+        "unless-stopped",
+        "--security-opt",
+        "no-new-privileges",
+        "--cap-drop",
+        "ALL",
+        "--pids-limit",
+        "256",
+        "-p",
+        &port_map,
+        "--mount",
+        &data_mount,
+    ];
+    let memory_limit = p
+        .get("memory_limit_mb")
+        .and_then(|v| v.as_i64())
+        .map(|mb| format!("{mb}m"));
+    let cpu_limit = p
+        .get("cpu_limit")
+        .and_then(|v| v.as_f64())
+        .map(|cpus| format!("{cpus:.2}"));
+    if let Some(memory) = memory_limit.as_deref() {
+        args.push("--memory");
+        args.push(memory);
+        args.push("--memory-swap");
+        args.push(memory);
+    }
+    if let Some(cpus) = cpu_limit.as_deref() {
+        args.push("--cpus");
+        args.push(cpus);
+    }
+    if !generated {
+        args.push("--read-only");
+        args.push("--tmpfs");
+        args.push("/tmp");
+    }
+    let mut env_pairs = env_args(p);
+    if !env_pairs_has_key(&env_pairs, "HOSTLET_DATA_DIR") {
+        env_pairs.push("HOSTLET_DATA_DIR=/data".into());
+    }
+    if !env_pairs_has_key(&env_pairs, "DATA_DIR") {
+        env_pairs.push("DATA_DIR=/data".into());
+    }
+    for pair in &env_pairs {
+        args.push("-e");
+        args.push(pair);
+    }
+    args.push(image);
+    run_log(cfg, deployment_id, "docker", &args).await?;
+    let internal_port = docker_published_port(container, port as u16).await?;
+    log(
+        cfg,
+        deployment_id,
+        "stdout",
+        &format!("Docker assigned local port {internal_port} for container port {port}."),
+    )
+    .await;
+    Ok(internal_port)
 }
