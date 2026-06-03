@@ -59,6 +59,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
+      - run: scripts/ci-install-railpack.sh
+      - run: test -x "${HOSTLET_RAILPACK_BIN}"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: scripts/ci-self-hosted-deploy-e2e.sh
