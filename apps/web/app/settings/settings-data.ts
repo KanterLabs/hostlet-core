@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 
 export type StatusPayload = {
   configured?: boolean;
@@ -105,13 +106,15 @@ export function useSettingsData(): SettingsData {
 
   useEffect(() => {
     refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        api<VersionPayload>("/api/system/version").then(setVersion).catch(() => setVersion(null));
-      }
-    }, 30 * 60 * 1000);
-    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useVisibilityPoll(
+    () => {
+      api<VersionPayload>("/api/system/version").then(setVersion).catch(() => setVersion(null));
+    },
+    { intervalMs: 30 * 60 * 1000, runImmediately: false },
+  );
 
   function refresh() {
     api<StatusPayload>("/api/github/status").then(setGithub).catch((error) => setGithub({ message: errorText(error, "Could not load GitHub status.") }));

@@ -4,6 +4,7 @@ import { use, useMemo } from "react";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
 import { AppShell, DataList, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
+import { useDeploymentLogs } from "@/lib/useDeploymentLogs";
 import {
   DEPLOYMENT_STEPS,
   formatBytes,
@@ -12,11 +13,29 @@ import {
   socketLabel,
   statusHelp,
 } from "./deploymentStatus";
-import { useDeploymentLogs } from "./useDeploymentLogs";
+
+type RuntimeMetadata = {
+  packagingStrategy?: string | null;
+  generatedDockerfile?: boolean | null;
+  detectedFramework?: string | null;
+  runtimeKind?: string | null;
+  packageManager?: string | null;
+  buildDurationMs?: number | null;
+  imageSizeBytes?: number | null;
+};
+
+type Deployment = {
+  id: string;
+  appId?: string;
+  status: string;
+  commitSha?: string | null;
+  failure?: string | null;
+  runtimeMetadata?: RuntimeMetadata | null;
+};
 
 export default function DeploymentDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { deployment, logs, socketState, socketMessage } = useDeploymentLogs(id);
+  const { deployment, logs, socketState, socketMessage } = useDeploymentLogs<Deployment>(id);
 
   const status = deployment?.status || "loading";
   const activeIndex = DEPLOYMENT_STEPS.indexOf(status as (typeof DEPLOYMENT_STEPS)[number]);

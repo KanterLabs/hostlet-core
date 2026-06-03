@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Box, ExternalLink, ListFilter, Plus, ScrollText } from "lucide-react";
 import { api } from "@/lib/api";
+import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 import { AppShell, EmptyState, FilterTabs, KeyValueGrid, KeyValueItem, PageHeader, Panel, StatusPill } from "@/components/ui";
 import { appVisitHref, appVisitLabel, isActiveDeploy, shortSha } from "./app-links";
 
@@ -57,28 +58,20 @@ export default function Apps() {
   const [message, setMessage] = useState("Loading apps...");
   const [filter, setFilter] = useState<"all" | "active" | "failed" | "public" | "healthy" | "degraded" | "unhealthy" | "unknown">("all");
 
-  useEffect(() => {
-    let active = true;
-    async function loadApps() {
+  useVisibilityPoll(
+    async ({ isActive }) => {
       try {
         const rows = await api<App[]>("/api/apps");
-        if (!active) return;
+        if (!isActive()) return;
         setApps(rows);
         setMessage(rows.length ? "" : "No apps yet.");
       } catch (e) {
-        if (!active) return;
+        if (!isActive()) return;
         setMessage(`Could not load apps. ${e instanceof Error ? e.message : "Sign in again."}`);
       }
-    }
-    loadApps();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") loadApps();
-    }, 10000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, []);
+    },
+    { intervalMs: 10000 },
+  );
   const filtered = useMemo(() => {
     return apps.filter((app) => {
       if (filter === "active") return isActiveDeploy(app.latestDeployment?.status);

@@ -1,6 +1,4 @@
-// Types, polling helper, and derived counts for the machines (servers) list.
-
-import { useEffect } from "react";
+// Types, count helpers, and "last seen" formatting for the machines (servers) list.
 
 export type ServerRow = {
   id: string;
@@ -13,19 +11,6 @@ export type ServerRow = {
 
 // How often the machines list re-polls its data while the tab is visible.
 export const SERVERS_POLL_INTERVAL_MS = 10000;
-
-// Runs `load` once on mount, then re-runs it on an interval while the tab is
-// visible. Mirrors the visibility-aware polling used by the dashboard overview.
-export function useVisibilityPoll(load: () => void, intervalMs: number) {
-  useEffect(() => {
-    load();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") load();
-    }, intervalMs);
-    return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-}
 
 export type ServerCounts = { online: number; local: number };
 

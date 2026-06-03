@@ -20,6 +20,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 import { webhookReadiness } from "@/lib/webhooks";
 import {
   AppShell,
@@ -105,56 +106,42 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
   }, [id, refreshApp]);
 
-  useEffect(() => {
-    let active = true;
-    async function loadHealth() {
+  useVisibilityPoll(
+    async ({ isActive }) => {
       try {
         const [snapshot, events] = await Promise.all([
           api<RuntimeHealth>(`/api/apps/${id}/health`),
           api<RuntimeHealthEvent[]>(`/api/apps/${id}/health/events`),
         ]);
-        if (!active) return;
+        if (!isActive()) return;
         setHealth(snapshot);
         setHealthEvents(events);
         setHealthMessage("");
       } catch (error) {
-        if (!active) return;
+        if (!isActive()) return;
         setHealth(null);
         setHealthEvents([]);
         setHealthMessage(error instanceof Error ? error.message : "Runtime health is not available yet.");
       }
-    }
-    loadHealth();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") loadHealth();
-    }, 5000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [id, setHealthMessage]);
+    },
+    { intervalMs: 5000, deps: [id, setHealthMessage] },
+  );
 
-  useEffect(() => {
-    let active = true;
-    async function loadResources() {
+  useVisibilityPoll(
+    async ({ isActive }) => {
       try {
         const stats = await api<ResourceStats>(`/api/apps/${id}/resources`);
-        if (!active) return;
+        if (!isActive()) return;
         setResources(stats);
         setResourceMessage("");
       } catch (error) {
-        if (!active) return;
+        if (!isActive()) return;
         setResources(null);
         setResourceMessage(error instanceof Error ? error.message : "Resource usage is not available yet.");
       }
-    }
-    loadResources();
-    const timer = setInterval(loadResources, 5000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [id]);
+    },
+    { intervalMs: 5000, deps: [id] },
+  );
 
   const deploymentStatus = app?.latestDeployment?.status || (app?.currentDeploymentId ? "success" : "not deployed");
   const active = isActiveDeploy(app?.latestDeployment?.status);
