@@ -3,10 +3,12 @@ name: Full CI
 on:
   workflow_dispatch:
   schedule:
+    # Nightly runs validate staging (the development branch); see the checkout ref.
     - cron: "17 8 * * *"
   push:
     branches:
       - main
+      - staging
 
 permissions:
   contents: read
@@ -20,6 +22,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Scheduled runs validate staging, not the default branch.
+          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -33,6 +38,9 @@ jobs:
         working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Scheduled runs validate staging, not the default branch.
+          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: ../../scripts/ci-verify-runner.sh
       - uses: pnpm/action-setup@v4
         with:
@@ -58,6 +66,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Scheduled runs validate staging, not the default branch.
+          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-verify-runner.sh
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
@@ -82,6 +93,9 @@ jobs:
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Scheduled runs validate staging, not the default branch.
+          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
