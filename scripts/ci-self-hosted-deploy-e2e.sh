@@ -65,6 +65,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # json_get, signed_cookie, expect_status, and the Postgres/env bootstrap helpers
 # are shared with ci-self-hosted-api-smoke.sh; see ci-self-hosted-lib.sh.
