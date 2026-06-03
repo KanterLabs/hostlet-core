@@ -1,6 +1,6 @@
 use super::super::*;
 use super::request_context_or_response;
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder};
 
 /// Validated, ready-to-persist changes for an app update.
 ///
@@ -150,6 +150,20 @@ fn clean_command_field(
     }
 }
 
+async fn load_app_for_update(
+    db: &PgPool,
+    id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<PgRow>, sqlx::Error> {
+    sqlx::query(
+        "SELECT id, domain, public_exposure, repo_full_name, auto_deploy FROM apps WHERE id=$1 AND user_id=$2",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await
+}
+
 pub async fn update_app(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -161,16 +175,18 @@ pub async fn update_app(
         Err(response) => return response,
     };
     let user_id = context.user_id;
-    let row = sqlx::query(
-        "SELECT id, domain, public_exposure, repo_full_name, auto_deploy FROM apps WHERE id=$1 AND user_id=$2",
-    )
-            .bind(id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None);
-    let Some(row) = row else {
-        return StatusCode::NOT_FOUND.into_response();
+    let row = match load_app_for_update(&state.db, id, user_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                app_id = %id,
+                user_id = %user_id,
+                "failed to load app for update"
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     };
     let old_domain = row.get::<String, _>("domain");
     let old_public_exposure = row.get::<bool, _>("public_exposure");
@@ -393,4 +409,22 @@ pub async fn update_app(
         .await;
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    async fn load_app_for_update_reports_database_errors() {
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(10))
+            .connect_lazy("postgres://127.0.0.1:1/hostlet")
+            .unwrap();
+
+        let result = load_app_for_update(&pool, Uuid::nil(), Uuid::nil()).await;
+
+        assert!(result.is_err());
+    }
 }
