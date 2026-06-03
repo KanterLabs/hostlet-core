@@ -1,5 +1,24 @@
 use super::*;
 
+/// Maximum number of audit events returned by [`audit_events`]; the list is
+/// meant as a recent-activity feed rather than a full export.
+const AUDIT_EVENT_LIMIT: i64 = 200;
+
+/// Project one `audit_events` row into the camelCase JSON shape the API returns.
+fn audit_event_json(row: sqlx::postgres::PgRow) -> serde_json::Value {
+    serde_json::json!({
+        "id": row.get::<Uuid, _>("id"),
+        "actorType": row.get::<String, _>("actor_type"),
+        "actorId": row.get::<Option<String>, _>("actor_id"),
+        "eventType": row.get::<String, _>("event_type"),
+        "appId": row.get::<Option<Uuid>, _>("app_id"),
+        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
+        "jobId": row.get::<Option<Uuid>, _>("job_id"),
+        "metadata": row.get::<serde_json::Value, _>("metadata_json"),
+        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+    })
+}
+
 pub async fn audit_events(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let context = match customer_context(&headers, &state).await {
         Ok(context) => context,
@@ -24,31 +43,17 @@ pub async fn audit_events(State(state): State<AppState>, headers: HeaderMap) -> 
                 WHERE a.id=e.app_id AND a.user_id=$1
            )
         ORDER BY e.created_at DESC
-        LIMIT 200
+        LIMIT $2
         "#,
     )
     .bind(user_id)
+    .bind(AUDIT_EVENT_LIMIT)
     .fetch_all(&state.db)
     .await;
     match rows {
-        Ok(rows) => Json(
-            rows.into_iter()
-                .map(|row| {
-                    serde_json::json!({
-                        "id": row.get::<Uuid, _>("id"),
-                        "actorType": row.get::<String, _>("actor_type"),
-                        "actorId": row.get::<Option<String>, _>("actor_id"),
-                        "eventType": row.get::<String, _>("event_type"),
-                        "appId": row.get::<Option<Uuid>, _>("app_id"),
-                        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
-                        "jobId": row.get::<Option<Uuid>, _>("job_id"),
-                        "metadata": row.get::<serde_json::Value, _>("metadata_json"),
-                        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+        Ok(rows) => {
+            Json(rows.into_iter().map(audit_event_json).collect::<Vec<_>>()).into_response()
+        }
         Err(err) => {
             tracing::warn!(error = %err, "failed to list audit events");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

@@ -26,12 +26,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - run: scripts/ci-verify-runner.sh
       - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 detect --source=/repo --redact --verbose
 
   rust:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
+      - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check-line-cap.sh
@@ -46,6 +48,7 @@ jobs:
         working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
+      - run: ../../scripts/ci-verify-runner.sh
       - uses: pnpm/action-setup@v4
         with:
           version: 10.33.2
@@ -63,6 +66,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
+      - run: scripts/ci-verify-runner.sh
       - name: Compute image tags
         run: echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
@@ -88,6 +92,8 @@ jobs:
     needs: [images]
     runs-on: [self-hosted, Linux, X64]
     steps:
+      - uses: actions/checkout@v4
+      - run: scripts/ci-verify-runner.sh
       - name: Ring the hostlet-cloud staging doorbell
         env:
           CLOUD_DISPATCH_PAT: ${{ secrets.CLOUD_DISPATCH_PAT }}

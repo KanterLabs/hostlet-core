@@ -15,7 +15,12 @@ pub(crate) fn backup(root: &Path, output: Option<PathBuf>, scheduled: bool) -> a
     if !status.success() {
         bail!("backup failed with {status}");
     }
-    record_latest_backup_metadata(root).ok();
+    // Metadata recording is best-effort: a missing database connection should
+    // not fail an otherwise-successful backup, but surface the reason so the
+    // failure is not silently invisible to the operator.
+    if let Err(error) = record_latest_backup_metadata(root) {
+        eprintln!("warning: failed to record latest backup metadata: {error}");
+    }
     Ok(())
 }
 
@@ -25,10 +30,6 @@ pub(crate) fn record_latest_backup_metadata(root: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let metadata = fs::read_to_string(metadata_path)?;
-    let sql = format!(
-        "INSERT INTO settings (key,value,updated_at) VALUES ('latest_backup_metadata','{}',now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now();",
-        metadata.replace('\'', "''")
-    );
     let env = read_env_file(&root.join(".env")).unwrap_or_default();
     let user = env
         .get("POSTGRES_USER")
@@ -38,6 +39,10 @@ pub(crate) fn record_latest_backup_metadata(root: &Path) -> anyhow::Result<()> {
         .get("POSTGRES_DB")
         .cloned()
         .unwrap_or_else(|| "hostlet".into());
+    // Pass the JSON payload as a psql variable and let psql quote it via the
+    // :'metadata' substitution instead of hand-escaping single quotes into the
+    // SQL text. Same upsert effect, no string-interpolation injection surface.
+    let sql = "INSERT INTO settings (key,value,updated_at) VALUES ('latest_backup_metadata',:'metadata',now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now();";
     let mut args = compose_args(false);
     args.extend([
         "exec".into(),
@@ -48,10 +53,19 @@ pub(crate) fn record_latest_backup_metadata(root: &Path) -> anyhow::Result<()> {
         user,
         "-d".into(),
         db,
+        "-v".into(),
+        format!("metadata={metadata}"),
         "-c".into(),
-        sql,
+        sql.into(),
     ]);
-    let _ = Command::new("docker").current_dir(root).args(args).status();
+    let status = Command::new("docker")
+        .current_dir(root)
+        .args(args)
+        .status()
+        .context("failed to run docker compose exec psql")?;
+    if !status.success() {
+        bail!("recording backup metadata failed with {status}");
+    }
     Ok(())
 }
 

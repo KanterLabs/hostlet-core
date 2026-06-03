@@ -9,7 +9,7 @@ Use this index for current Hostlet documentation. Historical plans, versioned va
 
 ## Using Hostlet
 
-- [Deploying Apps](deploying-apps.md): Dockerfile apps, generated Node apps, Compose limits, state, and rollbacks.
+- [Deploying Apps](deploying-apps.md): Dockerfile apps, Railpack generated apps, Compose limits, state, and rollbacks.
 - [Operations](operations.md): updates, backups, restore, health checks, logs, and production deploys.
 
 ## Design And Safety
@@ -20,4 +20,3 @@ Use this index for current Hostlet documentation. Historical plans, versioned va
 ## Project
 
 - [Contributing](contributing.md): local checks, docs rules, release expectations, and security review expectations.
-- [Cloud Migration](../CLOUD_MIGRATION.md): what belongs in the private hosted-service repo.

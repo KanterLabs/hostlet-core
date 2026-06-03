@@ -223,14 +223,31 @@ async fn browser_origin_guard(
     next.run(req).await
 }
 
+/// Path prefixes whose mutating requests are made by machine clients (the
+/// agent), not browsers, and therefore skip the CSRF/Origin guard.
+///
+/// Keep in sync with the agent routes registered in [`core_router`]
+/// (`/api/agent/...`, `/ws/agent`).
+const ORIGIN_GUARD_EXEMPT_PREFIXES: &[&str] = &["/api/agent/"];
+
+/// Exact paths whose mutating requests are non-browser (first-run setup token,
+/// the operator cleanup hook, and the GitHub webhook) and so skip the guard.
+///
+/// Keep in sync with the corresponding routes registered in [`core_router`].
+const ORIGIN_GUARD_EXEMPT_PATHS: &[&str] = &[
+    "/api/setup",
+    "/api/system/operator-cleanup",
+    "/webhooks/github",
+];
+
 fn requires_browser_origin(method: &Method, path: &str) -> bool {
     matches!(
         method,
         &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
-    ) && !path.starts_with("/api/agent/")
-        && path != "/api/setup"
-        && path != "/api/system/operator-cleanup"
-        && path != "/webhooks/github"
+    ) && !ORIGIN_GUARD_EXEMPT_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+        && !ORIGIN_GUARD_EXEMPT_PATHS.contains(&path)
 }
 
 fn request_origin(headers: &HeaderMap) -> Option<String> {

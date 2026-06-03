@@ -92,6 +92,43 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     }
 }
 
+/// How Hostlet's UI/API is reached, chosen interactively during `init`.
+/// Ordering matches the `Select` items below; `LanOnly` is the default.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccessMode {
+    LanOnly,
+    CloudflareTunnel,
+}
+
+impl AccessMode {
+    fn from_index(index: usize) -> Self {
+        match index {
+            0 => Self::LanOnly,
+            _ => Self::CloudflareTunnel,
+        }
+    }
+}
+
+fn configure_lan_env(
+    theme: &ColorfulTheme,
+    env: &mut BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let host: String = Input::with_theme(theme)
+        .with_prompt("Hostlet LAN host/IP")
+        .default("localhost".into())
+        .interact_text()?;
+    let public_web_url = format!("http://{host}:3000");
+    let public_api_url = format!("http://{host}:8080");
+    env.insert("PUBLIC_WEB_URL".into(), public_web_url.clone());
+    env.insert("PUBLIC_API_URL".into(), public_api_url);
+    env.insert("HOSTLET_CONTROL_PLANE_HOST".into(), host);
+    env.insert(
+        "HOSTLET_ALLOWED_WEB_ORIGINS".into(),
+        format!("{public_web_url},http://localhost:3000,http://127.0.0.1:3000"),
+    );
+    Ok(())
+}
+
 pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     require_interactive()?;
     ensure_repo_root(root)?;
@@ -103,11 +140,13 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     let theme = ColorfulTheme::default();
     println!("Hostlet init writes .env and generates local secrets.");
 
-    let access_mode = Select::with_theme(&theme)
-        .with_prompt("Hostlet UI/API access mode")
-        .items(&["LAN only", "Cloudflare Tunnel for Hostlet UI/API"])
-        .default(0)
-        .interact()?;
+    let access_mode = AccessMode::from_index(
+        Select::with_theme(&theme)
+            .with_prompt("Hostlet UI/API access mode")
+            .items(&["LAN only", "Cloudflare Tunnel for Hostlet UI/API"])
+            .default(0)
+            .interact()?,
+    );
 
     let allowed_login: String = Input::with_theme(&theme)
         .with_prompt("Allowed GitHub username")
@@ -121,22 +160,9 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     env.insert("HOSTLET_ALLOWED_GITHUB_LOGINS".into(), allowed_login);
     env.insert("GITHUB_CLIENT_ID".into(), github_client_id);
 
-    if access_mode == 0 {
-        let host: String = Input::with_theme(&theme)
-            .with_prompt("Hostlet LAN host/IP")
-            .default("localhost".into())
-            .interact_text()?;
-        let public_web_url = format!("http://{host}:3000");
-        let public_api_url = format!("http://{host}:8080");
-        env.insert("PUBLIC_WEB_URL".into(), public_web_url.clone());
-        env.insert("PUBLIC_API_URL".into(), public_api_url);
-        env.insert("HOSTLET_CONTROL_PLANE_HOST".into(), host);
-        env.insert(
-            "HOSTLET_ALLOWED_WEB_ORIGINS".into(),
-            format!("{public_web_url},http://localhost:3000,http://127.0.0.1:3000"),
-        );
-    } else {
-        configure_cloudflare(&theme, &mut env).await?;
+    match access_mode {
+        AccessMode::LanOnly => configure_lan_env(&theme, &mut env)?,
+        AccessMode::CloudflareTunnel => configure_cloudflare(&theme, &mut env).await?,
     }
 
     if env_path.exists() {
@@ -153,7 +179,11 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     println!("First setup token: {}", env["HOSTLET_SETUP_TOKEN"]);
     println!(
         "Next: hostlet up{}",
-        if access_mode == 1 { " --tunnel" } else { "" }
+        if access_mode == AccessMode::CloudflareTunnel {
+            " --tunnel"
+        } else {
+            ""
+        }
     );
     Ok(())
 }
@@ -167,15 +197,8 @@ pub(crate) async fn status(root: &Path) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let env = read_env_file(&root.join(".env")).unwrap_or_default();
     println!("Hostlet {}", env!("CARGO_PKG_VERSION"));
-    check("Docker", command_ok("docker", &["version"]));
-    check(
-        "Docker Compose",
-        command_ok("docker", &["compose", "version"]),
-    );
-    check(
-        "Compose services",
-        compose_services_running(root, false) || compose_services_running(root, true),
-    );
+    check_docker_runtime();
+    check("Compose services", any_compose_services_running(root));
     if let Some(backup) = latest_backup(root) {
         println!("Latest backup              {}", backup.display());
         if let Some(age) = latest_backup_age(root) {

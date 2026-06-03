@@ -33,19 +33,25 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     refresh().catch((err) => setError(err.message || "Could not reach Hostlet API."));
   }, []);
 
+  function buildRequest(isSetup: boolean) {
+    const path = isSetup ? "/api/setup" : "/api/unlock";
+    const headers: Record<string, string> = { "Content-Type": "application/json", "X-Hostlet-CSRF": "1" };
+    if (isSetup && setupToken.trim()) {
+      headers["X-Hostlet-Setup-Token"] = setupToken.trim();
+    }
+    return { path, headers };
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     setError("");
-    if (status?.setupRequired && password !== confirm) {
+    const isSetup = Boolean(status?.setupRequired);
+    if (isSetup && password !== confirm) {
       setError("Passwords do not match.");
       return;
     }
     setSaving(true);
-    const path = status?.setupRequired ? "/api/setup" : "/api/unlock";
-    const headers: Record<string, string> = { "Content-Type": "application/json", "X-Hostlet-CSRF": "1" };
-    if (status?.setupRequired && setupToken.trim()) {
-      headers["X-Hostlet-Setup-Token"] = setupToken.trim();
-    }
+    const { path, headers } = buildRequest(isSetup);
     const res = await fetch(`${apiUrl()}${path}`, {
       method: "POST",
       credentials: "include",
@@ -68,21 +74,16 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (!status) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-panel p-6">
-        <Panel className="w-full max-w-md border-t-4 border-t-action p-6" padded={false}>
-          <AuthBrand />
-          <Notice tone="neutral" className="mt-5" description="Checking control-plane security status..." />
-          {error && <Notice tone="danger" className="mt-3" description={error} />}
-        </Panel>
-      </main>
+      <AuthShell>
+        <Notice tone="neutral" className="mt-5" description="Checking control-plane security status..." />
+        {error && <Notice tone="danger" className="mt-3" description={error} />}
+      </AuthShell>
     );
   }
 
   const setup = status.setupRequired;
   return (
-    <main className="flex min-h-screen items-center justify-center bg-panel p-6">
-      <Panel className="w-full max-w-md border-t-4 border-t-action p-6" padded={false}>
-        <AuthBrand />
+    <AuthShell>
         <div className="mt-5 rounded-lg border border-line bg-surface-alt p-4">
           <div className="flex items-center gap-3">
             <IconFrame icon={setup ? ShieldCheck : LockKeyhole} className="h-9 w-9 rounded-md bg-surface" />
@@ -139,6 +140,16 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             {saving ? "Saving..." : setup ? "Set password" : "Unlock"}
           </button>
         </form>
+    </AuthShell>
+  );
+}
+
+function AuthShell({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-panel p-6">
+      <Panel className="w-full max-w-md border-t-4 border-t-action p-6" padded={false}>
+        <AuthBrand />
+        {children}
       </Panel>
     </main>
   );

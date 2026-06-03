@@ -22,6 +22,16 @@ type DevicePoll = {
   redirectTo?: string;
 };
 
+/** UI lifecycle states layered on top of the server-reported device-flow status. */
+type FlowState = DevicePoll["status"] | "idle" | "loading" | "error";
+
+/** Delay before redirecting after authorization, giving the success state a beat to render. */
+const REDIRECT_DELAY_MS = 500;
+/** How long the "Copied" confirmation stays visible before reverting to "Copy". */
+const COPY_RESET_MS = 1600;
+/** GitHub device-flow minimum poll interval (seconds); we never poll faster than this. */
+const MIN_POLL_INTERVAL_S = 5;
+
 export function GitHubDeviceFlow({
   buttonLabel = "Connect GitHub",
   className = "",
@@ -34,7 +44,7 @@ export function GitHubDeviceFlow({
   onAuthorized?: () => void;
 }) {
   const [flow, setFlow] = useState<DeviceStart | null>(null);
-  const [status, setStatus] = useState<DevicePoll["status"] | "idle" | "loading" | "error">("idle");
+  const [status, setStatus] = useState<FlowState>("idle");
   const [message, setMessage] = useState("");
   const [copied, setCopied] = useState(false);
 
@@ -63,6 +73,31 @@ export function GitHubDeviceFlow({
     let cancelled = false;
     let timeout: number | undefined;
 
+    function scheduleNext(intervalSeconds: number | undefined) {
+      const seconds = Math.max(intervalSeconds || activeFlow.interval, MIN_POLL_INTERVAL_S);
+      timeout = window.setTimeout(poll, seconds * 1000);
+    }
+
+    function applyResult(result: DevicePoll) {
+      setMessage(result.message);
+      // A changed interval re-renders the flow, which restarts this effect with the new cadence.
+      if (result.interval && result.interval !== activeFlow.interval) {
+        setFlow({ ...activeFlow, interval: result.interval });
+        return;
+      }
+      if (result.status === "authorized") {
+        setStatus("authorized");
+        onAuthorized?.();
+        window.setTimeout(() => window.location.assign(localRedirectPath(result.redirectTo)), REDIRECT_DELAY_MS);
+        return;
+      }
+      if (result.status === "expired" || result.status === "denied") {
+        setStatus(result.status);
+        return;
+      }
+      scheduleNext(result.interval);
+    }
+
     async function poll() {
       try {
         const result = await api<DevicePoll>("/auth/github/device/poll", {
@@ -70,22 +105,7 @@ export function GitHubDeviceFlow({
           body: JSON.stringify({ flow_id: activeFlow.flowId }),
         });
         if (cancelled) return;
-        setMessage(result.message);
-        if (result.interval && result.interval !== activeFlow.interval) {
-          setFlow({ ...activeFlow, interval: result.interval });
-          return;
-        }
-        if (result.status === "authorized") {
-          setStatus("authorized");
-          onAuthorized?.();
-          window.setTimeout(() => window.location.assign(localRedirectPath(result.redirectTo)), 500);
-          return;
-        }
-        if (result.status === "expired" || result.status === "denied") {
-          setStatus(result.status);
-          return;
-        }
-        timeout = window.setTimeout(poll, Math.max(result.interval || activeFlow.interval, 5) * 1000);
+        applyResult(result);
       } catch (error) {
         if (!cancelled) {
           setStatus("error");
@@ -94,7 +114,7 @@ export function GitHubDeviceFlow({
       }
     }
 
-    timeout = window.setTimeout(poll, Math.max(activeFlow.interval, 5) * 1000);
+    scheduleNext(activeFlow.interval);
     return () => {
       cancelled = true;
       if (timeout) window.clearTimeout(timeout);
@@ -106,7 +126,7 @@ export function GitHubDeviceFlow({
     try {
       await navigator.clipboard.writeText(flow.userCode);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      window.setTimeout(() => setCopied(false), COPY_RESET_MS);
     } catch {
       setMessage(flow.userCode);
     }

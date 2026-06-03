@@ -26,12 +26,14 @@ type HmacSha256 = Hmac<Sha256>;
 mod build;
 mod compose;
 mod ops;
+mod railpack;
 mod runtime;
 mod validation;
 
 pub(crate) use build::*;
 pub(crate) use compose::*;
 pub(crate) use ops::*;
+pub(crate) use railpack::*;
 pub(crate) use runtime::{Config, LocalRouter};
 pub(crate) use validation::*;
 

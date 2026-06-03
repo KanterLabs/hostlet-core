@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Box, ExternalLink, ListFilter, Plus, ScrollText } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell, EmptyState, FilterTabs, KeyValueGrid, KeyValueItem, PageHeader, Panel, StatusPill } from "@/components/ui";
+import { appVisitHref, appVisitLabel, isActiveDeploy, shortSha } from "./app-links";
 
 type Deployment = {
   id: string;
@@ -104,7 +105,9 @@ export default function Apps() {
 
           {filtered.length > 0 ? (
             <div className="grid gap-4">
-              {filtered.map((app) => (
+              {filtered.map((app) => {
+                const visitHref = appVisitHref(app);
+                return (
                 <Panel key={app.id} className="overflow-hidden" padded={false}>
                   <div className="flex flex-wrap items-start justify-between gap-4 p-4">
                     <div className="min-w-0">
@@ -117,8 +120,8 @@ export default function Apps() {
                       <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
-                      {appVisitHref(app) && (
-                        <a className="button" href={appVisitHref(app) || "#"} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit</a>
+                      {visitHref && (
+                        <a className="button" href={visitHref} target="_blank" rel="noreferrer"><ExternalLink size={16} />Visit</a>
                       )}
                       <Link className="button-secondary" href={`/apps/${app.id}`}><Box size={16} />Open</Link>
                       {app.latestDeployment?.id && (
@@ -128,7 +131,7 @@ export default function Apps() {
                   </div>
 
                   <KeyValueGrid>
-                    <KeyValueItem label={app.publicExposure ? "Public URL" : "Private URL"} value={appVisitLabel(app)} href={appVisitHref(app)} externalIcon={<ExternalLink size={13} />} />
+                    <KeyValueItem label={app.publicExposure ? "Public URL" : "Private URL"} value={appVisitLabel(app)} href={visitHref} externalIcon={<ExternalLink size={13} />} />
                     <KeyValueItem label="Machine" value={`${app.server?.name || "Unknown"} · ${app.server?.kind || "remote"}`} />
                     <KeyValueItem label="Runtime" value={`:${app.containerPort || 3000}${app.healthPath || "/"}`} />
                     <KeyValueItem label="Latest deploy" value={deploymentSummary(app.latestDeployment)} />
@@ -145,7 +148,8 @@ export default function Apps() {
                     </div>
                   )}
                 </Panel>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <EmptyState
@@ -158,11 +162,6 @@ export default function Apps() {
           )}
     </AppShell>
   );
-}
-
-function shortSha(sha?: string | null) {
-  if (!sha || sha === "HEAD") return sha || "No deploy yet";
-  return sha.slice(0, 7);
 }
 
 function deploymentSummary(deployment?: Deployment | null) {
@@ -184,59 +183,4 @@ function healthSummary(health?: RuntimeHealth | null) {
   if (typeof health.latencyMs === "number") bits.push(`${health.latencyMs} ms`);
   if (health.lastCheckedAt) bits.push(`checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}`);
   return bits.join(" · ");
-}
-
-function appVisitHref(app: App) {
-  if (!app.currentDeploymentId) return null;
-  if (!app.publicExposure) {
-    const port = app.currentDeployment?.publishedPort;
-    const host = privateAppHost(app);
-    return port && host ? `http://${host}:${port}` : null;
-  }
-  const display = displayDomain(app.domain);
-  if (!display) return null;
-  if (display.startsWith("http://") || display.startsWith("https://")) return display;
-  try {
-    const url = new URL(`http://${display}`);
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || /^[\d.]+$/.test(url.hostname)) {
-      return `http://${display}`;
-    }
-  } catch {
-    return null;
-  }
-  return `https://${display}`;
-}
-
-function appVisitLabel(app: App) {
-  if (app.publicExposure) return displayDomain(app.domain) || "No public URL";
-  const port = app.currentDeployment?.publishedPort;
-  const host = privateAppHost(app);
-  return port && host ? `${host}:${port}` : "Deploy to assign a private port";
-}
-
-function privateAppHost(app: App) {
-  const host = app.server?.publicIp?.trim();
-  if (host && host !== "127.0.0.1" && host !== "localhost" && host !== "0.0.0.0") return host;
-  if (typeof window !== "undefined") return window.location.hostname;
-  return host || null;
-}
-
-function displayDomain(domain: string) {
-  if (!domain) return null;
-  if (typeof window === "undefined") return domain;
-  try {
-    const withProtocol = domain.startsWith("http://") || domain.startsWith("https://") ? domain : `http://${domain}`;
-    const url = new URL(withProtocol);
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
-      url.hostname = window.location.hostname;
-      return url.host + url.pathname.replace(/\/$/, "");
-    }
-  } catch {
-    return domain;
-  }
-  return domain;
-}
-
-function isActiveDeploy(status?: string | null) {
-  return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
 }

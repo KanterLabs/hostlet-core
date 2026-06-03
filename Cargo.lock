@@ -864,6 +864,7 @@ dependencies = [
  "base64",
  "futures-util",
  "hmac",
+ "hostlet-contracts",
  "http",
  "reqwest",
  "serde",

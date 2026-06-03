@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "start": "bun server.js"
+  },
+  "dependencies": {},
+  "packageManager": "bun@1.3.5"
+}

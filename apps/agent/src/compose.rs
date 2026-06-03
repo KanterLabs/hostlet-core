@@ -14,6 +14,128 @@ pub(crate) struct HostletComposeManifest {
     health_path: Option<String>,
 }
 
+/// Resolved Hostlet Compose manifest plus the on-disk compose file it points at.
+struct ResolvedCompose<'a> {
+    /// Path reported back to the API as `hostletConfigPath` (or `"generated"`).
+    manifest_path: &'a str,
+    manifest: HostletManifest,
+    compose_file_name: String,
+    compose_file: PathBuf,
+}
+
+/// Builds the shared `docker compose -p <project> -f <compose> -f <override>`
+/// argument prefix, returning context-bearing errors for non-UTF-8 paths.
+fn compose_invocation<'a>(
+    project: &'a str,
+    compose_file: &'a Path,
+    override_file: &'a Path,
+    trailing: &[&'a str],
+) -> anyhow::Result<Vec<&'a str>> {
+    let mut args = vec![
+        "compose",
+        "-p",
+        project,
+        "-f",
+        path_str(compose_file)?,
+        "-f",
+        path_str(override_file)?,
+    ];
+    args.extend_from_slice(trailing);
+    Ok(args)
+}
+
+/// Converts a path to `&str`, surfacing a clear error rather than panicking on
+/// non-UTF-8 paths.
+fn path_str(path: &Path) -> anyhow::Result<&str> {
+    path.to_str()
+        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
+/// Reads the deploy payload (generated runtime or repo `hostlet.yml`) into a
+/// validated [`ResolvedCompose`].
+async fn resolve_compose_manifest<'a>(
+    p: &'a Value,
+    project_dir: &Path,
+    build_dir: &Path,
+) -> anyhow::Result<ResolvedCompose<'a>> {
+    if let Some(generated) = p
+        .pointer("/runtime_config/generatedCompose")
+        .and_then(|v| v.as_object())
+    {
+        let compose_file_name = generated
+            .get("composeFile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("compose.generated.hostlet.yml");
+        validate_relative_file_path(compose_file_name)?;
+        let web_service = generated
+            .get("webService")
+            .and_then(|v| v.as_str())
+            .unwrap_or("web")
+            .to_string();
+        validate_service_name(&web_service)?;
+        let compose_text = generated
+            .get("compose")
+            .and_then(|v| v.as_str())
+            .context("generated Compose runtime is missing compose YAML")?;
+        tokio::fs::create_dir_all(build_dir).await?;
+        let compose_file = build_dir.join(compose_file_name);
+        tokio::fs::write(&compose_file, compose_text).await?;
+        let manifest = HostletManifest {
+            runtime: "compose".into(),
+            compose: HostletComposeManifest {
+                file: Some(compose_file_name.to_string()),
+                web_service,
+                port: generated
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u16::try_from(v).ok()),
+                health_path: generated
+                    .get("healthPath")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            },
+        };
+        return Ok(ResolvedCompose {
+            manifest_path: "generated",
+            manifest,
+            compose_file_name: compose_file_name.to_string(),
+            compose_file,
+        });
+    }
+
+    let manifest_path = p
+        .get("hostlet_config_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hostlet.yml");
+    validate_relative_file_path(manifest_path)?;
+    let manifest_file = project_dir.join(manifest_path);
+    let manifest_text = tokio::fs::read_to_string(&manifest_file)
+        .await
+        .with_context(|| format!("compose runtime requires {manifest_path}"))?;
+    let manifest: HostletManifest =
+        serde_yaml::from_str(&manifest_text).context("hostlet manifest is not valid YAML")?;
+    if manifest.runtime != "compose" {
+        bail!("hostlet manifest runtime must be compose");
+    }
+    validate_service_name(&manifest.compose.web_service)?;
+    let compose_file_name = manifest
+        .compose
+        .file
+        .clone()
+        .unwrap_or_else(|| "compose.yaml".into());
+    validate_relative_file_path(&compose_file_name)?;
+    let compose_file = project_dir.join(&compose_file_name);
+    if !tokio::fs::try_exists(&compose_file).await? {
+        bail!("compose file {compose_file_name} does not exist");
+    }
+    Ok(ResolvedCompose {
+        manifest_path,
+        manifest,
+        compose_file_name,
+        compose_file,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn deploy_compose(
     cfg: Config,
@@ -28,81 +150,18 @@ pub(crate) async fn deploy_compose(
     fallback_health_path: &str,
 ) -> anyhow::Result<()> {
     ensure_docker_compose().await?;
-    let generated_compose = p
-        .pointer("/runtime_config/generatedCompose")
-        .and_then(|v| v.as_object());
     let build_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
-    let (manifest_path, manifest, compose_file_name, compose_file) =
-        if let Some(generated) = generated_compose {
-            let compose_file_name = generated
-                .get("composeFile")
-                .and_then(|v| v.as_str())
-                .unwrap_or("compose.generated.hostlet.yml");
-            validate_relative_file_path(compose_file_name)?;
-            let web_service = generated
-                .get("webService")
-                .and_then(|v| v.as_str())
-                .unwrap_or("web")
-                .to_string();
-            validate_service_name(&web_service)?;
-            let compose_text = generated
-                .get("compose")
-                .and_then(|v| v.as_str())
-                .context("generated Compose runtime is missing compose YAML")?;
-            tokio::fs::create_dir_all(&build_dir).await?;
-            let compose_file = build_dir.join(compose_file_name);
-            tokio::fs::write(&compose_file, compose_text).await?;
-            let manifest = HostletManifest {
-                runtime: "compose".into(),
-                compose: HostletComposeManifest {
-                    file: Some(compose_file_name.to_string()),
-                    web_service,
-                    port: generated
-                        .get("port")
-                        .and_then(|v| v.as_u64())
-                        .and_then(|v| u16::try_from(v).ok()),
-                    health_path: generated
-                        .get("healthPath")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                },
-            };
-            (
-                "generated",
-                manifest,
-                compose_file_name.to_string(),
-                compose_file,
-            )
-        } else {
-            let manifest_path = p
-                .get("hostlet_config_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("hostlet.yml");
-            validate_relative_file_path(manifest_path)?;
-            let manifest_file = project_dir.join(manifest_path);
-            let manifest_text = tokio::fs::read_to_string(&manifest_file)
-                .await
-                .with_context(|| format!("compose runtime requires {manifest_path}"))?;
-            let manifest: HostletManifest = serde_yaml::from_str(&manifest_text)
-                .context("hostlet manifest is not valid YAML")?;
-            if manifest.runtime != "compose" {
-                bail!("hostlet manifest runtime must be compose");
-            }
-            validate_service_name(&manifest.compose.web_service)?;
-            let compose_file_name = manifest
-                .compose
-                .file
-                .clone()
-                .unwrap_or_else(|| "compose.yaml".into());
-            validate_relative_file_path(&compose_file_name)?;
-            let compose_file = project_dir.join(&compose_file_name);
-            if !tokio::fs::try_exists(&compose_file).await? {
-                bail!("compose file {compose_file_name} does not exist");
-            }
-            (manifest_path, manifest, compose_file_name, compose_file)
-        };
-    let compose_text = tokio::fs::read_to_string(&compose_file).await?;
-    validate_compose_subset(&compose_text, &manifest.compose.web_service)?;
+    let resolved = resolve_compose_manifest(&p, project_dir, &build_dir).await?;
+    let ResolvedCompose {
+        manifest_path,
+        manifest,
+        compose_file_name,
+        compose_file,
+    } = &resolved;
+    let web_service = &manifest.compose.web_service;
+
+    let compose_text = tokio::fs::read_to_string(compose_file).await?;
+    validate_compose_subset(&compose_text, web_service)?;
     let port = manifest.compose.port.unwrap_or(fallback_port as u16);
     validate_port(port as i64)?;
     let health_path = manifest
@@ -118,23 +177,14 @@ pub(crate) async fn deploy_compose(
     }
     tokio::fs::write(
         &override_file,
-        compose_override_yaml(
-            &manifest.compose.web_service,
-            port,
-            app_id,
-            deployment_id,
-            &p,
-        ),
+        compose_override_yaml(web_service, port, app_id, deployment_id, &p),
     )
     .await?;
     log(
         &cfg,
         deployment_id,
         "stdout",
-        &format!(
-            "Detected Hostlet Compose app. Project {project}, web service {}.",
-            manifest.compose.web_service
-        ),
+        &format!("Detected Hostlet Compose app. Project {project}, web service {web_service}."),
     )
     .await;
     run_log_in_dir(
@@ -142,16 +192,7 @@ pub(crate) async fn deploy_compose(
         deployment_id,
         project_dir,
         "docker",
-        &[
-            "compose",
-            "-p",
-            &project,
-            "-f",
-            compose_file.to_str().unwrap(),
-            "-f",
-            override_file.to_str().unwrap(),
-            "config",
-        ],
+        &compose_invocation(&project, compose_file, &override_file, &["config"])?,
     )
     .await?;
     run_log_in_dir(
@@ -159,28 +200,21 @@ pub(crate) async fn deploy_compose(
         deployment_id,
         project_dir,
         "docker",
-        &[
-            "compose",
-            "-p",
+        &compose_invocation(
             &project,
-            "-f",
-            compose_file.to_str().unwrap(),
-            "-f",
-            override_file.to_str().unwrap(),
-            "up",
-            "-d",
-            "--build",
-            "--remove-orphans",
-        ],
+            compose_file,
+            &override_file,
+            &["up", "-d", "--build", "--remove-orphans"],
+        )?,
     )
     .await?;
     status(&cfg, deployment_id, "starting", None).await;
     let container = compose_service_container(
         project_dir,
         &project,
-        &compose_file,
+        compose_file,
         &override_file,
-        &manifest.compose.web_service,
+        web_service,
     )
     .await?;
     let internal_port = docker_published_port(&container, port).await?;
@@ -192,18 +226,12 @@ pub(crate) async fn deploy_compose(
             deployment_id,
             project_dir,
             "docker",
-            &[
-                "compose",
-                "-p",
+            &compose_invocation(
                 &project,
-                "-f",
-                compose_file.to_str().unwrap(),
-                "-f",
-                override_file.to_str().unwrap(),
-                "logs",
-                "--tail",
-                "120",
-            ],
+                compose_file,
+                &override_file,
+                &["logs", "--tail", "120"],
+            )?,
         )
         .await;
         status(&cfg, deployment_id, "failed", Some(&format!("Compose health check failed: {err}. The previous working route was preserved; inspect Compose service logs for details."))).await;
@@ -244,7 +272,7 @@ pub(crate) async fn deploy_compose(
                 "runtime": "compose",
                 "composeFile": compose_file_name,
                 "hostletConfigPath": manifest_path,
-                "webService": manifest.compose.web_service,
+                "webService": web_service,
                 "targetPort": port,
                 "healthPath": health_path,
                 "project": project,
@@ -418,45 +446,37 @@ pub(crate) async fn run_log(
     bin: &str,
     args: &[&str],
 ) -> anyhow::Result<()> {
-    log(
-        cfg,
-        deployment_id,
-        "stdout",
-        &format!("$ {} {}", bin, command_args_for_log(args).join(" ")),
-    )
-    .await;
-    let mut cmd = Command::new(bin);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to start {bin}"))?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let c1 = cfg.clone();
-    let c2 = cfg.clone();
-    tokio::spawn(async move {
-        stream_lines(c1, deployment_id, "stdout", stdout).await;
-    });
-    tokio::spawn(async move {
-        stream_lines(c2, deployment_id, "stderr", stderr).await;
-    });
-    let status = match tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await {
-        Ok(status) => status?,
-        Err(_) => {
-            let _ = child.kill().await;
-            bail!("{bin} timed out after 1800 seconds");
-        }
-    };
-    if !status.success() {
-        bail!("{bin} exited with {status}");
-    }
-    Ok(())
+    run_log_streamed(cfg, deployment_id, None, &[], bin, args).await
 }
 
 pub(crate) async fn run_log_in_dir(
     cfg: &Config,
     deployment_id: Uuid,
     dir: &Path,
+    bin: &str,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    run_log_streamed(cfg, deployment_id, Some(dir), &[], bin, args).await
+}
+
+pub(crate) async fn run_log_in_dir_env(
+    cfg: &Config,
+    deployment_id: Uuid,
+    dir: &Path,
+    envs: &[(&str, &str)],
+    bin: &str,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    run_log_streamed(cfg, deployment_id, Some(dir), envs, bin, args).await
+}
+
+/// Spawns `bin args`, streaming stdout/stderr back as deployment logs. When
+/// `dir` is `Some`, the command runs with that working directory.
+async fn run_log_streamed(
+    cfg: &Config,
+    deployment_id: Uuid,
+    dir: Option<&Path>,
+    envs: &[(&str, &str)],
     bin: &str,
     args: &[&str],
 ) -> anyhow::Result<()> {
@@ -468,10 +488,13 @@ pub(crate) async fn run_log_in_dir(
     )
     .await;
     let mut cmd = Command::new(bin);
-    cmd.current_dir(dir)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to start {bin}"))?;

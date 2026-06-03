@@ -2,18 +2,47 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Box, HardDrive, Home, LogOut, Settings, ScrollText, TerminalSquare } from "lucide-react";
+import { Box, HardDrive, Home, LogOut, Settings, ScrollText, TerminalSquare, LucideIcon } from "lucide-react";
 import { api } from "@/lib/api";
+import { cx } from "@/components/ui";
+
+type NavItem = { href: string; label: string; icon: LucideIcon };
+
+const NAV_ITEMS: NavItem[] = [
+  { href: "/", label: "Overview", icon: Home },
+  { href: "/apps", label: "Apps", icon: Box },
+  { href: "/servers", label: "Machines", icon: HardDrive },
+  { href: "/logs", label: "Logs", icon: ScrollText },
+  { href: "/settings", label: "Settings", icon: Settings },
+];
+
+function isActive(pathname: string, href: string) {
+  return href === "/" ? pathname === "/" : pathname.startsWith(href);
+}
+
+function NavLink({
+  item,
+  className,
+  iconSize,
+}: {
+  item: NavItem;
+  className: string;
+  iconSize: number;
+}) {
+  const Icon = item.icon;
+  return (
+    <Link href={item.href} className={className}>
+      <Icon size={iconSize} />
+      {item.label}
+    </Link>
+  );
+}
+
+const LOGOUT_CLASS =
+  "mt-3 w-full justify-start border-white/10 bg-white/5 text-neutral-100 shadow-none hover:bg-white/10";
 
 export function Nav() {
   const pathname = usePathname();
-  const items = [
-    { href: "/", label: "Overview", icon: Home },
-    { href: "/apps", label: "Apps", icon: Box },
-    { href: "/servers", label: "Machines", icon: HardDrive },
-    { href: "/logs", label: "Logs", icon: ScrollText },
-    { href: "/settings", label: "Settings", icon: Settings },
-  ];
 
   async function logout() {
     await api("/api/logout", { method: "POST", body: "{}" }).catch(() => {});
@@ -33,20 +62,18 @@ export function Nav() {
           </span>
         </Link>
         <nav className="space-y-1">
-          {items.map((item) => {
-            const Icon = item.icon;
-            const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+          {NAV_ITEMS.map((item) => {
+            const active = isActive(pathname, item.href);
             return (
-              <Link
+              <NavLink
                 key={item.href}
-                href={item.href}
-                className={`flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition ${
-                  active ? "bg-white/10 text-white ring-1 ring-white/10" : "text-neutral-300 hover:bg-white/5 hover:text-white"
-                }`}
-              >
-                <Icon size={17} />
-                {item.label}
-              </Link>
+                item={item}
+                iconSize={17}
+                className={cx(
+                  "flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition",
+                  active ? "bg-white/10 text-white ring-1 ring-white/10" : "text-neutral-300 hover:bg-white/5 hover:text-white",
+                )}
+              />
             );
           })}
         </nav>
@@ -54,27 +81,25 @@ export function Nav() {
           <div className="text-sm font-medium">Control plane</div>
           <p className="mt-1 text-sm text-neutral-400">Local-first management for your own servers.</p>
         </div>
-        <button className="mt-3 w-full justify-start border-white/10 bg-white/5 text-neutral-100 shadow-none hover:bg-white/10" onClick={logout}>
+        <button className={LOGOUT_CLASS} onClick={logout}>
           <LogOut size={16} />
           Log out
         </button>
       </aside>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-white/10 bg-rail px-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 text-white shadow-lg shadow-neutral-950/20 lg:hidden">
-        {items.map((item) => {
-          const Icon = item.icon;
-          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+        {NAV_ITEMS.map((item) => {
+          const active = isActive(pathname, item.href);
           return (
-            <Link
+            <NavLink
               key={item.href}
-              href={item.href}
-              className={`flex flex-col items-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium ${
-                active ? "bg-white/10 text-white" : "text-neutral-400"
-              }`}
-            >
-              <Icon size={17} />
-              {item.label}
-            </Link>
+              item={item}
+              iconSize={17}
+              className={cx(
+                "flex flex-col items-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium",
+                active ? "bg-white/10 text-white" : "text-neutral-400",
+              )}
+            />
           );
         })}
       </nav>

@@ -23,6 +23,12 @@ pub struct AppDefaults {
     pub auto_deploy: bool,
 }
 
+/// Authorizes whether a given principal is permitted to act at all.
+///
+/// Implementations gate access for the whole request (e.g. account-level
+/// suspension or allowlist checks) and should return `Err` to reject the
+/// request before any handler-specific logic runs. The self-hosted overlay
+/// allows every principal; cloud overlays may enforce tenancy/quota rules.
 #[async_trait]
 pub trait AccountPolicy: Send + Sync {
     async fn principal_allowed(
@@ -32,8 +38,18 @@ pub trait AccountPolicy: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// Resolves and validates per-app mutation rules.
+///
+/// This is the extension seam that lets overlays inject hosting-tier defaults
+/// and guardrails around app create/update without forking the handlers.
 #[async_trait]
 pub trait AppPolicy: Send + Sync {
+    /// Resolves the effective [`AppDefaults`] for a create request.
+    ///
+    /// Called once while handling an app-create request, before the row is
+    /// inserted, with the caller's requested (possibly absent) name and server.
+    /// Implementations must return a fully-resolved set of defaults (server,
+    /// domain, limits, exposure flags) or `Err` if the request is disallowed.
     async fn defaults_for_create(
         &self,
         state: &AppState,
@@ -42,6 +58,12 @@ pub trait AppPolicy: Send + Sync {
         requested_server_id: Option<Uuid>,
     ) -> anyhow::Result<AppDefaults>;
 
+    /// Enforces invariants on an app-update request.
+    ///
+    /// Called while handling an app-update request, before persisting changes,
+    /// to confirm the principal in `context` may mutate the target app. Returns
+    /// `Err` to reject the update; an `Ok` result must mean the update is
+    /// permitted under the active policy.
     async fn validate_update(
         &self,
         state: &AppState,
@@ -49,6 +71,7 @@ pub trait AppPolicy: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// Supplies the credentials used to pull a repository during deploy.
 #[async_trait]
 pub trait RepositoryAccessProvider: Send + Sync {
     async fn token_for_deploy(

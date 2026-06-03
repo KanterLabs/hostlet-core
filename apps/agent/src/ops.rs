@@ -116,7 +116,22 @@ pub(crate) struct StatusDetails<'a> {
 }
 
 pub(crate) async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
-    post_reliable(cfg, json!({"type":"deployment_status","deployment_id":id,"status":status,"failure":details.failure,"image_tag":details.image,"container_name":details.container,"local_url":details.local_url,"published_port":details.published_port,"compose_project":details.compose_project,"runtime_metadata":details.runtime_metadata})).await;
+    post_reliable(
+        cfg,
+        json!({
+            "type": "deployment_status",
+            "deployment_id": id,
+            "status": status,
+            "failure": details.failure,
+            "image_tag": details.image,
+            "container_name": details.container,
+            "local_url": details.local_url,
+            "published_port": details.published_port,
+            "compose_project": details.compose_project,
+            "runtime_metadata": details.runtime_metadata,
+        }),
+    )
+    .await;
 }
 
 pub(crate) async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
@@ -194,6 +209,42 @@ pub(crate) struct HealthTarget {
     health_path: String,
 }
 
+/// Builds a `health_status` event payload for a probed target. Centralizes the
+/// wire shape shared by scheduled, on-demand, and restart health reporting.
+fn health_status_event(
+    target: &HealthTarget,
+    result: &HealthProbeResult,
+    status: &str,
+    failure_count: u32,
+    success_count: u32,
+) -> Value {
+    json!({
+        "type": "health_status",
+        "app_id": target.app_id,
+        "deployment_id": target.deployment_id,
+        "container_name": target.container_name,
+        "status": status,
+        "checked_url": result.url,
+        "http_status": result.http_status,
+        "latency_ms": result.latency_ms,
+        "failure_count": failure_count,
+        "success_count": success_count,
+        "error": result.error,
+    })
+}
+
+/// `health_status` event for a one-shot probe, where the status is simply
+/// healthy or degraded and counts reflect this single observation.
+fn single_probe_health_event(target: &HealthTarget, result: &HealthProbeResult) -> Value {
+    let status = if result.healthy {
+        "healthy"
+    } else {
+        "degraded"
+    };
+    let (failure_count, success_count) = if result.healthy { (0, 1) } else { (1, 0) };
+    health_status_event(target, result, status, failure_count, success_count)
+}
+
 pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uuid, HealthCounts>) {
     let Ok(targets) = health_targets(cfg).await else {
         return;
@@ -216,19 +267,7 @@ pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uu
         };
         post(
             cfg,
-            json!({
-                "type": "health_status",
-                "app_id": target.app_id,
-                "deployment_id": target.deployment_id,
-                "container_name": target.container_name,
-                "status": status,
-                "checked_url": result.url,
-                "http_status": result.http_status,
-                "latency_ms": result.latency_ms,
-                "failure_count": entry.failures,
-                "success_count": entry.successes,
-                "error": result.error,
-            }),
+            health_status_event(&target, &result, status, entry.failures, entry.successes),
         )
         .await;
     }
@@ -239,23 +278,7 @@ pub(crate) async fn health_check_job(cfg: &Config, payload: &Value) {
         return;
     };
     let result = probe_health_target(cfg, &target).await;
-    post(
-        cfg,
-        json!({
-            "type": "health_status",
-            "app_id": target.app_id,
-            "deployment_id": target.deployment_id,
-            "container_name": target.container_name,
-            "status": if result.healthy { "healthy" } else { "degraded" },
-            "checked_url": result.url,
-            "http_status": result.http_status,
-            "latency_ms": result.latency_ms,
-            "failure_count": if result.healthy { 0 } else { 1 },
-            "success_count": if result.healthy { 1 } else { 0 },
-            "error": result.error,
-        }),
-    )
-    .await;
+    post(cfg, single_probe_health_event(&target, &result)).await;
 }
 
 pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
@@ -265,23 +288,7 @@ pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyh
     run_quiet("docker", &["restart", &target.container_name]).await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let result = probe_health_target(cfg, &target).await;
-    post(
-        cfg,
-        json!({
-            "type": "health_status",
-            "app_id": target.app_id,
-            "deployment_id": target.deployment_id,
-            "container_name": target.container_name,
-            "status": if result.healthy { "healthy" } else { "degraded" },
-            "checked_url": result.url,
-            "http_status": result.http_status,
-            "latency_ms": result.latency_ms,
-            "failure_count": if result.healthy { 0 } else { 1 },
-            "success_count": if result.healthy { 1 } else { 0 },
-            "error": result.error,
-        }),
-    )
-    .await;
+    post(cfg, single_probe_health_event(&target, &result)).await;
     Ok(())
 }
 
@@ -467,44 +474,22 @@ pub(crate) async fn publish_resource_stats(cfg: &Config) {
 }
 
 pub(crate) async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
-    let output = command_output(
-        "docker",
-        &[
-            "ps",
-            "--filter",
-            "name=^/hostlet-",
-            "--format",
-            "{{.Names}}",
-        ],
-        Duration::from_secs(15),
-    )
-    .await?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    let stdout = String::from_utf8(output.stdout)?;
-    Ok(stdout
-        .lines()
-        .map(str::trim)
-        .filter(|name| valid_container_name(name))
-        .map(str::to_string)
-        .collect())
+    list_hostlet_containers(false).await
 }
 
 pub(crate) async fn hostlet_containers_all() -> anyhow::Result<Vec<String>> {
-    let output = command_output(
-        "docker",
-        &[
-            "ps",
-            "-a",
-            "--filter",
-            "name=^/hostlet-",
-            "--format",
-            "{{.Names}}",
-        ],
-        Duration::from_secs(15),
-    )
-    .await?;
+    list_hostlet_containers(true).await
+}
+
+/// Lists Hostlet-managed container names via `docker ps`. When `include_all` is
+/// set, stopped containers are included (`docker ps -a`).
+async fn list_hostlet_containers(include_all: bool) -> anyhow::Result<Vec<String>> {
+    let mut args = vec!["ps"];
+    if include_all {
+        args.push("-a");
+    }
+    args.extend_from_slice(&["--filter", "name=^/hostlet-", "--format", "{{.Names}}"]);
+    let output = command_output("docker", &args, Duration::from_secs(15)).await?;
     if !output.status.success() {
         return Ok(Vec::new());
     }

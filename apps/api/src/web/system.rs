@@ -1,12 +1,32 @@
 use super::*;
 
+/// Returns an `UNAUTHORIZED` response unless the request carries a valid user
+/// session. Used by handlers that only require an authenticated user.
+fn require_user(headers: &HeaderMap, state: &AppState) -> Result<(), Box<Response>> {
+    if current_user_id(headers, state).is_some() {
+        Ok(())
+    } else {
+        Err(Box::new(StatusCode::UNAUTHORIZED.into_response()))
+    }
+}
+
+/// Returns an `UNAUTHORIZED` response unless the request carries a valid
+/// operator agent token. Used by operator-only handlers.
+async fn require_operator(headers: &HeaderMap, state: &AppState) -> Result<(), Box<Response>> {
+    if operator_token_valid(state, headers).await {
+        Ok(())
+    } else {
+        Err(Box::new(StatusCode::UNAUTHORIZED.into_response()))
+    }
+}
+
 pub async fn system_version(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(_user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
+    if let Err(response) = require_user(&headers, &state) {
+        return *response;
+    }
     let update = cached_update_check(&state).await;
     Json(serde_json::json!({
         "currentVersion": env!("CARGO_PKG_VERSION"),
@@ -21,9 +41,9 @@ pub async fn system_update_check(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(_user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
+    if let Err(response) = require_user(&headers, &state) {
+        return *response;
+    }
     if !state.update_checks_enabled {
         return (
             StatusCode::BAD_REQUEST,
@@ -41,8 +61,8 @@ pub async fn operator_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !operator_token_valid(&state, &headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(response) = require_operator(&headers, &state).await {
+        return *response;
     }
     let health = system_health_counts(&state).await;
     let servers = sqlx::query("SELECT status,count(*) AS count FROM servers GROUP BY status")
@@ -87,8 +107,8 @@ pub async fn operator_cleanup_preview(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !operator_token_valid(&state, &headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(response) = require_operator(&headers, &state).await {
+        return *response;
     }
     match cleanup_plan(&state, Uuid::nil()).await {
         Ok(plan) => Json(plan).into_response(),
@@ -103,8 +123,8 @@ pub async fn operator_run_cleanup(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !operator_token_valid(&state, &headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(response) = require_operator(&headers, &state).await {
+        return *response;
     }
     run_cleanup_inner(&state, None).await
 }
@@ -151,9 +171,9 @@ pub async fn backup_metadata(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(_user_id) = current_user_id(&headers, &state) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
+    if let Err(response) = require_user(&headers, &state) {
+        return *response;
+    }
     let row = sqlx::query("SELECT value FROM settings WHERE key='latest_backup_metadata'")
         .fetch_optional(&state.db)
         .await;
@@ -212,26 +232,26 @@ async fn fetch_latest_release(state: &AppState) -> anyhow::Result<UpdateCheck> {
         compose_migrations: false,
         database_migrations: false,
     };
-    if let Some(manifest_url) = value
-        .get("assets")
-        .and_then(|v| v.as_array())
-        .and_then(|assets| {
-            assets.iter().find_map(|asset| {
-                let name = asset.get("name")?.as_str()?;
-                (name == "hostlet-release.json")
-                    .then(|| {
-                        asset
-                            .get("browser_download_url")?
-                            .as_str()
-                            .map(str::to_string)
-                    })
-                    .flatten()
-            })
-        })
-    {
+    if let Some(manifest_url) = release_manifest_url(&value) {
         apply_update_manifest(state, &mut update, &manifest_url).await?;
     }
     Ok(update)
+}
+
+/// Locates the `browser_download_url` of the `hostlet-release.json` asset in a
+/// GitHub release payload, if present.
+fn release_manifest_url(release: &serde_json::Value) -> Option<String> {
+    let assets = release.get("assets")?.as_array()?;
+    for asset in assets {
+        let name = asset.get("name").and_then(|v| v.as_str());
+        if name != Some("hostlet-release.json") {
+            continue;
+        }
+        if let Some(url) = asset.get("browser_download_url").and_then(|v| v.as_str()) {
+            return Some(url.to_string());
+        }
+    }
+    None
 }
 
 async fn apply_update_manifest(

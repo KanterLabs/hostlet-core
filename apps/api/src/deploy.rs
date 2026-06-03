@@ -1,3 +1,5 @@
+mod deploy_app;
+
 use crate::{auth::request_context, state::AppState};
 use axum::{
     extract::{
@@ -8,6 +10,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use deploy_app::{DeployApp, DEPLOY_APP_COLUMNS};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use sqlx::Row;
@@ -160,18 +163,32 @@ pub async fn create_and_send_deploy(
     commit_sha: &str,
 ) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
-    let app = sqlx::query("SELECT id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,root_directory,install_command,build_command,start_command,memory_limit_mb,cpu_limit FROM apps WHERE id=$1 AND user_id=$2")
-        .bind(app_id).bind(user_id).fetch_one(&state.db).await?;
-    let server_id: Uuid = app.get("server_id");
-    let runtime_kind = app.get::<String, _>("runtime_kind");
-    let deployment_id: Uuid = match sqlx::query("INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,runtime_kind) VALUES ($1,$2,'queued',$3,now(),$4) RETURNING id")
-        .bind(app_id).bind(server_id).bind(commit_sha).bind(&runtime_kind).fetch_one(&state.db).await {
-            Ok(row) => row.get("id"),
-            Err(err) if is_active_deploy_unique_violation(&err) => {
-                anyhow::bail!("an active deployment is already running for this app")
-            }
-            Err(err) => return Err(err.into()),
-        };
+    let app_row = sqlx::query(&format!(
+        "SELECT {DEPLOY_APP_COLUMNS} FROM apps WHERE id=$1 AND user_id=$2"
+    ))
+    .bind(app_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+    let app = DeployApp::from_row(&app_row);
+    let server_id = app.server_id;
+    let insert_deployment = sqlx::query(
+        "INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,runtime_kind) \
+         VALUES ($1,$2,'queued',$3,now(),$4) RETURNING id",
+    )
+    .bind(app_id)
+    .bind(server_id)
+    .bind(commit_sha)
+    .bind(&app.runtime_kind)
+    .fetch_one(&state.db)
+    .await;
+    let deployment_id: Uuid = match insert_deployment {
+        Ok(row) => row.get("id"),
+        Err(err) if is_active_deploy_unique_violation(&err) => {
+            anyhow::bail!("an active deployment is already running for this app")
+        }
+        Err(err) => return Err(err.into()),
+    };
     let env_rows = sqlx::query("SELECT key,value_ciphertext FROM app_env_vars WHERE app_id=$1")
         .bind(app_id)
         .fetch_all(&state.db)
@@ -185,30 +202,15 @@ pub async fn create_and_send_deploy(
                 .decrypt(row.get::<String, _>("value_ciphertext").as_str())?),
         );
     }
-    let repo_full_name = app.get::<String, _>("repo_full_name");
-    let github_token = github_token_for_deploy(state, user_id, &repo_full_name)
-        .await
-        .ok()
-        .flatten();
-    let payload = json!({
-        "type": "deploy", "deployment_id": deployment_id, "app_id": app_id,
-        "route_key": route_key(app_id),
-        "app_name": app.get::<String,_>("name"), "repo": repo_full_name,
-        "branch": app.get::<String,_>("branch"), "commit_sha": commit_sha,
-        "container_port": app.get::<i32,_>("container_port"), "health_path": app.get::<String,_>("health_path"),
-        "domain": app.get::<String,_>("domain"), "env": env,
-        "runtime_kind": runtime_kind,
-        "hostlet_config_path": app.get::<String,_>("hostlet_config_path"),
-        "runtime_config": app.get::<serde_json::Value,_>("runtime_config"),
-        "packaging_strategy": app.get::<String,_>("packaging_strategy"),
-        "root_directory": app.get::<String,_>("root_directory"),
-        "install_command": app.get::<Option<String>,_>("install_command"),
-        "build_command": app.get::<Option<String>,_>("build_command"),
-        "start_command": app.get::<Option<String>,_>("start_command"),
-        "memory_limit_mb": app.get::<Option<i32>,_>("memory_limit_mb"),
-        "cpu_limit": app.get::<Option<f64>,_>("cpu_limit"),
-        "github_token": github_token
-    });
+    let github_token = github_access_token(state, user_id).await.ok().flatten();
+    let payload = app.deploy_payload(
+        deployment_id,
+        app_id,
+        route_key(app_id),
+        commit_sha,
+        env,
+        github_token,
+    );
     send_job(state, server_id, deployment_id, payload).await?;
     record_audit_event(
         state,
@@ -228,7 +230,14 @@ async fn create_and_send_rollback(
     app_id: Uuid,
 ) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
-    let app = sqlx::query("SELECT server_id,current_deployment_id,domain,container_port,runtime_kind FROM apps WHERE id=$1 AND user_id=$2").bind(app_id).bind(user_id).fetch_one(&state.db).await?;
+    let app = sqlx::query(
+        "SELECT server_id,current_deployment_id,domain,container_port,runtime_kind \
+         FROM apps WHERE id=$1 AND user_id=$2",
+    )
+    .bind(app_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
     if !rollback_supported_for_runtime(&app.get::<String, _>("runtime_kind")) {
         anyhow::bail!("Compose rollback is not supported in Hostlet 0.5.0; redeploy the target revision instead");
     }
@@ -244,17 +253,44 @@ async fn create_and_send_rollback(
         );
     };
     let server_id: Uuid = app.get("server_id");
-    let rollback_id: Uuid = match sqlx::query("INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,image_tag,container_name) VALUES ($1,$2,'queued','rollback',now(),$3,$4) RETURNING id")
-        .bind(app_id).bind(server_id).bind(prev.get::<Option<String>,_>("image_tag")).bind(prev.get::<Option<String>,_>("container_name")).fetch_one(&state.db).await {
-            Ok(row) => row.get("id"),
-            Err(err) if is_active_deploy_unique_violation(&err) => {
-                anyhow::bail!("an active deployment is already running for this app")
-            }
-            Err(err) => return Err(err.into()),
-        };
-    sqlx::query("INSERT INTO rollback_events (app_id,from_deployment_id,to_deployment_id,status) VALUES ($1,$2,$3,'queued')")
-        .bind(app_id).bind(current).bind(prev.get::<Uuid,_>("id")).execute(&state.db).await?;
-    let payload = json!({"type":"rollback","deployment_id": rollback_id, "app_id": app_id, "route_key": route_key(app_id), "target_deployment_id": prev.get::<Uuid,_>("id"), "target_container": prev.get::<Option<String>,_>("container_name"), "domain": app.get::<String,_>("domain"), "container_port": app.get::<i32,_>("container_port"), "published_port": published_port});
+    let insert_rollback = sqlx::query(
+        "INSERT INTO deployments \
+         (app_id,server_id,status,commit_sha,started_at,image_tag,container_name) \
+         VALUES ($1,$2,'queued','rollback',now(),$3,$4) RETURNING id",
+    )
+    .bind(app_id)
+    .bind(server_id)
+    .bind(prev.get::<Option<String>, _>("image_tag"))
+    .bind(prev.get::<Option<String>, _>("container_name"))
+    .fetch_one(&state.db)
+    .await;
+    let rollback_id: Uuid = match insert_rollback {
+        Ok(row) => row.get("id"),
+        Err(err) if is_active_deploy_unique_violation(&err) => {
+            anyhow::bail!("an active deployment is already running for this app")
+        }
+        Err(err) => return Err(err.into()),
+    };
+    sqlx::query(
+        "INSERT INTO rollback_events (app_id,from_deployment_id,to_deployment_id,status) \
+         VALUES ($1,$2,$3,'queued')",
+    )
+    .bind(app_id)
+    .bind(current)
+    .bind(prev.get::<Uuid, _>("id"))
+    .execute(&state.db)
+    .await?;
+    let payload = json!({
+        "type": "rollback",
+        "deployment_id": rollback_id,
+        "app_id": app_id,
+        "route_key": route_key(app_id),
+        "target_deployment_id": prev.get::<Uuid,_>("id"),
+        "target_container": prev.get::<Option<String>,_>("container_name"),
+        "domain": app.get::<String,_>("domain"),
+        "container_port": app.get::<i32,_>("container_port"),
+        "published_port": published_port,
+    });
     send_job(state, server_id, rollback_id, payload).await?;
     record_audit_event(
         state,
@@ -438,14 +474,6 @@ async fn github_access_token(state: &AppState, user_id: Uuid) -> anyhow::Result<
     .transpose()
 }
 
-async fn github_token_for_deploy(
-    state: &AppState,
-    user_id: Uuid,
-    _repo_full_name: &str,
-) -> anyhow::Result<Option<String>> {
-    github_access_token(state, user_id).await
-}
-
 #[cfg(test)]
 fn is_active_deployment_status(status: &str) -> bool {
     ACTIVE_DEPLOYMENT_STATUSES.contains(&status)
@@ -461,13 +489,16 @@ fn rollback_supported_for_runtime(runtime_kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_active_deployment_status, rollback_supported_for_runtime};
+    use super::{is_active_deployment_status, rollback_supported_for_runtime, route_key};
+    use uuid::Uuid;
 
     #[test]
-    fn rollback_requires_previous_success() {
-        let successes = vec!["a"];
-        let current = "a";
-        assert!(successes.into_iter().find(|id| *id != current).is_none());
+    fn route_key_is_app_prefixed_id() {
+        let app_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000ab").unwrap();
+        assert_eq!(
+            route_key(app_id),
+            "app-00000000-0000-0000-0000-0000000000ab"
+        );
     }
 
     #[test]

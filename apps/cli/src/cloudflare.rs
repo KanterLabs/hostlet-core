@@ -1,9 +1,80 @@
 use super::*;
 
+/// Walks a `result` array on a Cloudflare API response and pulls a string
+/// field off the first element, e.g. `result_first_str(&value, "id")`.
+fn result_first_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get("result")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get(field))
+        .and_then(Value::as_str)
+}
+
+/// Values resolved from the interactive Cloudflare prompts that are written
+/// into the env map. Separating this from the prompting/IO keeps the
+/// env-population step pure and easy to follow.
+struct CloudflareConfig {
+    domain: String,
+    hostlet_host: String,
+    app_prefix: String,
+    token: String,
+    zone_id: String,
+    tunnel_target: String,
+    tunnel_token: String,
+}
+
+impl CloudflareConfig {
+    fn populate_env(&self, env: &mut BTreeMap<String, String>) {
+        let web_url = format!("https://{}", self.hostlet_host);
+        env.insert("PUBLIC_WEB_URL".into(), web_url.clone());
+        env.insert("PUBLIC_API_URL".into(), web_url.clone());
+        env.insert("PUBLIC_WEBHOOK_URL".into(), web_url.clone());
+        env.insert(
+            "HOSTLET_CONTROL_PLANE_HOST".into(),
+            self.hostlet_host.clone(),
+        );
+        env.insert("HOSTLET_ALLOWED_WEB_ORIGINS".into(), web_url);
+        env.insert("HOSTLET_BASE_DOMAIN".into(), self.domain.clone());
+        env.insert("HOSTLET_DOMAIN_PREFIX".into(), self.app_prefix.clone());
+        env.insert("CLOUDFLARE_API_TOKEN".into(), self.token.clone());
+        env.insert("CLOUDFLARE_ZONE_ID".into(), self.zone_id.clone());
+        env.insert(
+            "CLOUDFLARE_TUNNEL_TARGET".into(),
+            self.tunnel_target.clone(),
+        );
+        env.insert("CLOUDFLARE_TUNNEL_TOKEN".into(), self.tunnel_token.clone());
+    }
+}
+
 pub(crate) async fn configure_cloudflare(
     theme: &ColorfulTheme,
     env: &mut BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
+    let config = prompt_cloudflare_config(theme).await?;
+    config.populate_env(env);
+    if Confirm::with_theme(theme)
+        .with_prompt(format!(
+            "Create/update DNS record for {}?",
+            config.hostlet_host
+        ))
+        .default(true)
+        .interact()?
+    {
+        upsert_cloudflare_cname(
+            &http_client()?,
+            &config.token,
+            &config.zone_id,
+            &config.hostlet_host,
+            &config.tunnel_target,
+        )
+        .await?;
+        println!("Cloudflare DNS ready for {}", config.hostlet_host);
+    }
+    Ok(())
+}
+
+async fn prompt_cloudflare_config(theme: &ColorfulTheme) -> anyhow::Result<CloudflareConfig> {
     let domain: String = Input::with_theme(theme)
         .with_prompt("Cloudflare zone/domain")
         .allow_empty(false)
@@ -48,40 +119,15 @@ pub(crate) async fn configure_cloudflare(
         select_or_create_tunnel(&client, theme, &token, account_id.trim(), &domain).await?
     };
 
-    env.insert("PUBLIC_WEB_URL".into(), format!("https://{hostlet_host}"));
-    env.insert("PUBLIC_API_URL".into(), format!("https://{hostlet_host}"));
-    env.insert(
-        "PUBLIC_WEBHOOK_URL".into(),
-        format!("https://{hostlet_host}"),
-    );
-    env.insert("HOSTLET_CONTROL_PLANE_HOST".into(), hostlet_host.clone());
-    env.insert(
-        "HOSTLET_ALLOWED_WEB_ORIGINS".into(),
-        format!("https://{hostlet_host}"),
-    );
-    env.insert("HOSTLET_BASE_DOMAIN".into(), domain);
-    env.insert("HOSTLET_DOMAIN_PREFIX".into(), app_prefix);
-    env.insert("CLOUDFLARE_API_TOKEN".into(), token);
-    env.insert("CLOUDFLARE_ZONE_ID".into(), zone_id);
-    env.insert("CLOUDFLARE_TUNNEL_TARGET".into(), tunnel_target);
-    env.insert("CLOUDFLARE_TUNNEL_TOKEN".into(), tunnel_token);
-    if Confirm::with_theme(theme)
-        .with_prompt(format!("Create/update DNS record for {hostlet_host}?"))
-        .default(true)
-        .interact()?
-    {
-        upsert_cloudflare_cname(
-            &client,
-            env.get("CLOUDFLARE_API_TOKEN").expect("token inserted"),
-            env.get("CLOUDFLARE_ZONE_ID").expect("zone inserted"),
-            &hostlet_host,
-            env.get("CLOUDFLARE_TUNNEL_TARGET")
-                .expect("tunnel target inserted"),
-        )
-        .await?;
-        println!("Cloudflare DNS ready for {hostlet_host}");
-    }
-    Ok(())
+    Ok(CloudflareConfig {
+        domain,
+        hostlet_host,
+        app_prefix,
+        token,
+        zone_id,
+        tunnel_target,
+        tunnel_token,
+    })
 }
 
 pub(crate) async fn lookup_cloudflare_zone(
@@ -98,13 +144,7 @@ pub(crate) async fn lookup_cloudflare_zone(
         .error_for_status()?
         .json()
         .await?;
-    Ok(value
-        .get("result")
-        .and_then(|v| v.as_array())
-        .and_then(|items| items.first())
-        .and_then(|zone| zone.get("id"))
-        .and_then(|id| id.as_str())
-        .map(str::to_string))
+    Ok(result_first_str(&value, "id").map(str::to_string))
 }
 
 pub(crate) async fn upsert_cloudflare_cname(
@@ -134,12 +174,7 @@ pub(crate) async fn upsert_cloudflare_cname(
         "content": target,
         "proxied": true
     });
-    let record_id = existing
-        .get("result")
-        .and_then(|v| v.as_array())
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("id"))
-        .and_then(|id| id.as_str());
+    let record_id = result_first_str(&existing, "id");
     let request = if let Some(record_id) = record_id {
         client.patch(format!("{base}/{record_id}"))
     } else {
@@ -215,10 +250,9 @@ pub(crate) async fn list_cloudflare_tunnels(
         .into_iter()
         .flatten()
         .filter(|tunnel| {
-            !tunnel
-                .get("deleted_at")
-                .map(|deleted_at| !deleted_at.is_null())
-                .unwrap_or(false)
+            // A tunnel is live when it has no non-null `deleted_at` timestamp.
+            let deleted_at = tunnel.get("deleted_at");
+            deleted_at.is_none() || deleted_at.is_some_and(Value::is_null)
         })
         .filter_map(|tunnel| {
             Some(CloudflareTunnel {

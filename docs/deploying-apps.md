@@ -13,9 +13,9 @@ The app should:
 - avoid printing secrets in logs
 - write persistent runtime data under `/data` when it needs Hostlet-managed persistence
 
-## Generated Node Apps
+## Generated Apps
 
-If no Dockerfile exists, Hostlet can generate a Node deployment for common app shapes.
+If no Dockerfile exists, Hostlet can generate a Railpack deployment for common app shapes, including Node package managers, Bun, Python, Go, Rust, static sites, and supported web frameworks.
 
 Generated apps run as a non-root user and receive `/data` for persistent app data when applicable.
 

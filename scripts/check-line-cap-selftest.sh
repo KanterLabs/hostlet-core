@@ -16,6 +16,10 @@ trap cleanup EXIT
 
 fail() { echo "check-line-cap self-test FAILED: $1" >&2; exit 1; }
 
+# Each case removes its own fixture before the next so that a failure isolates
+# the single criterion under test (a stale fixture would also trip the guard and
+# mask which rule actually fired). The EXIT trap is the backstop on early exit.
+
 # 1) a *_partN.rs shard filename must be rejected.
 printf 'fn x() {}\n' > "${shard_fixture}"
 if scripts/check-line-cap.sh >/dev/null 2>&1; then

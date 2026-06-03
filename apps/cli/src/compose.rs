@@ -7,10 +7,14 @@ pub(crate) fn compose_up(root: &Path, tunnel: bool, dev: bool) -> anyhow::Result
         args.extend(["--profile".into(), "tunnel".into()]);
     }
     if dev {
+        // Dev builds images locally from the working tree, so there is no
+        // published image to pull; we build in place instead of pulling.
         args.extend(["up".into(), "-d".into(), "--build".into()]);
         return run_passthrough(root, "docker", &args);
     }
 
+    // Prod runs released images: pull the pinned tags first, then start
+    // without rebuilding so we never compile from the host.
     let mut pull_args = args.clone();
     pull_args.push("pull".into());
     run_passthrough(root, "docker", &pull_args)?;

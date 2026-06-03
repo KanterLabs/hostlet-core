@@ -13,30 +13,9 @@ pub async fn ws(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let Some(server_id) = header_uuid(&headers, "x-hostlet-server-id") else {
+    let Some(server_id) = authenticated_server_id(&state, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let Some(token) = headers
-        .get("x-hostlet-agent-token")
-        .and_then(|v| v.to_str().ok())
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let row = sqlx::query("SELECT agent_token_hash FROM servers WHERE id=$1")
-        .bind(server_id)
-        .fetch_optional(&state.db)
-        .await;
-    let Ok(Some(row)) = row else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let expected: Option<String> = row.get("agent_token_hash");
-    if !expected
-        .as_deref()
-        .map(|h| verify_token(token, h))
-        .unwrap_or(false)
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     ws.on_upgrade(move |socket| handle_socket(state, server_id, socket))
 }
 
@@ -45,30 +24,9 @@ pub async fn event(
     headers: HeaderMap,
     Json(value): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let Some(server_id) = header_uuid(&headers, "x-hostlet-server-id") else {
+    let Some(server_id) = authenticated_server_id(&state, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let Some(token) = headers
-        .get("x-hostlet-agent-token")
-        .and_then(|v| v.to_str().ok())
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let row = sqlx::query("SELECT agent_token_hash FROM servers WHERE id=$1")
-        .bind(server_id)
-        .fetch_optional(&state.db)
-        .await;
-    let Ok(Some(row)) = row else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let expected: Option<String> = row.get("agent_token_hash");
-    if !expected
-        .as_deref()
-        .map(|h| verify_token(token, h))
-        .unwrap_or(false)
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     handle_agent_message(&state, server_id, value).await;
     StatusCode::ACCEPTED.into_response()
 }
@@ -139,23 +97,56 @@ pub async fn claim_job(
         .filter(|value| !value.is_empty())
         .unwrap_or("local-agent");
 
-    let _ = sqlx::query(
-        "UPDATE agent_jobs
-         SET status='queued',
+    // Free up any of this server's own jobs whose lease expired before we look
+    // for new work, so a crashed-and-restarted agent can re-claim them.
+    requeue_expired_jobs_for_server(&state, server_id).await;
+
+    match claim_next_queued_job(&state, server_id, agent_id).await {
+        Ok(Some(row)) => claim_job_response(&state, server_id, row).await,
+        Ok(None) => Json(serde_json::json!({"job": null})).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, %server_id, "failed to claim agent job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Predicate identifying jobs whose lease has lapsed but still have retries left.
+/// Shared verbatim with `recover_stale_agent_jobs` so the requeue rule cannot drift.
+const RETRYABLE_EXPIRED_JOBS_PREDICATE: &str = "status IN ('claimed','running')
+           AND lease_expires_at < now()
+           AND attempt < max_attempts";
+
+/// SET clause that returns an expired job to the queue, clearing claim/lease state.
+const REQUEUE_JOB_SET_CLAUSE: &str = "SET status='queued',
              claimed_by=NULL,
              claimed_at=NULL,
              lease_expires_at=NULL,
-             updated_at=now()
+             updated_at=now()";
+
+/// Requeue this server's own expired-but-retryable jobs (scoped lease recovery).
+async fn requeue_expired_jobs_for_server(state: &AppState, server_id: Uuid) {
+    let _ = sqlx::query(&format!(
+        "UPDATE agent_jobs
+         {REQUEUE_JOB_SET_CLAUSE}
          WHERE server_id=$1
-           AND status IN ('claimed','running')
-           AND lease_expires_at < now()
-           AND attempt < max_attempts",
-    )
+           AND {RETRYABLE_EXPIRED_JOBS_PREDICATE}"
+    ))
     .bind(server_id)
     .execute(&state.db)
     .await;
+}
 
-    let row = sqlx::query(
+/// Atomically claim the highest-priority queued job for this server using
+/// `FOR UPDATE SKIP LOCKED` so concurrent claimers never contend on the same row.
+/// Jobs with an empty payload are skipped (`payload_json <> '{}'`) since they have
+/// nothing for the agent to execute.
+async fn claim_next_queued_job(
+    state: &AppState,
+    server_id: Uuid,
+    agent_id: &str,
+) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
+    sqlx::query(
         r#"
         UPDATE agent_jobs
         SET status='claimed',
@@ -181,49 +172,48 @@ pub async fn claim_job(
     .bind(server_id)
     .bind(agent_id)
     .fetch_optional(&state.db)
-    .await;
+    .await
+}
 
-    match row {
-        Ok(Some(row)) => {
-            let mut payload = row.get::<serde_json::Value, _>("payload_json");
-            if let Some(object) = payload.as_object_mut() {
-                object.insert("job_id".into(), serde_json::json!(row.get::<Uuid, _>("id")));
-                object.insert(
-                    "job_type".into(),
-                    serde_json::json!(row.get::<String, _>("job_type")),
-                );
-            }
-            let secret = match crate::deploy::job_signing_secret_for_server(&state, server_id).await
-            {
-                Ok(secret) => secret,
-                Err(err) => {
-                    tracing::warn!(error = %err, %server_id, "failed to load job signing secret");
-                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                }
-            };
-            let body = match serde_json::to_vec(&payload) {
-                Ok(body) => body,
-                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            };
-            Json(serde_json::json!({
-                "job": {
-                    "id": row.get::<Uuid, _>("id"),
-                    "type": row.get::<String, _>("job_type"),
-                    "appId": row.get::<Option<Uuid>, _>("app_id"),
-                    "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
-                    "attempt": row.get::<i32, _>("attempt"),
-                    "payload": payload,
-                    "signature": sign(&secret, &body),
-                }
-            }))
-            .into_response()
-        }
-        Ok(None) => Json(serde_json::json!({"job": null})).into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, %server_id, "failed to claim agent job");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+/// Shape a claimed job row into the signed JSON envelope returned to the agent:
+/// inject `job_id`/`job_type` into the payload, sign the serialized payload, and
+/// surface DB/secret/serialization failures as 500s.
+async fn claim_job_response(
+    state: &AppState,
+    server_id: Uuid,
+    row: sqlx::postgres::PgRow,
+) -> axum::response::Response {
+    let mut payload = row.get::<serde_json::Value, _>("payload_json");
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("job_id".into(), serde_json::json!(row.get::<Uuid, _>("id")));
+        object.insert(
+            "job_type".into(),
+            serde_json::json!(row.get::<String, _>("job_type")),
+        );
     }
+    let secret = match crate::deploy::job_signing_secret_for_server(state, server_id).await {
+        Ok(secret) => secret,
+        Err(err) => {
+            tracing::warn!(error = %err, %server_id, "failed to load job signing secret");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let body = match serde_json::to_vec(&payload) {
+        Ok(body) => body,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    Json(serde_json::json!({
+        "job": {
+            "id": row.get::<Uuid, _>("id"),
+            "type": row.get::<String, _>("job_type"),
+            "appId": row.get::<Option<Uuid>, _>("app_id"),
+            "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
+            "attempt": row.get::<i32, _>("attempt"),
+            "payload": payload,
+            "signature": sign(&secret, &body),
+        }
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -276,21 +266,18 @@ pub async fn complete_job(
 }
 
 pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
-    let retried = sqlx::query(
+    // Expired jobs with retries left go back to the queue (same rule as the
+    // per-server requeue in `claim_job`, shared via the constant predicate).
+    let retried = sqlx::query(&format!(
         "UPDATE agent_jobs
-         SET status='queued',
-             claimed_by=NULL,
-             claimed_at=NULL,
-             lease_expires_at=NULL,
-             updated_at=now()
-         WHERE status IN ('claimed','running')
-           AND lease_expires_at < now()
-           AND attempt < max_attempts",
-    )
+         {REQUEUE_JOB_SET_CLAUSE}
+         WHERE {RETRYABLE_EXPIRED_JOBS_PREDICATE}"
+    ))
     .execute(&state.db)
     .await?
     .rows_affected();
 
+    // Expired jobs that have exhausted their attempts are marked failed.
     let failed = sqlx::query(
         "UPDATE agent_jobs
          SET status='failed',

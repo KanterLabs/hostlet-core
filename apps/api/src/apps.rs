@@ -48,6 +48,12 @@ pub struct NewAppRecord {
 
 /// Why persisting a new app failed, mapped to the HTTP status the handlers
 /// previously returned inline.
+///
+/// Only two variants are exposed so callers stay a simple status mapping
+/// (`Insert` → 400, `Internal` → 500); finer-grained diagnostics about *which*
+/// internal step failed (transaction, env encryption, commit) are emitted via
+/// `tracing` inside [`create_app_record`] instead of widening this enum, which
+/// would force every caller's `match` to grow new arms.
 #[derive(Debug)]
 pub enum CreateAppError {
     /// The INSERT was rejected (e.g. a constraint violation). Handlers return
@@ -63,11 +69,38 @@ pub async fn create_app_record(
     state: &AppState,
     record: NewAppRecord,
 ) -> Result<Uuid, CreateAppError> {
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|_| CreateAppError::Internal)?;
+    // Destructure up front so every field is a named local and each `.bind`
+    // below references it by name: a reordered struct field can no longer
+    // silently land in the wrong column, and an added/removed field is a
+    // compile error here rather than silent data corruption.
+    let NewAppRecord {
+        user_id,
+        server_id,
+        name,
+        repo_full_name,
+        branch,
+        container_port,
+        health_path,
+        domain,
+        runtime_kind,
+        hostlet_config_path,
+        runtime_config,
+        packaging_strategy,
+        root_directory,
+        install_command,
+        build_command,
+        start_command,
+        memory_limit_mb,
+        cpu_limit,
+        public_exposure,
+        auto_deploy,
+        env,
+    } = record;
+
+    let mut tx = state.db.begin().await.map_err(|err| {
+        tracing::error!(error = %err, "create_app_record: failed to begin transaction");
+        CreateAppError::Internal
+    })?;
     let row = sqlx::query(
         "INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,\
          health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,\
@@ -76,43 +109,49 @@ pub async fn create_app_record(
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) \
          RETURNING id",
     )
-    .bind(record.user_id)
-    .bind(record.server_id)
-    .bind(record.name)
-    .bind(record.repo_full_name)
-    .bind(record.branch)
-    .bind(record.container_port)
-    .bind(record.health_path)
-    .bind(record.domain)
-    .bind(record.runtime_kind)
-    .bind(record.hostlet_config_path)
-    .bind(record.runtime_config)
-    .bind(record.packaging_strategy)
-    .bind(record.root_directory)
-    .bind(record.install_command)
-    .bind(record.build_command)
-    .bind(record.start_command)
-    .bind(record.memory_limit_mb)
-    .bind(record.cpu_limit)
-    .bind(record.public_exposure)
-    .bind(record.auto_deploy)
+    .bind(user_id) // $1  user_id
+    .bind(server_id) // $2  server_id
+    .bind(name) // $3  name
+    .bind(repo_full_name) // $4  repo_full_name
+    .bind(branch) // $5  branch
+    .bind(container_port) // $6  container_port
+    .bind(health_path) // $7  health_path
+    .bind(domain) // $8  domain
+    .bind(runtime_kind) // $9  runtime_kind
+    .bind(hostlet_config_path) // $10 hostlet_config_path
+    .bind(runtime_config) // $11 runtime_config
+    .bind(packaging_strategy) // $12 packaging_strategy
+    .bind(root_directory) // $13 root_directory
+    .bind(install_command) // $14 install_command
+    .bind(build_command) // $15 build_command
+    .bind(start_command) // $16 start_command
+    .bind(memory_limit_mb) // $17 memory_limit_mb
+    .bind(cpu_limit) // $18 cpu_limit
+    .bind(public_exposure) // $19 public_exposure
+    .bind(auto_deploy) // $20 auto_deploy
     .fetch_one(&mut *tx)
     .await
     .map_err(|_| CreateAppError::Insert)?;
     let app_id: Uuid = row.get("id");
-    for ev in record.env {
-        let ciphertext = state
-            .crypto
-            .encrypt(&ev.value)
-            .map_err(|_| CreateAppError::Internal)?;
+    for ev in env {
+        let ciphertext = state.crypto.encrypt(&ev.value).map_err(|err| {
+            tracing::error!(error = %err, "create_app_record: failed to encrypt env var");
+            CreateAppError::Internal
+        })?;
         sqlx::query("INSERT INTO app_env_vars (app_id,key,value_ciphertext) VALUES ($1,$2,$3)")
             .bind(app_id)
             .bind(ev.key)
             .bind(ciphertext)
             .execute(&mut *tx)
             .await
-            .map_err(|_| CreateAppError::Internal)?;
+            .map_err(|err| {
+                tracing::error!(error = %err, "create_app_record: failed to insert env var");
+                CreateAppError::Internal
+            })?;
     }
-    tx.commit().await.map_err(|_| CreateAppError::Internal)?;
+    tx.commit().await.map_err(|err| {
+        tracing::error!(error = %err, "create_app_record: failed to commit transaction");
+        CreateAppError::Internal
+    })?;
     Ok(app_id)
 }

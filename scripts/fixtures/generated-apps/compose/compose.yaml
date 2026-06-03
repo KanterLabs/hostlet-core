@@ -1,0 +1,17 @@
+services:
+  web:
+    image: node:22-alpine
+    command: >
+      node -e "const http=require('http'); const port=Number(process.env.PORT||3000);
+      http.createServer((req,res)=>{res.writeHead(200,{'content-type':'text/plain'});
+      res.end(req.url==='/health'?'ok':'hostlet-compose-fullstack');}).listen(port,'0.0.0.0');"
+    environment:
+      PORT: "3000"
+    depends_on:
+      - cache
+  cache:
+    image: redis:7-alpine
+    volumes:
+      - cache-data:/data
+volumes:
+  cache-data:

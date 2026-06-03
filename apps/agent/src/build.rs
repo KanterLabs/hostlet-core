@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) const NO_NATIVE_BUILD_PLAN: &str = "No repository Dockerfile selected";
+
 pub(crate) fn normalize_git_remote(value: &str) -> String {
     value
         .trim()
@@ -21,8 +23,6 @@ pub(crate) struct BuildPlan {
     pub(crate) dockerfile: PathBuf,
     pub(crate) generated: bool,
     pub(crate) packaging_strategy: PackagingStrategy,
-    pub(crate) detected_framework: Option<Framework>,
-    pub(crate) package_manager: Option<PackageManager>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,124 +61,56 @@ pub(crate) async fn prepare_build(
     cfg: &Config,
     deployment_id: Uuid,
     checkout: &Path,
-    port: i64,
+    _port: i64,
     payload: &Value,
 ) -> anyhow::Result<BuildPlan> {
     let packaging_strategy = PackagingStrategy::from_payload(payload)?;
+    if let Some(plan) =
+        dockerfile_packaging_plan(cfg, deployment_id, checkout, packaging_strategy).await?
+    {
+        return Ok(plan);
+    }
+    bail!(NO_NATIVE_BUILD_PLAN)
+}
+
+/// Returns a repository-Dockerfile [`BuildPlan`] when one applies, or `None`
+/// when the build should fall through to auto-generated packaging.
+async fn dockerfile_packaging_plan(
+    cfg: &Config,
+    deployment_id: Uuid,
+    checkout: &Path,
+    packaging_strategy: PackagingStrategy,
+) -> anyhow::Result<Option<BuildPlan>> {
     let root_dockerfile = checkout.join("Dockerfile");
     let has_dockerfile = tokio::fs::try_exists(&root_dockerfile).await?;
     if packaging_strategy == PackagingStrategy::Dockerfile && !has_dockerfile {
         bail!("packaging strategy dockerfile requires a Dockerfile at the app root");
     }
-    if has_dockerfile && packaging_strategy != PackagingStrategy::Generated {
-        log(
-            cfg,
-            deployment_id,
-            "stdout",
-            "Detected Dockerfile at app root. Using repository Dockerfile packaging.",
-        )
-        .await;
-        return Ok(BuildPlan {
-            context: checkout.to_path_buf(),
-            dockerfile: root_dockerfile,
-            generated: false,
-            packaging_strategy: PackagingStrategy::Dockerfile,
-            detected_framework: None,
-            package_manager: None,
-        });
+    if !has_dockerfile || packaging_strategy == PackagingStrategy::Generated {
+        return Ok(None);
     }
-
-    let package_json = checkout.join("package.json");
-    if !tokio::fs::try_exists(&package_json).await? {
-        bail!("No usable Dockerfile or package.json found");
-    }
-
-    let contents = tokio::fs::read_to_string(&package_json).await?;
-    let package: Value =
-        serde_json::from_str(&contents).context("package.json is not valid JSON")?;
-    let scripts = package
-        .get("scripts")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
-    let deps = collect_deps(&package);
-    let framework = detect_framework(&deps);
-    let package_manager = detect_package_manager(checkout).await?;
-    let install_command = payload
-        .get("install_command")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_string);
-    let build_command = payload
-        .get("build_command")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            pick_build_command(&scripts, framework)
-                .map(|script| package_manager.run_command(&script))
-        });
-    let start_command = payload
-        .get("start_command")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            pick_start_command(&scripts, framework).map(|script| {
-                if script == "__hostlet_static" {
-                    script
-                } else {
-                    package_manager.run_command(&script)
-                }
-            })
-        });
-
-    let Some(start_command) = start_command else {
-        bail!("Node app detected, but no start command could be inferred");
-    };
-    if let Some(command) = install_command.as_deref() {
-        validate_dockerfile_command(command)?;
-    }
-    if let Some(command) = build_command.as_deref() {
-        validate_dockerfile_command(command)?;
-    }
-    validate_dockerfile_command(&start_command)?;
-
     log(
         cfg,
         deployment_id,
         "stdout",
-        &format!(
-            "Detected {} app. Generating optimized Hostlet Dockerfile with {}.",
-            framework.label(),
-            package_manager.label()
-        ),
+        "Detected Dockerfile at app root. Using repository Dockerfile packaging.",
     )
     .await;
-
-    let hostlet_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
-    tokio::fs::create_dir_all(&hostlet_dir).await?;
-    let dockerfile = hostlet_dir.join("Dockerfile");
-    tokio::fs::write(
-        &dockerfile,
-        generated_node_dockerfile(
-            package_manager,
-            install_command.as_deref(),
-            build_command.as_deref(),
-            &start_command,
-            port,
-            framework,
-        ),
-    )
-    .await?;
-    Ok(BuildPlan {
+    Ok(Some(BuildPlan {
         context: checkout.to_path_buf(),
-        dockerfile,
-        generated: true,
-        packaging_strategy: PackagingStrategy::Generated,
-        detected_framework: Some(framework),
-        package_manager: Some(package_manager),
-    })
+        dockerfile: root_dockerfile,
+        generated: false,
+        packaging_strategy: PackagingStrategy::Dockerfile,
+    }))
+}
+
+/// Reads a non-blank string command override from the deploy payload.
+pub(crate) fn payload_command(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) async fn safe_project_dir(
@@ -208,237 +140,6 @@ pub(crate) async fn safe_project_dir(
         bail!("root directory cannot resolve outside the repository checkout");
     }
     Ok(project)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PackageManager {
-    Npm,
-    Pnpm,
-    Yarn,
-}
-
-impl PackageManager {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Npm => "npm",
-            Self::Pnpm => "pnpm",
-            Self::Yarn => "yarn",
-        }
-    }
-    fn install_command(self) -> &'static str {
-        match self {
-            Self::Npm => "npm ci",
-            Self::Pnpm => "corepack enable && corepack prepare pnpm@10.33.2 --activate && pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds=true",
-            Self::Yarn => "corepack enable && yarn install --frozen-lockfile",
-        }
-    }
-    fn run_command(self, script: &str) -> String {
-        match self {
-            Self::Npm => format!("npm run {script}"),
-            Self::Pnpm => format!("pnpm run {script}"),
-            Self::Yarn => format!("yarn {script}"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Framework {
-    Next,
-    Vite,
-    Astro,
-    Nuxt,
-    Remix,
-    SvelteKit,
-    Node,
-}
-
-impl Framework {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Next => "Next.js",
-            Self::Vite => "Vite",
-            Self::Astro => "Astro",
-            Self::Nuxt => "Nuxt",
-            Self::Remix => "Remix",
-            Self::SvelteKit => "SvelteKit",
-            Self::Node => "Node",
-        }
-    }
-
-    fn runtime_kind(self) -> &'static str {
-        match self {
-            Self::Vite | Self::Astro | Self::SvelteKit => "static",
-            Self::Next | Self::Nuxt | Self::Remix | Self::Node => "node",
-        }
-    }
-}
-
-pub(crate) async fn detect_package_manager(checkout: &Path) -> anyhow::Result<PackageManager> {
-    if tokio::fs::try_exists(checkout.join("pnpm-lock.yaml")).await? {
-        return Ok(PackageManager::Pnpm);
-    }
-    if tokio::fs::try_exists(checkout.join("yarn.lock")).await? {
-        return Ok(PackageManager::Yarn);
-    }
-    Ok(PackageManager::Npm)
-}
-
-pub(crate) fn collect_deps(package: &Value) -> HashMap<String, String> {
-    let mut deps = HashMap::new();
-    for key in ["dependencies", "devDependencies"] {
-        if let Some(map) = package.get(key).and_then(|v| v.as_object()) {
-            for (name, version) in map {
-                deps.insert(name.to_string(), version.as_str().unwrap_or("").to_string());
-            }
-        }
-    }
-    deps
-}
-
-pub(crate) fn detect_framework(deps: &HashMap<String, String>) -> Framework {
-    if deps.contains_key("next") {
-        Framework::Next
-    } else if deps.contains_key("astro") {
-        Framework::Astro
-    } else if deps.contains_key("nuxt") {
-        Framework::Nuxt
-    } else if deps.contains_key("@remix-run/node") || deps.contains_key("@remix-run/react") {
-        Framework::Remix
-    } else if deps.contains_key("@sveltejs/kit") {
-        Framework::SvelteKit
-    } else if deps.contains_key("vite") {
-        Framework::Vite
-    } else {
-        Framework::Node
-    }
-}
-
-pub(crate) fn pick_build_command(
-    scripts: &serde_json::Map<String, Value>,
-    framework: Framework,
-) -> Option<String> {
-    if scripts.contains_key("build") {
-        return Some("build".into());
-    }
-    match framework {
-        Framework::Node => None,
-        _ => Some("build".into()),
-    }
-}
-
-pub(crate) fn pick_start_command(
-    scripts: &serde_json::Map<String, Value>,
-    framework: Framework,
-) -> Option<String> {
-    if scripts.contains_key("start") {
-        return Some("start".into());
-    }
-    match framework {
-        Framework::Vite | Framework::Astro | Framework::SvelteKit => {
-            Some("__hostlet_static".into())
-        }
-        Framework::Next | Framework::Nuxt | Framework::Remix | Framework::Node => None,
-    }
-}
-
-pub(crate) fn generated_node_dockerfile(
-    pm: PackageManager,
-    install_command: Option<&str>,
-    build_command: Option<&str>,
-    start_command: &str,
-    port: i64,
-    framework: Framework,
-) -> String {
-    let build_line = build_command
-        .map(|command| format!("RUN {command}\n"))
-        .unwrap_or_default();
-    let install = install_command.unwrap_or_else(|| pm.install_command());
-    if start_command == "__hostlet_static" {
-        return format!(
-            "FROM node:22-alpine AS deps\n\
-             WORKDIR /app\n\
-             COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\n\
-             RUN {install}\n\
-             \n\
-             FROM node:22-alpine AS builder\n\
-             WORKDIR /app\n\
-             COPY --from=deps /app/node_modules ./node_modules\n\
-             COPY . .\n\
-             {build_line}\
-             \n\
-             FROM node:22-alpine AS runner\n\
-             WORKDIR /app\n\
-             RUN npm install -g serve@14.2.5 && addgroup -S hostlet && adduser -S hostlet -G hostlet\n\
-             COPY --from=builder --chown=hostlet:hostlet /app/dist ./dist\n\
-             USER hostlet\n\
-             ENV NODE_ENV=production\n\
-             ENV PORT={port}\n\
-             EXPOSE {port}\n\
-             CMD [\"sh\", \"-lc\", \"serve -s dist -l tcp://0.0.0.0:${{PORT}}\"]\n",
-            install = install,
-            port = port,
-            build_line = build_line
-        );
-    }
-    let prune_line = match pm {
-        PackageManager::Npm => "RUN npm prune --omit=dev\n",
-        PackageManager::Pnpm => {
-            "RUN corepack enable && corepack prepare pnpm@10.33.2 --activate && pnpm prune --prod\n"
-        }
-        PackageManager::Yarn => {
-            "RUN corepack enable && yarn install --production --ignore-scripts --prefer-offline\n"
-        }
-    };
-    let runner_copy = if framework == Framework::Next {
-        "COPY --from=builder --chown=hostlet:hostlet /app/.next ./.next\n\
-         COPY --from=builder --chown=hostlet:hostlet /app/public ./public\n"
-    } else if framework == Framework::Nuxt {
-        "COPY --from=builder --chown=hostlet:hostlet /app/.output ./.output\n"
-    } else {
-        "COPY --from=builder --chown=hostlet:hostlet /app .\n"
-    };
-    let effective_start = if framework == Framework::Nuxt && start_command == "npm run start" {
-        "node .output/server/index.mjs"
-    } else {
-        start_command
-    };
-    let start_line = format!(
-        "CMD [\"sh\", \"-lc\", {}]",
-        serde_json::to_string(effective_start).expect("string serialization cannot fail")
-    );
-    format!(
-        "FROM node:22-alpine AS deps\n\
-         WORKDIR /app\n\
-         COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./\n\
-         RUN {install}\n\
-         \n\
-         FROM node:22-alpine AS builder\n\
-         WORKDIR /app\n\
-         COPY --from=deps /app/node_modules ./node_modules\n\
-         COPY . .\n\
-         {build_line}\
-         RUN mkdir -p public\n\
-         {prune_line}\
-         \n\
-         FROM node:22-alpine AS runner\n\
-         WORKDIR /app\n\
-         RUN addgroup -S hostlet && adduser -S hostlet -G hostlet\n\
-         COPY --from=builder --chown=hostlet:hostlet /app/package.json ./package.json\n\
-         COPY --from=builder --chown=hostlet:hostlet /app/node_modules ./node_modules\n\
-         {runner_copy}\
-         USER hostlet\n\
-         ENV NODE_ENV=production\n\
-         ENV NPM_CONFIG_CACHE=/tmp/.npm\n\
-         ENV PORT={port}\n\
-         EXPOSE {port}\n\
-         {start_line}\n",
-        install = install,
-        port = port,
-        build_line = build_line,
-        prune_line = prune_line,
-        runner_copy = runner_copy,
-        start_line = start_line
-    )
 }
 
 pub(crate) fn generated_dockerignore() -> &'static str {
@@ -525,9 +226,10 @@ pub(crate) fn build_runtime_metadata(
     json!({
         "packagingStrategy": build.packaging_strategy.label(),
         "generatedDockerfile": build.generated,
-        "detectedFramework": build.detected_framework.map(|framework| framework.label()),
-        "runtimeKind": build.detected_framework.map(|framework| framework.runtime_kind()),
-        "packageManager": build.package_manager.map(|pm| pm.label()),
+        "detectedLanguage": null,
+        "detectedFramework": null,
+        "runtimeKind": null,
+        "packageManager": null,
         "buildDurationMs": build_duration_ms,
         "imageSizeBytes": image_size_bytes,
     })

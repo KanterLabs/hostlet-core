@@ -30,6 +30,103 @@ struct Rule {
     window: Duration,
 }
 
+/// Once the bucket map grows past this many distinct keys we sweep expired
+/// entries. It is a soft cap on memory, not a correctness bound: picked high
+/// enough that normal traffic never triggers a sweep, low enough that a flood
+/// of one-off keys can't grow the map unboundedly.
+const BUCKET_EVICTION_THRESHOLD: usize = 10_000;
+
+/// Idle buckets older than this are dropped during an eviction sweep. It only
+/// needs to exceed the longest per-route window so we never evict a bucket that
+/// is still inside its active window.
+const BUCKET_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// The fixed window every per-route limit below is measured over.
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Per-route fixed-window limits, evaluated top-to-bottom in [`rule_for`].
+///
+/// `max` is the number of requests allowed per `window` per
+/// ([`Rule::name`], client IP[, agent scope]) bucket. Values are sized to the
+/// expected legitimate call rate of each endpoint with headroom for retries:
+/// interactive auth flows (`setup`, `unlock`, device start) stay low to blunt
+/// brute force; the device-poll loop and webhook/agent telemetry paths run hot,
+/// so `agent-events` is by far the most permissive.
+const RULES: &[(Method, &str, Rule)] = &[
+    (
+        Method::POST,
+        "/api/setup",
+        Rule {
+            name: "setup",
+            max: 8,
+            window: RATE_WINDOW,
+        },
+    ),
+    (
+        Method::POST,
+        "/api/unlock",
+        Rule {
+            name: "unlock",
+            max: 10,
+            window: RATE_WINDOW,
+        },
+    ),
+    (
+        Method::POST,
+        "/auth/github/device/start",
+        Rule {
+            name: "github-device-start",
+            max: 12,
+            window: RATE_WINDOW,
+        },
+    ),
+    (
+        Method::POST,
+        "/auth/github/device/poll",
+        Rule {
+            name: "github-device-poll",
+            max: 90,
+            window: RATE_WINDOW,
+        },
+    ),
+    (
+        Method::POST,
+        "/api/agent/register",
+        Rule {
+            name: "agent-register",
+            max: 20,
+            window: RATE_WINDOW,
+        },
+    ),
+    (
+        Method::POST,
+        "/api/agent/events",
+        Rule {
+            name: "agent-events",
+            max: 1_500,
+            window: RATE_WINDOW,
+        },
+    ),
+    (
+        Method::GET,
+        "/ws/agent",
+        Rule {
+            name: "agent-ws",
+            max: 30,
+            window: RATE_WINDOW,
+        },
+    ),
+    (
+        Method::POST,
+        "/webhooks/github",
+        Rule {
+            name: "github-webhook",
+            max: 120,
+            window: RATE_WINDOW,
+        },
+    ),
+];
+
 impl Default for RateLimiter {
     fn default() -> Self {
         Self {
@@ -42,9 +139,8 @@ impl RateLimiter {
     pub fn check(&self, key: String, max: u32, window: Duration) -> bool {
         let now = Instant::now();
         let mut buckets = self.buckets.lock().expect("rate limiter mutex poisoned");
-        if buckets.len() > 10_000 {
-            buckets
-                .retain(|_, bucket| now.duration_since(bucket.started_at) <= bucket_window_ttl());
+        if buckets.len() > BUCKET_EVICTION_THRESHOLD {
+            buckets.retain(|_, bucket| now.duration_since(bucket.started_at) <= BUCKET_IDLE_TTL);
         }
         let bucket = buckets.entry(key).or_insert(Bucket {
             started_at: now,
@@ -80,51 +176,24 @@ pub async fn rate_limit(
 }
 
 fn rule_for(method: &Method, path: &str) -> Option<Rule> {
-    match (method, path) {
-        (&Method::POST, "/api/setup") => Some(Rule {
-            name: "setup",
-            max: 8,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::POST, "/api/unlock") => Some(Rule {
-            name: "unlock",
-            max: 10,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::POST, "/auth/github/device/start") => Some(Rule {
-            name: "github-device-start",
-            max: 12,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::POST, "/auth/github/device/poll") => Some(Rule {
-            name: "github-device-poll",
-            max: 90,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::POST, "/api/agent/register") => Some(Rule {
-            name: "agent-register",
-            max: 20,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::POST, "/api/agent/events") => Some(Rule {
-            name: "agent-events",
-            max: 1_500,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::GET, "/ws/agent") => Some(Rule {
-            name: "agent-ws",
-            max: 30,
-            window: Duration::from_secs(60),
-        }),
-        (&Method::POST, "/webhooks/github") => Some(Rule {
-            name: "github-webhook",
-            max: 120,
-            window: Duration::from_secs(60),
-        }),
-        _ => None,
-    }
+    RULES
+        .iter()
+        .find(|(rule_method, rule_path, _)| rule_method == method && *rule_path == path)
+        .map(|(_, _, rule)| *rule)
 }
 
+/// Builds the bucket key for a request.
+///
+/// Keys are always anchored on the client IP, so the floor on quota is per-IP.
+/// The optional `x-hostlet-server-id` header only ever *narrows* the bucket
+/// (appends a suffix), letting many distinct agents behind one NAT'd IP avoid
+/// starving each other on the hot agent/webhook routes. Because the header is
+/// client-supplied and unauthenticated, a forger can split their own IP's
+/// counter into extra sub-buckets and thereby multiply their effective quota;
+/// this is an accepted trade-off for agent fan-out and must not be relied on as
+/// a security boundary. Tightening it (e.g. signing the header, or only
+/// honoring it on `/api/agent/*` and `/webhooks/*`) would change bucketing
+/// behavior, so it is intentionally left as-is here.
 fn rate_limit_key(name: &str, ip: IpAddr, headers: &axum::http::HeaderMap) -> String {
     let agent_scope = headers
         .get("x-hostlet-server-id")
@@ -136,10 +205,6 @@ fn rate_limit_key(name: &str, ip: IpAddr, headers: &axum::http::HeaderMap) -> St
     } else {
         format!("{name}:{ip}:{agent_scope}")
     }
-}
-
-fn bucket_window_ttl() -> Duration {
-    Duration::from_secs(5 * 60)
 }
 
 #[cfg(test)]

@@ -4,15 +4,25 @@
 
 :root {
   color-scheme: light;
-  --ink: #141a17;
-  --muted: #657168;
-  --line: #d8dfd8;
-  --panel: #eef3ee;
+
+  /* Neutral light canvas — the brand reads calm and content-first. */
+  --ink: #0f1211;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --panel: #f7f8f8;
   --surface: #ffffff;
-  --surface-alt: #f8faf7;
-  --action: #11775c;
-  --action-strong: #0b5c47;
-  --rail: #101815;
+  --surface-alt: #f4f5f5;
+
+  /* Single emerald accent (action-600 primary, action-700 hover/press). */
+  --action: #059669;
+  --action-strong: #047857;
+
+  /* Dark navigation rail (near-black). */
+  --rail: #0c0e0d;
+
+  /* Type families. Mono is reserved for logs, commit SHAs, and version chips. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
 html {
@@ -21,9 +31,15 @@ html {
 
 body {
   min-height: 100vh;
-  background: linear-gradient(180deg, #f4f7f3 0%, var(--panel) 100%);
+  background: var(--panel);
   color: var(--ink);
-  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.01em;
 }
 
 * {
@@ -98,8 +114,16 @@ button, .button {
   @apply text-sm text-muted;
 }
 
+/* Brand eyebrow — small uppercase tracked emerald label above titles
+   ("Build. Deploy. Showcase.", page eyebrows, hero kickers). */
 .eyebrow {
-  @apply text-xs font-medium text-muted;
+  @apply text-xs font-semibold uppercase tracking-[0.08em] text-action;
+}
+
+/* Data-grid label — same small-caps shape but muted, for dense metric /
+   key-value / summary grids where emerald would over-saturate. */
+.data-label {
+  @apply text-xs font-semibold uppercase tracking-[0.04em] text-muted;
 }
 
 .code-box {

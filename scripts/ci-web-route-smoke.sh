@@ -34,10 +34,25 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-for path in / /login /apps /apps/new /logs /settings /apps/smoke-app /deployments/smoke-deployment; do
+# Routes that must render. Top-level pages plus dynamic detail routes
+# (the trailing path segment is an arbitrary id that exercises [id] pages).
+ROUTES=(
+  # Public / top-level pages
+  /
+  /login
+  /apps
+  /apps/new
+  /logs
+  /settings
+  # Dynamic detail routes ([id] segments)
+  /apps/smoke-app
+  /deployments/smoke-deployment
+)
+for path in "${ROUTES[@]}"; do
   curl -fsS "http://127.0.0.1:${PORT}${path}" >/dev/null
 done
 
+# Security headers must be present on every response (checked on /).
 headers="$(curl -fsSI "http://127.0.0.1:${PORT}/")"
 printf '%s\n' "${headers}" | grep -qi '^x-frame-options: DENY'
 printf '%s\n' "${headers}" | grep -qi '^x-content-type-options: nosniff'
