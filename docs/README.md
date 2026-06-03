@@ -20,4 +20,3 @@ Use this index for current Hostlet documentation. Historical plans, versioned va
 ## Project
 
 - [Contributing](contributing.md): local checks, docs rules, release expectations, and security review expectations.
-- [Cloud Migration](../CLOUD_MIGRATION.md): what belongs in the private hosted-service repo.

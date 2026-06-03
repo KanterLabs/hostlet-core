@@ -54,7 +54,6 @@ Open the URL printed by the CLI, complete first-run setup, connect GitHub, and d
 - [Operations](docs/operations.md)
 - [Architecture](docs/architecture.md)
 - [Security](docs/security.md)
-- [Cloud migration notes](CLOUD_MIGRATION.md)
 
 ## Development
 
