@@ -124,17 +124,16 @@ export function Menu({
       >
         {trigger || <MoreHorizontal size={16} />}
       </button>
-      {open && (
-        <div
-          role="menu"
-          className={cx(
-            "absolute z-30 mt-10 grid w-64 max-w-[calc(100vw-1.5rem)] gap-2 rounded-md border border-line bg-surface p-2 shadow-lg",
-            align === "right" ? "right-0" : "left-0",
-          )}
-        >
-          {children}
-        </div>
-      )}
+      <div
+        role="menu"
+        hidden={!open}
+        className={cx(
+          "absolute z-30 mt-10 grid w-64 max-w-[calc(100vw-1.5rem)] gap-2 rounded-md border border-line bg-surface p-2 shadow-lg",
+          align === "right" ? "right-0" : "left-0",
+        )}
+      >
+        {children}
+      </div>
     </div>
   );
 }
