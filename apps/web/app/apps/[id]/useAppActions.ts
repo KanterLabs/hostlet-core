@@ -18,6 +18,7 @@ type UseAppActionsArgs = {
   setEnvKeys: (keys: Array<{ key: string }>) => void;
   setEnvValues: (updater: (current: Record<string, string>) => Record<string, string>) => void;
   setNewEnv: (next: { key: string; value: string }) => void;
+  refreshScreenshot: () => Promise<void>;
 };
 
 /**
@@ -37,6 +38,7 @@ export function useAppActions({
   setEnvKeys,
   setEnvValues,
   setNewEnv,
+  refreshScreenshot,
 }: UseAppActionsArgs) {
   const confirmAction = useConfirm();
   const [message, setMessage] = useState("");
@@ -223,6 +225,23 @@ export function useAppActions({
     }
   }, [busyAction, confirmAction, id]);
 
+  const captureScreenshot = useCallback(async () => {
+    if (busyAction) return;
+    setBusyAction("screenshot");
+    setMessage("Requesting screenshot capture...");
+    try {
+      const result = await api<{ jobId: string }>(`/api/apps/${id}/screenshots`, { method: "POST", body: "{}" });
+      setMessage("Screenshot capture is running...");
+      await waitForAgentJob(result.jobId, setMessage);
+      await refreshScreenshot();
+      setMessage("Screenshot captured.");
+    } catch (error) {
+      setMessage(`Screenshot capture failed. ${error instanceof Error ? error.message : ""}`);
+    } finally {
+      setBusyAction("");
+    }
+  }, [busyAction, id, refreshScreenshot]);
+
   const deleteEnvVar = useCallback(
     async (key: string) => {
       if (busyAction || !(await confirmAction({
@@ -261,6 +280,7 @@ export function useAppActions({
     saveEnvVar,
     checkHealthNow,
     restartContainer,
+    captureScreenshot,
     deleteEnvVar,
   };
 }

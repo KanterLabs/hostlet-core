@@ -292,6 +292,174 @@ pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyh
     Ok(())
 }
 
+pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
+    let app_id = payload_uuid(payload, "app_id").context("screenshot job missing app_id")?;
+    let deployment_id =
+        payload_uuid(payload, "deployment_id").context("screenshot job missing deployment_id")?;
+    let job_id = payload_uuid(payload, "job_id").context("screenshot job missing job_id")?;
+    let capture_url = payload
+        .get("capture_url")
+        .and_then(|value| value.as_str())
+        .context("screenshot job missing capture_url")?;
+    validate_capture_url(capture_url)?;
+    let width = payload
+        .get("width")
+        .and_then(|value| value.as_i64())
+        .filter(|value| (1..=4096).contains(value))
+        .unwrap_or(1280);
+    let height = payload
+        .get("height")
+        .and_then(|value| value.as_i64())
+        .filter(|value| (1..=4096).contains(value))
+        .unwrap_or(720);
+    let output_dir = cfg.workdir.join("screenshots").join(job_id.to_string());
+    tokio::fs::create_dir_all(&output_dir).await?;
+    let output_file = output_dir.join("screenshot.jpg");
+    let output_dir_string = output_dir.to_string_lossy().to_string();
+    let size_env = format!("HOSTLET_SCREENSHOT_SIZE={width}x{height}");
+    let volume_arg = format!("{output_dir_string}:/out");
+    let args = [
+        "run",
+        "--rm",
+        "--network",
+        "host",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--cap-drop",
+        "ALL",
+        "--memory",
+        "512m",
+        "--cpus",
+        "1",
+        "--tmpfs",
+        "/tmp:rw,nosuid,size=256m",
+        "-e",
+        &size_env,
+        "-v",
+        &volume_arg,
+        screenshotter_image(payload),
+        capture_url,
+        "/out/screenshot.jpg",
+    ];
+    log(
+        cfg,
+        deployment_id,
+        "stdout",
+        "Capturing deployment screenshot.",
+    )
+    .await;
+    let output = command_output("docker", &args, Duration::from_secs(45)).await?;
+    if !output.status.success() {
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        bail!(
+            "screenshotter exited with {}: {}",
+            output.status,
+            combined.trim()
+        );
+    }
+    let bytes = tokio::fs::read(&output_file)
+        .await
+        .context("screenshotter did not produce an image")?;
+    upload_screenshot(
+        cfg,
+        app_id,
+        deployment_id,
+        job_id,
+        width,
+        height,
+        capture_url,
+        bytes,
+    )
+    .await?;
+    let _ = tokio::fs::remove_dir_all(output_dir).await;
+    log(
+        cfg,
+        deployment_id,
+        "stdout",
+        "Deployment screenshot captured.",
+    )
+    .await;
+    Ok(())
+}
+
+async fn upload_screenshot(
+    cfg: &Config,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    job_id: Uuid,
+    width: i64,
+    height: i64,
+    capture_url: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<()> {
+    cfg.http
+        .post(format!("{}/api/agent/screenshots", cfg.api_url))
+        .headers(agent_auth_headers(cfg)?)
+        .header(reqwest::header::CONTENT_TYPE, "image/jpeg")
+        .query(&[
+            ("app_id", app_id.to_string()),
+            ("deployment_id", deployment_id.to_string()),
+            ("job_id", job_id.to_string()),
+            ("width", width.to_string()),
+            ("height", height.to_string()),
+            ("capture_url", capture_url.to_string()),
+        ])
+        .body(bytes)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+fn agent_auth_headers(cfg: &Config) -> anyhow::Result<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-hostlet-server-id", cfg.server_id.to_string().parse()?);
+    headers.insert("x-hostlet-agent-token", cfg.agent_token.parse()?);
+    Ok(headers)
+}
+
+fn screenshotter_image(payload: &Value) -> &str {
+    payload
+        .get("screenshotter_image")
+        .and_then(|value| value.as_str())
+        .unwrap_or("hostlet-screenshotter:latest")
+}
+
+fn payload_uuid(payload: &Value, key: &str) -> Option<Uuid> {
+    payload
+        .get(key)
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn validate_capture_url(value: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(value).context("capture_url must be an absolute URL")?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        _ => bail!("capture_url must use http or https"),
+    }
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn validate_capture_url_accepts_http_and_https() {
+        assert!(validate_capture_url("http://localhost:3000/").is_ok());
+        assert!(validate_capture_url("https://demo.example.com/").is_ok());
+    }
+
+    #[test]
+    fn validate_capture_url_rejects_non_http_schemes() {
+        assert!(validate_capture_url("file:///etc/passwd").is_err());
+    }
+}
+
 pub(crate) async fn health_targets(cfg: &Config) -> anyhow::Result<Vec<HealthTarget>> {
     let raw = cfg
         .http

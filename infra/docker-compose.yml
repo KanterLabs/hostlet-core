@@ -22,6 +22,7 @@ services:
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
       PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
       PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-http://localhost:3000}
+      HOSTLET_SCREENSHOT_DIR: /var/lib/hostlet/screenshots
       HOSTLET_CONTROL_PLANE_HOST: ${HOSTLET_CONTROL_PLANE_HOST:-localhost}
       HOSTLET_ALLOWED_WEB_ORIGINS: ${HOSTLET_ALLOWED_WEB_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       HOSTLET_BASE_DOMAIN: ${HOSTLET_BASE_DOMAIN:-}
@@ -45,6 +46,7 @@ services:
       - "8080:8080"
     volumes:
       - ..:/repo
+      - hostlet-screenshots:/var/lib/hostlet/screenshots
     depends_on:
       - postgres
 
@@ -115,3 +117,4 @@ services:
 volumes:
   hostlet-postgres:
   hostlet-agent:
+  hostlet-screenshots:

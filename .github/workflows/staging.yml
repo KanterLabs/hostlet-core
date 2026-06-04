@@ -75,7 +75,7 @@ jobs:
         env:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
-          for app in api web agent; do
+          for app in api web agent screenshotter; do
             docker build \
               --label org.opencontainers.image.revision="${GITHUB_SHA}" \
               --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \

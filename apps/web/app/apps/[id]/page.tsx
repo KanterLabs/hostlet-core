@@ -1,12 +1,13 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Activity,
   AlertTriangle,
   Box,
+  Camera,
   Cpu,
   ExternalLink,
   GitBranch,
@@ -54,6 +55,7 @@ import {
 import { emptySettings } from "./appDetail.types";
 import type {
   App,
+  AppScreenshot,
   ResourceStats,
   RuntimeHealth,
   RuntimeHealthEvent,
@@ -69,10 +71,23 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const [resources, setResources] = useState<ResourceStats | null>(null);
   const [health, setHealth] = useState<RuntimeHealth | null>(null);
   const [healthEvents, setHealthEvents] = useState<RuntimeHealthEvent[]>([]);
+  const [screenshot, setScreenshot] = useState<AppScreenshot | null>(null);
+  const [screenshotMessage, setScreenshotMessage] = useState("No generated screenshot yet.");
   const [envKeys, setEnvKeys] = useState<Array<{ key: string }>>([]);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [newEnv, setNewEnv] = useState({ key: "", value: "" });
   const [resourceMessage, setResourceMessage] = useState("Waiting for a successful deploy.");
+
+  const refreshScreenshot = useCallback(async () => {
+    try {
+      const latest = await api<AppScreenshot>(`/api/apps/${id}/screenshots/latest`);
+      setScreenshot(latest);
+      setScreenshotMessage("");
+    } catch {
+      setScreenshot(null);
+      setScreenshotMessage("No generated screenshot yet.");
+    }
+  }, [id]);
 
   const {
     message,
@@ -88,6 +103,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     saveEnvVar,
     checkHealthNow,
     restartContainer,
+    captureScreenshot,
     deleteEnvVar,
   } = useAppActions({
     id,
@@ -100,12 +116,14 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     setEnvKeys,
     setEnvValues,
     setNewEnv,
+    refreshScreenshot,
   });
 
   useEffect(() => {
     refreshApp();
+    refreshScreenshot();
     api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
-  }, [id, refreshApp]);
+  }, [id, refreshApp, refreshScreenshot]);
 
   useVisibilityPoll(
     async ({ isActive }) => {
@@ -379,6 +397,37 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <button className="button mt-2 w-full" disabled={!!busyAction || !newEnv.key || !newEnv.value} onClick={() => saveEnvVar(newEnv.key, newEnv.value)}><KeyRound size={16} />Add variable</button>
                   </div>
                 </div>
+              </Panel>
+
+              <Panel>
+                <SectionHeader
+                  icon={Camera}
+                  title="Showcase screenshot"
+                  action={
+                    <button
+                      className="button-secondary"
+                      disabled={!!busyAction || !app?.currentDeploymentId || !app?.publicExposure}
+                      onClick={captureScreenshot}
+                      title={!app?.publicExposure ? "Publish the app URL before capture" : "Capture screenshot"}
+                    >
+                      <Camera size={16} />
+                      {busyAction === "screenshot" ? "Capturing..." : "Capture"}
+                    </button>
+                  }
+                />
+                {screenshot ? (
+                  <a className="mt-4 block overflow-hidden rounded-md border border-line bg-surface-alt" href={screenshot.publicUrl} target="_blank" rel="noreferrer">
+                    <img className="aspect-video w-full object-cover" src={screenshot.publicUrl} alt={`${app?.name || "App"} screenshot`} />
+                  </a>
+                ) : (
+                  <div className="mt-4 flex aspect-video items-center justify-center rounded-md border border-dashed border-line bg-surface-alt text-sm text-muted">
+                    {screenshotMessage}
+                  </div>
+                )}
+                <DataList className="mt-4">
+                  <SummaryItem label="Captured" value={screenshot?.capturedAt ? formatTimestamp(screenshot.capturedAt) : "waiting"} />
+                  <SummaryItem label="Source" value={screenshot?.source || "generated"} />
+                </DataList>
               </Panel>
 
               <Panel>

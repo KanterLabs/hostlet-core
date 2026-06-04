@@ -4,7 +4,7 @@ use anyhow::{bail, Context};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -49,6 +49,7 @@ pub struct AppState {
     pub public_webhook_url: String,
     pub public_api_url: String,
     pub public_web_url: String,
+    pub screenshot_dir: PathBuf,
     pub allowed_web_origins: Vec<String>,
     pub base_domain: Option<String>,
     pub domain_prefix: String,
@@ -112,6 +113,7 @@ impl AppState {
         let public_api_url = public_api_url();
         let public_webhook_url = public_webhook_url(&public_api_url);
         let public_web_url = public_web_url();
+        let screenshot_dir = screenshot_dir();
         let allowed_web_origins =
             allowed_web_origins(&public_web_url, allow_insecure_dev_defaults)?;
         let setup_token = nonempty_env("HOSTLET_SETUP_TOKEN");
@@ -136,6 +138,7 @@ impl AppState {
             public_webhook_url,
             public_api_url,
             public_web_url,
+            screenshot_dir,
             allowed_web_origins,
             base_domain: base_domain(),
             domain_prefix: domain_prefix(),
@@ -200,6 +203,13 @@ fn public_webhook_url(public_api_url: &str) -> String {
 
 fn public_web_url() -> String {
     std::env::var("PUBLIC_WEB_URL").unwrap_or_else(|_| "http://localhost:3000".into())
+}
+
+fn screenshot_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("HOSTLET_SCREENSHOT_DIR")
+            .unwrap_or_else(|_| "/var/lib/hostlet/screenshots".into()),
+    )
 }
 
 fn base_domain() -> Option<String> {

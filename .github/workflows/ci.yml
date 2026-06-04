@@ -91,3 +91,4 @@ jobs:
       - run: docker build -f apps/web/Dockerfile -t hostlet-web-ci .
       - run: docker build -f apps/api/Dockerfile -t hostlet-api-ci .
       - run: docker build -f apps/agent/Dockerfile -t hostlet-agent-ci .
+      - run: docker build -f apps/screenshotter/Dockerfile -t hostlet-screenshotter-ci .

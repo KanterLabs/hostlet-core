@@ -28,7 +28,7 @@ pub use routes::{
     claim_job, complete_job, event, health_targets, recover_stale_agent_jobs, register, ws,
 };
 
-pub(in crate::agent) use auth::authenticated_server_id;
+pub(crate) use auth::authenticated_server_id;
 pub(in crate::agent) use messages::handle_agent_message;
 pub(in crate::agent) use socket::handle_socket;
 pub(in crate::agent) use validation::{

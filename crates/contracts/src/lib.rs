@@ -407,6 +407,7 @@ pub enum AgentJobPayload {
     Rollback(Box<RollbackJob>),
     DeleteApp(Box<DeleteAppJob>),
     HealthCheck(Box<HealthCheckJob>),
+    CaptureScreenshot(Box<CaptureScreenshotJob>),
     RestartContainer(Box<RestartContainerJob>),
     DockerCleanup(Box<DockerCleanupJob>),
 }
@@ -817,6 +818,17 @@ pub struct HealthCheckJob {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CaptureScreenshotJob {
+    pub app_id: Uuid,
+    pub deployment_id: Uuid,
+    pub capture_url: String,
+    pub width: i32,
+    pub height: i32,
+    pub format: String,
+    pub screenshotter_image: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RestartContainerJob {
     pub app_id: Uuid,
     pub deployment_id: Uuid,
@@ -940,6 +952,36 @@ mod tests {
         let event = AgentEvent::Heartbeat;
         let value = serde_json::to_value(event).unwrap();
         assert_eq!(value["type"], "heartbeat");
+    }
+
+    #[test]
+    fn capture_screenshot_payload_keeps_wire_shape() {
+        let app_id = Uuid::from_u128(1);
+        let deployment_id = Uuid::from_u128(2);
+        let payload = AgentJobPayload::CaptureScreenshot(Box::new(CaptureScreenshotJob {
+            app_id,
+            deployment_id,
+            capture_url: "https://demo.example.test/".into(),
+            width: 1280,
+            height: 720,
+            format: "jpeg".into(),
+            screenshotter_image: "local/hostlet-screenshotter:test".into(),
+        }));
+
+        let value = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(value["type"], "capture_screenshot");
+        assert_eq!(value["app_id"], app_id.to_string());
+        assert_eq!(value["deployment_id"], deployment_id.to_string());
+        assert_eq!(value["capture_url"], "https://demo.example.test/");
+        assert_eq!(
+            value["screenshotter_image"],
+            "local/hostlet-screenshotter:test"
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentJobPayload>(value).unwrap(),
+            payload
+        );
     }
 
     #[test]
