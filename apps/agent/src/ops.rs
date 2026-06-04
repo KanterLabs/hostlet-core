@@ -366,13 +366,15 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
         .context("screenshotter did not produce an image")?;
     upload_screenshot(
         cfg,
-        app_id,
-        deployment_id,
-        job_id,
-        width,
-        height,
-        capture_url,
-        bytes,
+        ScreenshotUpload {
+            app_id,
+            deployment_id,
+            job_id,
+            width,
+            height,
+            capture_url: capture_url.to_string(),
+            bytes,
+        },
     )
     .await?;
     let _ = tokio::fs::remove_dir_all(output_dir).await;
@@ -386,29 +388,30 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     Ok(())
 }
 
-async fn upload_screenshot(
-    cfg: &Config,
+struct ScreenshotUpload {
     app_id: Uuid,
     deployment_id: Uuid,
     job_id: Uuid,
     width: i64,
     height: i64,
-    capture_url: &str,
+    capture_url: String,
     bytes: Vec<u8>,
-) -> anyhow::Result<()> {
+}
+
+async fn upload_screenshot(cfg: &Config, upload: ScreenshotUpload) -> anyhow::Result<()> {
     cfg.http
         .post(format!("{}/api/agent/screenshots", cfg.api_url))
         .headers(agent_auth_headers(cfg)?)
         .header(reqwest::header::CONTENT_TYPE, "image/jpeg")
         .query(&[
-            ("app_id", app_id.to_string()),
-            ("deployment_id", deployment_id.to_string()),
-            ("job_id", job_id.to_string()),
-            ("width", width.to_string()),
-            ("height", height.to_string()),
-            ("capture_url", capture_url.to_string()),
+            ("app_id", upload.app_id.to_string()),
+            ("deployment_id", upload.deployment_id.to_string()),
+            ("job_id", upload.job_id.to_string()),
+            ("width", upload.width.to_string()),
+            ("height", upload.height.to_string()),
+            ("capture_url", upload.capture_url),
         ])
-        .body(bytes)
+        .body(upload.bytes)
         .send()
         .await?
         .error_for_status()?;
@@ -441,22 +444,6 @@ fn validate_capture_url(value: &str) -> anyhow::Result<()> {
     match url.scheme() {
         "http" | "https" => Ok(()),
         _ => bail!("capture_url must use http or https"),
-    }
-}
-
-#[cfg(test)]
-mod screenshot_tests {
-    use super::*;
-
-    #[test]
-    fn validate_capture_url_accepts_http_and_https() {
-        assert!(validate_capture_url("http://localhost:3000/").is_ok());
-        assert!(validate_capture_url("https://demo.example.com/").is_ok());
-    }
-
-    #[test]
-    fn validate_capture_url_rejects_non_http_schemes() {
-        assert!(validate_capture_url("file:///etc/passwd").is_err());
     }
 }
 
@@ -808,4 +795,20 @@ pub(crate) fn valid_container_name(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn validate_capture_url_accepts_http_and_https() {
+        assert!(validate_capture_url("http://localhost:3000/").is_ok());
+        assert!(validate_capture_url("https://demo.example.com/").is_ok());
+    }
+
+    #[test]
+    fn validate_capture_url_rejects_non_http_schemes() {
+        assert!(validate_capture_url("file:///etc/passwd").is_err());
+    }
 }
