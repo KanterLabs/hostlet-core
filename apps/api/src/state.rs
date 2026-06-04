@@ -1,5 +1,6 @@
 use crate::crypto::{hash_token, Crypto};
 use crate::rate_limit::RateLimiter;
+use crate::screenshots::{NoopScreenshotHooks, ScreenshotHooks};
 use anyhow::{bail, Context};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
@@ -50,6 +51,7 @@ pub struct AppState {
     pub public_api_url: String,
     pub public_web_url: String,
     pub screenshot_dir: PathBuf,
+    pub screenshot_hooks: Arc<dyn ScreenshotHooks>,
     pub allowed_web_origins: Vec<String>,
     pub base_domain: Option<String>,
     pub domain_prefix: String,
@@ -139,6 +141,7 @@ impl AppState {
             public_api_url,
             public_web_url,
             screenshot_dir,
+            screenshot_hooks: Arc::new(NoopScreenshotHooks),
             allowed_web_origins,
             base_domain: base_domain(),
             domain_prefix: domain_prefix(),
@@ -154,6 +157,12 @@ impl AppState {
             rate_limiter: Arc::new(RateLimiter::default()),
             logs,
         })
+    }
+
+    #[cfg(test)]
+    pub fn with_screenshot_hooks(mut self, hooks: Arc<dyn ScreenshotHooks>) -> Self {
+        self.screenshot_hooks = hooks;
+        self
     }
 }
 
