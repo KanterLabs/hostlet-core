@@ -55,7 +55,7 @@ a {
 }
 
 input, select, textarea {
-  @apply w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink outline-none transition placeholder:text-neutral-400 focus:border-action focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-500;
+  @apply w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink outline-none transition placeholder:text-neutral-400 focus:border-action focus-visible:ring-2 focus-visible:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-500;
 }
 
 input[type="checkbox"] {
@@ -66,8 +66,8 @@ label {
   @apply text-sm font-medium text-ink;
 }
 
-button, .button {
-  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-action-strong focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
+.button {
+  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-action-strong focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .compact {
@@ -75,11 +75,11 @@ button, .button {
 }
 
 .button-secondary {
-  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-line bg-surface px-3 py-2 text-sm font-medium text-ink shadow-sm shadow-neutral-950/5 ring-0 transition hover:border-neutral-300 hover:bg-surface-alt focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-line bg-surface px-3 py-2 text-sm font-medium text-ink shadow-sm shadow-neutral-950/5 ring-0 transition hover:border-neutral-300 hover:bg-surface-alt focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .button-danger {
-  @apply bg-red-700 text-white hover:bg-red-800 focus:ring-red-200;
+  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-red-700 px-3 py-2 text-sm font-medium text-white shadow-sm shadow-red-950/10 transition hover:bg-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .app-shell {

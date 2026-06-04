@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Plus, ScrollText } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatTimestamp } from "@/lib/time";
 import { AppShell, EmptyState, PageHeader, Panel, StatusPill } from "@/components/ui";
 
 type App = {
@@ -96,5 +97,5 @@ export default function Logs() {
 
 function formatTime(value?: string | null) {
   if (!value) return "No timestamp";
-  return new Date(value).toLocaleString();
+  return formatTimestamp(value);
 }

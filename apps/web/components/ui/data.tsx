@@ -7,11 +7,13 @@ export function Metric({
   value,
   detail,
   icon: Icon,
+  loading = false,
 }: {
   label: string;
   value: string;
   detail?: string;
   icon?: LucideIcon;
+  loading?: boolean;
 }) {
   return (
     <div className="metric">
@@ -19,8 +21,17 @@ export function Metric({
         <div className="data-label">{label}</div>
         {Icon && <Icon size={17} className="text-neutral-500" />}
       </div>
-      <div className="mt-2 break-words text-lg font-semibold leading-tight">{value}</div>
-      {detail && <div className="muted mt-1 break-words">{detail}</div>}
+      {loading ? (
+        <>
+          <Skeleton className="mt-3 h-6 w-24" />
+          <Skeleton className="mt-2 h-4 w-32" />
+        </>
+      ) : (
+        <>
+          <div className="mt-2 break-words text-lg font-semibold leading-tight">{value}</div>
+          {detail && <div className="muted mt-1 break-words">{detail}</div>}
+        </>
+      )}
     </div>
   );
 }
@@ -79,11 +90,11 @@ export function DataList({ children, className }: { children: React.ReactNode; c
   return <div className={cx("grid gap-2", className)}>{children}</div>;
 }
 
-export function DataRow({ label, value }: { label: string; value: React.ReactNode }) {
+export function DataRow({ label, value, loading = false }: { label: string; value: React.ReactNode; loading?: boolean }) {
   return (
     <div className="flex items-center justify-between gap-4 rounded-md bg-surface-alt px-3 py-2 text-sm">
       <span className="text-muted">{label}</span>
-      <span className="break-words text-right font-medium">{value}</span>
+      {loading ? <Skeleton className="h-4 w-24" /> : <span className="break-words text-right font-medium">{value}</span>}
     </div>
   );
 }
@@ -95,4 +106,8 @@ export function SummaryItem({ label, value }: { label: string; value: React.Reac
       <div className="mt-1 break-words font-medium">{value}</div>
     </div>
   );
+}
+
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <span aria-hidden="true" className={cx("skeleton block", className)} />;
 }

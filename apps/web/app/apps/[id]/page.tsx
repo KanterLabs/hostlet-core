@@ -20,6 +20,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatTimestamp } from "@/lib/time";
 import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 import { webhookReadiness } from "@/lib/webhooks";
 import {
@@ -191,7 +192,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               <div>
                 <div className="eyebrow mb-2">Deploy</div>
                 <div className="flex flex-wrap gap-2">
-                  <button disabled={!!busyAction || active} onClick={deploy}><Play size={16} />{busyAction === "deploy" ? "Starting..." : "Deploy latest"}</button>
+                  <button className="button" disabled={!!busyAction || active} onClick={deploy}><Play size={16} />{busyAction === "deploy" ? "Starting..." : "Deploy latest"}</button>
                   <button disabled={!!busyAction || !!rollbackReason} title={rollbackReason || "Rollback to the previous successful deployment"} className="button-secondary" onClick={rollback}><RotateCcw size={16} />Rollback</button>
                 </div>
               </div>
@@ -232,7 +233,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               className="mb-6"
               title="This app has not been deployed yet."
               description="Start the first deployment to build, run, check health, and publish the route."
-              action={<button disabled={!!busyAction || active} onClick={deploy}><Play size={16} />Start first deployment</button>}
+              action={<button className="button" disabled={!!busyAction || active} onClick={deploy}><Play size={16} />Start first deployment</button>}
             />
           )}
 
@@ -267,8 +268,8 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
                       <Metric label="Status" value={health.status} detail={health.lastError || "latest agent check"} />
                       <Metric label="HTTP" value={health.httpStatus ? String(health.httpStatus) : "none"} detail={typeof health.latencyMs === "number" ? `${health.latencyMs} ms` : "no response"} />
-                      <Metric label="Failures" value={String(health.failureCount)} detail={health.lastCheckedAt ? `checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}` : "not checked yet"} />
-                      <Metric label="Last healthy" value={health.lastHealthyAt ? new Date(health.lastHealthyAt).toLocaleString() : "unknown"} />
+                      <Metric label="Failures" value={String(health.failureCount)} detail={health.lastCheckedAt ? `checked ${formatTimestamp(health.lastCheckedAt, "time")}` : "not checked yet"} />
+                      <Metric label="Last healthy" value={health.lastHealthyAt ? formatTimestamp(health.lastHealthyAt) : "unknown"} />
                       <Metric label="Container" value={health.containerName || "unknown"} />
                       <Metric label="Target" value={health.checkedUrl || "waiting"} />
                     </MetricsGrid>
@@ -276,7 +277,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       <div className="mt-4 overflow-hidden rounded-md border border-line">
                         {healthEvents.slice(0, 5).map((event) => (
                           <div key={event.id} className="grid gap-2 border-t border-line px-3 py-2 text-sm first:border-t-0 sm:grid-cols-[140px_110px_1fr]">
-                            <span className="text-muted">{new Date(event.createdAt).toLocaleTimeString()}</span>
+                            <span className="text-muted">{formatTimestamp(event.createdAt, "time")}</span>
                             <StatusPill status={event.status} />
                             <span className="min-w-0 truncate">{event.error || healthEventSummary(event)}</span>
                           </div>
@@ -293,7 +294,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 <SectionHeader
                   title="Resource usage"
                   description="Live Docker stats for the current running container."
-                  action={resources?.sampledAt && <p className="text-xs text-muted">Updated {new Date(resources.sampledAt).toLocaleTimeString()}</p>}
+                  action={resources?.sampledAt && <p className="text-xs text-muted">Updated {formatTimestamp(resources.sampledAt, "time")}</p>}
                 />
                 {resources ? (
                   <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
@@ -367,7 +368,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       </div>
                       <div className="flex gap-2">
                         <input type="password" value={envValues[key] || ""} onChange={(event) => setEnvValues({ ...envValues, [key]: event.target.value })} placeholder="New value" />
-                        <button disabled={!!busyAction || !envValues[key]} onClick={() => saveEnvVar(key, envValues[key])}>Save</button>
+                        <button className="button" disabled={!!busyAction || !envValues[key]} onClick={() => saveEnvVar(key, envValues[key])}>Save</button>
                       </div>
                     </div>
                   ))}
@@ -375,7 +376,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <div className="rounded-md border border-line bg-surface-alt p-3">
                     <input value={newEnv.key} onChange={(event) => setNewEnv({ ...newEnv, key: event.target.value.toUpperCase() })} placeholder="KEY" />
                     <input className="mt-2" type="password" value={newEnv.value} onChange={(event) => setNewEnv({ ...newEnv, value: event.target.value })} placeholder="Value" />
-                    <button className="mt-2 w-full" disabled={!!busyAction || !newEnv.key || !newEnv.value} onClick={() => saveEnvVar(newEnv.key, newEnv.value)}><KeyRound size={16} />Add variable</button>
+                    <button className="button mt-2 w-full" disabled={!!busyAction || !newEnv.key || !newEnv.value} onClick={() => saveEnvVar(newEnv.key, newEnv.value)}><KeyRound size={16} />Add variable</button>
                   </div>
                 </div>
               </Panel>

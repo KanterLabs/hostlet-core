@@ -81,7 +81,7 @@ export function WebhookNotice({
             {copyState}
           </button>
           {!ready && onManualDeploy && (
-            <button type="button" disabled={deployDisabled} onClick={onManualDeploy}>
+            <button type="button" className="button" disabled={deployDisabled} onClick={onManualDeploy}>
               <Play size={16} />
               Deploy latest
             </button>

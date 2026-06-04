@@ -4,6 +4,7 @@ import type { LucideIcon } from "lucide-react";
 import { Cloud, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { DataList, DataRow, IconFrame, Notice, Panel, StatusPill } from "@/components/ui";
 import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
+import { formatTimestamp } from "@/lib/time";
 import type {
   AgentJob,
   AuditEvent,
@@ -23,7 +24,7 @@ export function cleanupSummary(values: Record<string, number>) {
 export function formatBackupDate(value: string) {
   const isoLike = value.replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, "$1-$2-$3T$4:$5:$6Z");
   const date = new Date(isoLike);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? value : formatTimestamp(date);
 }
 
 export function updateMigrationSummary(update?: UpdatePayload | null) {
@@ -95,7 +96,7 @@ export function UpdatesSection({
         <DataRow label="Latest version" value={version?.update?.latestVersion || "not checked"} />
         <DataRow label="Minimum supported" value={version?.update?.minimumSupportedVersion || "not specified"} />
         <DataRow label="Migrations" value={updateMigrationSummary(version?.update)} />
-        <DataRow label="Last checked" value={version?.update?.checkedAt ? new Date(version.update.checkedAt).toLocaleString() : "not checked"} />
+        <DataRow label="Last checked" value={version?.update?.checkedAt ? formatTimestamp(version.update.checkedAt) : "not checked"} />
         <DataRow label="Update command" value="hostlet update" />
         <DataRow label="Latest backup" value={backup?.created_at ? `${formatBackupDate(backup.created_at)}${backup.scheduled === "true" ? " (scheduled)" : ""}` : "not recorded"} />
       </DataList>
@@ -180,7 +181,7 @@ function JobsList({ jobs, onRetryJob, onCancelJob }: { jobs: AgentJob[]; onRetry
           <div key={job.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2">
             <div className="min-w-0">
               <div className="truncate font-medium">{job.type}</div>
-              <div className="muted text-sm">{new Date(job.createdAt).toLocaleString()} · attempt {job.attempt}/{job.maxAttempts}</div>
+              <div className="muted text-sm">{formatTimestamp(job.createdAt)} · attempt {job.attempt}/{job.maxAttempts}</div>
               {job.failure && <Notice tone="danger" className="mt-2" description={job.failure} />}
             </div>
             <div className="flex items-center gap-2">
@@ -204,7 +205,7 @@ function AuditTrail({ audit }: { audit: AuditEvent[] }) {
         {audit.slice(0, 8).map((event) => (
           <div key={event.id} className="border-b border-line pb-2">
             <div className="font-medium">{event.eventType}</div>
-            <div className="muted text-sm">{event.actorType} · {new Date(event.createdAt).toLocaleString()}</div>
+            <div className="muted text-sm">{event.actorType} · {formatTimestamp(event.createdAt)}</div>
           </div>
         ))}
         {!audit.length && <p className="muted">No audit events yet.</p>}

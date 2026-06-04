@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import type { useRouter } from "next/navigation";
+import { useConfirm } from "@/components/ui";
 import { api } from "@/lib/api";
 import { isActiveDeploy, waitForAgentJob } from "./appDetailHelpers";
 import type { App, BusyAction, RuntimeHealth, SettingsForm } from "./appDetail.types";
@@ -37,6 +38,7 @@ export function useAppActions({
   setEnvValues,
   setNewEnv,
 }: UseAppActionsArgs) {
+  const confirmAction = useConfirm();
   const [message, setMessage] = useState("");
   const [healthMessage, setHealthMessage] = useState("Waiting for runtime health.");
   const [busyAction, setBusyAction] = useState<BusyAction>("");
@@ -94,7 +96,12 @@ export function useAppActions({
   }, [busyAction, id, router]);
 
   const deleteApp = useCallback(async () => {
-    if (!confirm("Delete this app, its Hostlet-managed route, containers, images, and deployment history?")) return;
+    if (!(await confirmAction({
+      title: "Delete app?",
+      description: "Delete this app, its Hostlet-managed route, containers, images, and deployment history?",
+      confirmLabel: "Delete",
+      destructive: true,
+    }))) return;
     if (busyAction) return;
     setBusyAction("delete");
     setMessage("Deleting app and requesting server cleanup...");
@@ -109,7 +116,7 @@ export function useAppActions({
       setMessage(`Delete failed. ${error instanceof Error ? error.message : ""}`);
       setBusyAction("");
     }
-  }, [busyAction, id, router]);
+  }, [busyAction, confirmAction, id, router]);
 
   const toggleExposure = useCallback(async () => {
     if (!app || busyAction) return;
@@ -199,7 +206,11 @@ export function useAppActions({
   }, [busyAction, id]);
 
   const restartContainer = useCallback(async () => {
-    if (busyAction || !confirm("Restart the current app container?")) return;
+    if (busyAction || !(await confirmAction({
+      title: "Restart app?",
+      description: "Restart the current app container?",
+      confirmLabel: "Restart",
+    }))) return;
     setBusyAction("restart");
     setHealthMessage("Requesting container restart...");
     try {
@@ -210,11 +221,16 @@ export function useAppActions({
     } finally {
       setBusyAction("");
     }
-  }, [busyAction, id]);
+  }, [busyAction, confirmAction, id]);
 
   const deleteEnvVar = useCallback(
     async (key: string) => {
-      if (busyAction || !confirm(`Delete ${key}?`)) return;
+      if (busyAction || !(await confirmAction({
+        title: "Delete environment variable?",
+        description: `Delete ${key}?`,
+        confirmLabel: "Delete",
+        destructive: true,
+      }))) return;
       setBusyAction("env");
       setMessage("Deleting environment variable...");
       try {
@@ -227,7 +243,7 @@ export function useAppActions({
         setBusyAction("");
       }
     },
-    [busyAction, id, setEnvKeys],
+    [busyAction, confirmAction, id, setEnvKeys],
   );
 
   return {

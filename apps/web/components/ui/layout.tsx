@@ -50,13 +50,19 @@ export function Panel({
   className,
   muted = false,
   padded = true,
+  loading = false,
 }: {
   children: React.ReactNode;
   className?: string;
   muted?: boolean;
   padded?: boolean;
+  loading?: boolean;
 }) {
-  return <section className={cx(muted ? "panel-muted" : "panel", padded && "p-4", className)}>{children}</section>;
+  return (
+    <section className={cx(muted ? "panel-muted" : "panel", padded && "p-4", className)}>
+      {loading ? <div className="grid gap-3"><span className="skeleton h-5 w-40" /><span className="skeleton h-4 w-full" /><span className="skeleton h-4 w-2/3" /></div> : children}
+    </section>
+  );
 }
 
 export function IconFrame({ icon: Icon, className }: { icon: LucideIcon; className?: string }) {

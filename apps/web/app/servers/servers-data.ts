@@ -1,4 +1,5 @@
 // Types, count helpers, and "last seen" formatting for the machines (servers) list.
+import { formatTimestamp } from "@/lib/time";
 
 export type ServerRow = {
   id: string;
@@ -23,5 +24,5 @@ export function deriveServerCounts(servers: ServerRow[]): ServerCounts {
 
 // Human-readable "last seen" label for a machine row.
 export function formatLastSeen(lastSeenAt?: string) {
-  return lastSeenAt ? new Date(lastSeenAt).toLocaleString() : "Not seen yet";
+  return lastSeenAt ? formatTimestamp(lastSeenAt) : "Not seen yet";
 }

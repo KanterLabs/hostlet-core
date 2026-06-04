@@ -1,9 +1,9 @@
 "use client";
 
-import { use, useMemo } from "react";
+import { use } from "react";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
-import { AppShell, DataList, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
+import { AppShell, DataList, LogViewer, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
 import { useDeploymentLogs } from "@/lib/useDeploymentLogs";
 import {
   DEPLOYMENT_STEPS,
@@ -39,7 +39,6 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
 
   const status = deployment?.status || "loading";
   const activeIndex = DEPLOYMENT_STEPS.indexOf(status as (typeof DEPLOYMENT_STEPS)[number]);
-  const groupedLogs = useMemo(() => logs.join("\n"), [logs]);
 
   return (
     <AppShell>
@@ -108,13 +107,10 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                   <div className="flex items-center gap-2 text-xs text-muted">
                     {socketState === "reconnecting" && <RefreshCw className="animate-spin" size={14} />}
                     <span>{socketLabel(socketState)}</span>
-                    <span>{logs.length} lines</span>
                   </div>
                 }
               />
-              <pre className="h-[68vh] max-w-full overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-sm leading-6 text-green-100 shadow-sm shadow-neutral-950/20 [overflow-wrap:normal] [white-space:pre]">
-                {groupedLogs || "Waiting for deployment logs..."}
-              </pre>
+              <LogViewer lines={logs} emptyText="Waiting for deployment logs..." />
             </section>
           </div>
     </AppShell>
