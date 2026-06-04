@@ -1,6 +1,5 @@
 mod access_token;
 mod inference;
-mod inspection;
 
 use crate::{
     auth::{current_user_id, request_context},
@@ -15,8 +14,11 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use inference::{gitea_inspection, infer_dockerfile, infer_package_json, railpack_inspection};
-use inspection::InspectionBase;
+use hostlet_contracts::{parse_github_repo, valid_commit_sha};
+use inference::{
+    dockerfile_inspection, gitea_inspection, infer_dockerfile, infer_package_json, node_inspection,
+    railpack_inspection, unknown_inspection,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -233,21 +235,11 @@ async fn inspect_repo(
 
     if let Some(contents) = github_file_text(state, repo, branch, "Dockerfile", token).await? {
         let inference = infer_dockerfile(&contents);
-        return Ok(Value::Object(
-            InspectionBase {
-                repo,
-                default_branch,
-                branch,
-                deployable: true,
-                container_port: json!(inference.port.unwrap_or(3000)),
-                packaging_options: json!(["auto", "dockerfile", "generated"]),
-                recommended_packaging_strategy: "auto",
-                env: json!(inference.env),
-                warnings: json!(inference.warnings),
-                summary: "Dockerfile detected. Hostlet inferred a single-container runtime."
-                    .to_string(),
-            }
-            .build(),
+        return Ok(dockerfile_inspection(
+            repo,
+            branch,
+            default_branch,
+            inference,
         ));
     }
 
@@ -268,25 +260,7 @@ async fn inspect_repo(
                 .await?
                 .is_some(),
         );
-        let mut result = InspectionBase {
-            repo,
-            default_branch,
-            branch,
-            deployable: true,
-            container_port: json!(3000),
-            packaging_options: json!(["auto", "generated"]),
-            recommended_packaging_strategy: "generated",
-            env: json!([]),
-            warnings: json!(["Node app detected. Hostlet will build it with Railpack unless a repository Dockerfile is selected. Set custom build/start commands if the preview is incomplete."]),
-            summary: format!(
-                "{} app detected. Hostlet will use generated Railpack runtime support with {}.",
-                inference.framework, inference.package_manager
-            ),
-        }
-        .build();
-        result.insert("detectedFramework".into(), json!(inference.framework));
-        result.insert("packageManager".into(), json!(inference.package_manager));
-        return Ok(Value::Object(result));
+        return Ok(node_inspection(repo, branch, default_branch, inference));
     }
 
     for (path, language) in [
@@ -300,30 +274,11 @@ async fn inspect_repo(
             .await?
             .is_some()
         {
-            return Ok(Value::Object(railpack_inspection(
-                repo,
-                branch,
-                default_branch,
-                language,
-            )));
+            return Ok(railpack_inspection(repo, branch, default_branch, language));
         }
     }
 
-    Ok(Value::Object(
-        InspectionBase {
-            repo,
-            default_branch,
-            branch,
-            deployable: false,
-            container_port: json!(3000),
-            packaging_options: json!(["auto"]),
-            recommended_packaging_strategy: "auto",
-            env: json!([]),
-            warnings: json!(["No root Dockerfile, package.json, Python, Go, Rust, static, or Hostlet Compose marker was found. Add a start command or a supported app manifest before deploying."]),
-            summary: "Hostlet could not infer a runnable app shape.".to_string(),
-        }
-        .build(),
-    ))
+    Ok(unknown_inspection(repo, branch, default_branch))
 }
 
 async fn github_file_text(
@@ -364,43 +319,6 @@ async fn github_file_text(
             .text()
             .await?,
     ))
-}
-
-fn parse_github_repo(input: &str) -> Option<String> {
-    let trimmed = input.trim().trim_end_matches(".git");
-    if let Some(caps) = trimmed
-        .strip_prefix("git@github.com:")
-        .and_then(parse_owner_repo)
-    {
-        return Some(caps);
-    }
-    if let Ok(url) = url::Url::parse(trimmed) {
-        if url.host_str()? != "github.com" {
-            return None;
-        }
-        return parse_owner_repo(url.path().trim_start_matches('/'));
-    }
-    parse_owner_repo(trimmed)
-}
-
-fn parse_owner_repo(value: &str) -> Option<String> {
-    let mut parts = value.split('/').filter(|part| !part.is_empty());
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    if parts.next().is_some() || !valid_repo_part(owner) || !valid_repo_part(repo) {
-        return None;
-    }
-    Some(format!("{owner}/{repo}"))
-}
-
-fn valid_repo_part(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 100
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && !value.starts_with('.')
-        && !value.ends_with('.')
 }
 
 pub async fn ensure_repo_webhook(
@@ -702,15 +620,9 @@ async fn insert_webhook_app_event(
     Ok(())
 }
 
-fn valid_commit_sha(value: &str) -> bool {
-    value.len() == 40
-        && value.chars().all(|c| c.is_ascii_hexdigit())
-        && !value.chars().all(|c| c == '0')
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_github_repo, valid_commit_sha};
+    use hostlet_contracts::{parse_github_repo, valid_commit_sha};
 
     #[test]
     fn rejects_branch_delete_zero_sha() {

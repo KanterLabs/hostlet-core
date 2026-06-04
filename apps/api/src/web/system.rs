@@ -1,4 +1,5 @@
 use super::*;
+use hostlet_contracts::version_is_newer;
 use sqlx::PgPool;
 
 /// Returns an `UNAUTHORIZED` response unless the request carries a valid user
@@ -353,22 +354,6 @@ async fn refresh_update_check(state: &AppState) -> anyhow::Result<serde_json::Va
     .execute(&state.db)
     .await;
     Ok(value)
-}
-
-fn version_is_newer(current: &str, latest: &str) -> bool {
-    version_parts(latest) > version_parts(current)
-}
-
-fn version_parts(value: &str) -> (u64, u64, u64) {
-    let mut parts = value
-        .trim_start_matches('v')
-        .split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0));
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    )
 }
 
 pub(in crate::web) fn domain_host(value: &str) -> Option<&str> {
