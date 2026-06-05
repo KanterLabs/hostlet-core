@@ -11,6 +11,7 @@ API_PID=""
 API_PORT="${HOSTLET_SELF_API_SMOKE_PORT:-$(pick_local_port)}"
 COOKIE_JAR="${TMP_DIR}/cookies.txt"
 API_LOG="${TMP_DIR}/api.log"
+API_STARTUP_ATTEMPTS="${HOSTLET_SELF_HOSTED_STARTUP_ATTEMPTS:-300}"
 AUTH_COOKIE=""
 
 cleanup() {
@@ -55,8 +56,10 @@ cd "${ROOT}"
 ci_cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
 API_PID="$!"
 
-for _ in $(seq 1 90); do
+api_ready=0
+for _ in $(seq 1 "${API_STARTUP_ATTEMPTS}"); do
   if curl -fsS "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1; then
+    api_ready=1
     break
   fi
   if ! kill -0 "${API_PID}" >/dev/null 2>&1; then
@@ -65,6 +68,11 @@ for _ in $(seq 1 90); do
   fi
   sleep 1
 done
+if [ "${api_ready}" != "1" ]; then
+  echo "timed out waiting for self-hosted API after ${API_STARTUP_ATTEMPTS}s" >&2
+  tail -200 "${API_LOG}" >&2 || true
+  exit 1
+fi
 
 base="http://127.0.0.1:${API_PORT}"
 origin="http://127.0.0.1:3000"

@@ -13,6 +13,8 @@ API_PORT="${HOSTLET_SELF_DEPLOY_API_PORT:-$(pick_local_port)}"
 COOKIE_JAR="${TMP_DIR}/cookies.txt"
 API_LOG="${TMP_DIR}/api.log"
 AGENT_LOG="${TMP_DIR}/agent.log"
+API_STARTUP_ATTEMPTS="${HOSTLET_SELF_HOSTED_STARTUP_ATTEMPTS:-300}"
+AGENT_STARTUP_ATTEMPTS="${HOSTLET_SELF_HOSTED_AGENT_ATTEMPTS:-300}"
 GIT_CONFIG_GLOBAL="${TMP_DIR}/gitconfig"
 AUTH_COOKIE=""
 APP_REPO_NAME="node-hello"
@@ -198,8 +200,10 @@ ORIGIN="http://127.0.0.1:3000"
 # CSRF guard pair, JSON_CT adds the JSON content-type for requests with a body.
 ORIGIN_CSRF=(-H "origin: ${ORIGIN}" -H "x-hostlet-csrf: 1")
 JSON_CT=(-H "content-type: application/json")
-for _ in $(seq 1 90); do
+api_ready=0
+for _ in $(seq 1 "${API_STARTUP_ATTEMPTS}"); do
   if curl -fsS "${BASE_URL}/health" >/dev/null 2>&1; then
+    api_ready=1
     break
   fi
   if ! kill -0 "${API_PID}" >/dev/null 2>&1; then
@@ -208,6 +212,11 @@ for _ in $(seq 1 90); do
   fi
   sleep 1
 done
+if [ "${api_ready}" != "1" ]; then
+  echo "timed out waiting for self-hosted API after ${API_STARTUP_ATTEMPTS}s" >&2
+  tail -200 "${API_LOG}" >&2 || true
+  exit 1
+fi
 
 # published_app_serves <expected-substring>: read the app's current published
 # port and assert the running container serves a body containing the substring.
@@ -293,8 +302,10 @@ AUTH_COOKIE="hostlet_unlock=${unlock_cookie}; hostlet_session=$(signed_cookie "$
 ci_cargo run -p hostlet-agent >"${AGENT_LOG}" 2>&1 &
 AGENT_PID="$!"
 
-for _ in $(seq 1 60); do
+agent_ready=0
+for _ in $(seq 1 "${AGENT_STARTUP_ATTEMPTS}"); do
   if curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/servers" | grep -q '"status":"online"'; then
+    agent_ready=1
     break
   fi
   if ! kill -0 "${AGENT_PID}" >/dev/null 2>&1; then
@@ -303,6 +314,11 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
+if [ "${agent_ready}" != "1" ]; then
+  echo "timed out waiting for self-hosted agent after ${AGENT_STARTUP_ATTEMPTS}s" >&2
+  tail -200 "${AGENT_LOG}" >&2 || true
+  exit 1
+fi
 
 create_payload="$(cat <<JSON
 {
