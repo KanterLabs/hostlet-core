@@ -10,6 +10,27 @@
 # Keeping these here removes a large byte-for-byte copy-paste surface that
 # previously lived in both scripts.
 
+ensure_rust_toolchain_path() {
+  local cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin"
+  if [ -d "${cargo_bin}" ]; then
+    case ":${PATH}:" in
+      *":${cargo_bin}:"*) ;;
+      *) export PATH="${cargo_bin}:${PATH}" ;;
+    esac
+  fi
+
+  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+  if command -v rustup >/dev/null 2>&1; then
+    local rustc_path
+    rustc_path="$(rustup which rustc 2>/dev/null || true)"
+    if [ -n "${rustc_path}" ]; then
+      export RUSTC="${RUSTC:-${rustc_path}}"
+    fi
+  fi
+}
+
+ensure_rust_toolchain_path
+
 # json_get <dotted.path>: read JSON from stdin and print the value at the path,
 # exiting non-zero if any segment is missing/null.
 json_get() {
