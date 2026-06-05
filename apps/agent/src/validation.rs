@@ -89,7 +89,7 @@ pub(crate) fn compose_override_yaml(
 ) -> String {
     let env_yaml = compose_override_env_block(app_id, deployment_id, payload);
     format!(
-        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
+        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    pids_limit: 256\n    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
     )
 }
 
@@ -389,6 +389,9 @@ mod tests {
         );
         assert!(override_yaml.contains("host_ip: 127.0.0.1"));
         assert!(!override_yaml.contains("host_ip: 0.0.0.0"));
+        assert!(override_yaml.contains("no-new-privileges:true"));
+        assert!(override_yaml.contains("cap_drop:\n      - ALL"));
+        assert!(override_yaml.contains("pids_limit: 256"));
     }
 
     #[test]
