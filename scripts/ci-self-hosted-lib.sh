@@ -22,6 +22,8 @@ ensure_rust_toolchain_path() {
 
 ensure_rust_toolchain_path
 
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+
 ci_cargo() {
   local cargo_bin
   cargo_bin="$(command -v cargo 2>/dev/null || true)"

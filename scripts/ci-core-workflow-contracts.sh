@@ -19,6 +19,7 @@ assert_contains() {
 
 assert_contains "${SELF_HOSTED_LIB}" 'ensure_rust_toolchain_path'
 assert_contains "${SELF_HOSTED_LIB}" 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"'
+assert_contains "${SELF_HOSTED_LIB}" 'export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"'
 assert_contains "${SELF_HOSTED_LIB}" 'ci_cargo()'
 assert_contains "${SELF_HOSTED_LIB}" 'ci_tmp_dir()'
 assert_contains "${SELF_HOSTED_LIB}" 'local parent="${RUNNER_TEMP:-/tmp}"'
