@@ -112,13 +112,14 @@ async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::
             return Ok(host);
         }
     }
+    let container = railpack_buildkit_container();
     let output = command_output(
         "docker",
         &[
             "inspect",
             "-f",
             "{{.State.Running}}",
-            RAILPACK_BUILDKIT_CONTAINER,
+            container.as_str(),
         ],
         Duration::from_secs(30),
     )
@@ -130,7 +131,7 @@ async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::
                     cfg,
                     deployment_id,
                     "docker",
-                    &["start", RAILPACK_BUILDKIT_CONTAINER],
+                    &["start", container.as_str()],
                 )
                 .await?;
             }
@@ -146,7 +147,7 @@ async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::
                     "run",
                     "-d",
                     "--name",
-                    RAILPACK_BUILDKIT_CONTAINER,
+                    container.as_str(),
                     "--privileged",
                     &image,
                 ],
@@ -154,7 +155,14 @@ async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::
             .await?;
         }
     }
-    Ok(format!("docker-container://{RAILPACK_BUILDKIT_CONTAINER}"))
+    Ok(format!("docker-container://{container}"))
+}
+
+fn railpack_buildkit_container() -> String {
+    std::env::var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| RAILPACK_BUILDKIT_CONTAINER.to_string())
 }
 
 #[cfg(test)]
@@ -198,5 +206,12 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--start-cmd", "python main.py"]));
         assert_eq!(args.last().unwrap(), "/tmp/demo-app");
+    }
+
+    #[test]
+    fn railpack_buildkit_container_can_be_overridden_for_ci() {
+        std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER", "hostlet-buildkit-ci-123");
+        assert_eq!(railpack_buildkit_container(), "hostlet-buildkit-ci-123");
+        std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER");
     }
 }

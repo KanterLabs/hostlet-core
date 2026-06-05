@@ -40,4 +40,13 @@ if [ -n "${allowed_names}" ]; then
   fi
 fi
 
+if [ "${HOSTLET_ALLOW_LOW_DISK:-0}" != "1" ]; then
+  disk_use_percent="$(df -P / | awk 'NR == 2 { gsub("%", "", $5); print $5 }')"
+  disk_fail_percent="${HOSTLET_RUNNER_DISK_FAIL_PERCENT:-92}"
+  if [ -n "${disk_use_percent}" ] && [ "${disk_use_percent}" -ge "${disk_fail_percent}" ]; then
+    echo "runner root disk is ${disk_use_percent}% full; refusing CI above ${disk_fail_percent}%" >&2
+    exit 1
+  fi
+fi
+
 echo "verified self-hosted runner ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"

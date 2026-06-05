@@ -3,10 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RAILPACK_BIN="${HOSTLET_RAILPACK_BIN:-railpack}"
-BUILDKIT_CONTAINER="${HOSTLET_RAILPACK_BUILDKIT_CONTAINER:-hostlet-railpack-buildkit-ci}"
-BUILDKIT_IMAGE="${HOSTLET_RAILPACK_BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1}"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
-METRICS_FILE="${HOSTLET_RAILPACK_METRICS_FILE:-/tmp/hostlet-railpack-generated-fixtures-metrics.json}"
+BUILDKIT_CONTAINER="${HOSTLET_RAILPACK_BUILDKIT_CONTAINER:-hostlet-railpack-buildkit-ci-${RUN_ID}}"
+BUILDKIT_IMAGE="${HOSTLET_RAILPACK_BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1}"
+TMP_DIR="$(mktemp -d "/tmp/hostlet-railpack-fixtures-${RUN_ID}.XXXXXX")"
+METRICS_FILE="${HOSTLET_RAILPACK_METRICS_FILE:-${TMP_DIR}/metrics.json}"
 METRICS_FIRST=1
 
 cleanup() {
@@ -15,6 +16,7 @@ cleanup() {
     | grep ":${RUN_ID}$" \
     | xargs -r docker image rm -f >/dev/null 2>&1 || true
   docker rm -f "${BUILDKIT_CONTAINER}" >/dev/null 2>&1 || true
+  rm -rf "${TMP_DIR}"
 }
 
 if ! command -v "${RAILPACK_BIN}" >/dev/null 2>&1; then
@@ -62,7 +64,7 @@ run_fixture() {
   local build_start build_end build_seconds health_start health_end health_seconds image_bytes
 
   build_start="$(date +%s)"
-  "${RAILPACK_BIN}" plan --error-missing-start --env "PORT=${port}" "${fixture}" >/tmp/hostlet-railpack-plan-"${name}".txt
+  "${RAILPACK_BIN}" plan --error-missing-start --env "PORT=${port}" "${fixture}" >"${TMP_DIR}/railpack-plan-${name}.txt"
   "${RAILPACK_BIN}" build --name "${image}" --progress plain --cache-key "hostlet-${name}" --env "PORT=${port}" --error-missing-start "${fixture}"
   build_end="$(date +%s)"
   build_seconds="$((build_end - build_start))"

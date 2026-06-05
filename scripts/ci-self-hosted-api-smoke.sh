@@ -8,7 +8,7 @@ RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 TMP_DIR="$(mktemp -d "/tmp/hostlet-self-api-${RUN_ID}.XXXXXX")"
 POSTGRES_CONTAINER="hostlet-ci-self-api-postgres-${RUN_ID}"
 API_PID=""
-API_PORT="${HOSTLET_SELF_API_SMOKE_PORT:-18081}"
+API_PORT="${HOSTLET_SELF_API_SMOKE_PORT:-$(pick_local_port)}"
 COOKIE_JAR="${TMP_DIR}/cookies.txt"
 API_LOG="${TMP_DIR}/api.log"
 AUTH_COOKIE=""
@@ -43,7 +43,7 @@ wait_postgres_ready
 POSTGRES_PORT="$(discover_postgres_port)"
 
 export_self_hosted_env "${POSTGRES_PORT}" "${API_PORT}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hostlet-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 
 cd "${ROOT}"
 cargo run -p hostlet-api >"${API_LOG}" 2>&1 &

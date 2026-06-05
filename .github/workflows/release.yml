@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   linux-cli:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh

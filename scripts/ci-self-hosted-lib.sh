@@ -45,6 +45,15 @@ expect_status() {
   fi
 }
 
+pick_local_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+}
+
 # start_postgres_container <image>: launch a throwaway Postgres bound to a random
 # loopback port for ${POSTGRES_CONTAINER}.
 start_postgres_container() {

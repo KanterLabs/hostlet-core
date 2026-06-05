@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   generated-apps:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
@@ -35,7 +35,7 @@ jobs:
           retention-days: 14
 
   self-hosted-api:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh

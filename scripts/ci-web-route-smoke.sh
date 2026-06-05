@@ -3,13 +3,25 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WEB_PID=""
-PORT="${HOSTLET_WEB_SMOKE_PORT:-13000}"
+TMP_DIR="$(mktemp -d "/tmp/hostlet-web-route-smoke-${GITHUB_RUN_ID:-local}-$$.XXXXXX")"
+
+pick_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+}
+
+PORT="${HOSTLET_WEB_SMOKE_PORT:-$(pick_port)}"
 
 cleanup() {
   if [ -n "${WEB_PID}" ] && kill -0 "${WEB_PID}" >/dev/null 2>&1; then
     kill "${WEB_PID}" >/dev/null 2>&1 || true
     wait "${WEB_PID}" >/dev/null 2>&1 || true
   fi
+  rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -22,7 +34,7 @@ fi
 
 NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://127.0.0.1:18080}" \
 NEXT_PUBLIC_WEBHOOK_URL="${NEXT_PUBLIC_WEBHOOK_URL:-http://127.0.0.1:18080}" \
-pnpm --dir apps/web exec next start -H 127.0.0.1 -p "${PORT}" >/tmp/hostlet-web-route-smoke.log 2>&1 &
+pnpm --dir apps/web exec next start -H 127.0.0.1 -p "${PORT}" >"${TMP_DIR}/next.log" 2>&1 &
 WEB_PID="$!"
 
 for _ in $(seq 1 60); do
@@ -30,7 +42,7 @@ for _ in $(seq 1 60); do
     break
   fi
   if ! kill -0 "${WEB_PID}" >/dev/null 2>&1; then
-    cat /tmp/hostlet-web-route-smoke.log >&2
+    cat "${TMP_DIR}/next.log" >&2
     exit 1
   fi
   sleep 1

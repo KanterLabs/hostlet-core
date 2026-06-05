@@ -9,7 +9,7 @@ TMP_DIR="$(mktemp -d "/tmp/hostlet-self-deploy-${RUN_ID}.XXXXXX")"
 POSTGRES_CONTAINER="hostlet-ci-self-deploy-postgres-${RUN_ID}"
 API_PID=""
 AGENT_PID=""
-API_PORT="${HOSTLET_SELF_DEPLOY_API_PORT:-18082}"
+API_PORT="${HOSTLET_SELF_DEPLOY_API_PORT:-$(pick_local_port)}"
 COOKIE_JAR="${TMP_DIR}/cookies.txt"
 API_LOG="${TMP_DIR}/api.log"
 AGENT_LOG="${TMP_DIR}/agent.log"
@@ -31,6 +31,7 @@ RAILPACK_FIXTURES=(
 CREATED_APP_IDS=()
 RAILPACK_BUILDKIT_PREEXISTED=0
 FAILED=0
+RAILPACK_BUILDKIT_CONTAINER="${HOSTLET_RAILPACK_BUILDKIT_CONTAINER:-hostlet-railpack-buildkit-${RUN_ID}}"
 
 mark_failed() {
   local exit_code="$?"
@@ -51,7 +52,7 @@ cleanup() {
   fi
   docker rm -f "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
   if [ "${RAILPACK_BUILDKIT_PREEXISTED}" = "0" ]; then
-    docker rm -f hostlet-railpack-buildkit >/dev/null 2>&1 || true
+    docker rm -f "${RAILPACK_BUILDKIT_CONTAINER}" >/dev/null 2>&1 || true
   fi
   for app in "${CREATED_APP_IDS[@]}"; do
     docker ps -aq --filter "name=hostlet-app-${app}" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -158,7 +159,7 @@ for fixture in "${RAILPACK_FIXTURES[@]}"; do
   IFS=: read -r fixture_name repo_name _health_path _expected <<<"${fixture}"
   make_fixture_repo "${repo_name}" "${ROOT}/scripts/fixtures/generated-apps/${fixture_name}"
 done
-if docker inspect hostlet-railpack-buildkit >/dev/null 2>&1; then
+if docker inspect "${RAILPACK_BUILDKIT_CONTAINER}" >/dev/null 2>&1; then
   RAILPACK_BUILDKIT_PREEXISTED=1
 fi
 
@@ -174,8 +175,9 @@ export HOSTLET_JOB_SIGNING_SECRET="${JOB_SIGNING_SECRET}"
 export HOSTLET_WORKDIR="${TMP_DIR}/agent-work"
 export HOSTLET_LOCAL_MODE=true
 export HOSTLET_HEALTH_HOST=127.0.0.1
+export HOSTLET_RAILPACK_BUILDKIT_CONTAINER="${RAILPACK_BUILDKIT_CONTAINER}"
 export GIT_CONFIG_GLOBAL
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hostlet-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 
 cd "${ROOT}"
 cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
