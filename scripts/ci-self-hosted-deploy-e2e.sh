@@ -180,7 +180,7 @@ export GIT_CONFIG_GLOBAL
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 
 cd "${ROOT}"
-cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
+ci_cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
 API_PID="$!"
 
 BASE_URL="http://127.0.0.1:${API_PORT}"
@@ -281,7 +281,7 @@ AUTH_COOKIE="hostlet_unlock=${unlock_cookie}; hostlet_session=$(signed_cookie "$
 # ---------------------------------------------------------------------------
 # Start the agent and wait for it to register online.
 # ---------------------------------------------------------------------------
-cargo run -p hostlet-agent >"${AGENT_LOG}" 2>&1 &
+ci_cargo run -p hostlet-agent >"${AGENT_LOG}" 2>&1 &
 AGENT_PID="$!"
 
 for _ in $(seq 1 60); do

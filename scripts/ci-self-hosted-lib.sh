@@ -12,17 +12,24 @@
 
 ensure_rust_toolchain_path() {
   local cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin"
-  if [ -d "${cargo_bin}" ]; then
-    case ":${PATH}:" in
-      *":${cargo_bin}:"*) ;;
-      *) export PATH="${cargo_bin}:${PATH}" ;;
-    esac
-  fi
+  case ":${PATH}:" in
+    *":${cargo_bin}:"*) ;;
+    *) export PATH="${cargo_bin}:${PATH}" ;;
+  esac
 
   export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
 }
 
 ensure_rust_toolchain_path
+
+ci_cargo() {
+  local cargo_bin
+  cargo_bin="$(command -v cargo 2>/dev/null || true)"
+  if [ -z "${cargo_bin}" ]; then
+    cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin/cargo"
+  fi
+  "${cargo_bin}" "$@"
+}
 
 # json_get <dotted.path>: read JSON from stdin and print the value at the path,
 # exiting non-zero if any segment is missing/null.

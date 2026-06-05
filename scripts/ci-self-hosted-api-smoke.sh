@@ -46,7 +46,7 @@ export_self_hosted_env "${POSTGRES_PORT}" "${API_PORT}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 
 cd "${ROOT}"
-cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
+ci_cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
 API_PID="$!"
 
 for _ in $(seq 1 90); do

@@ -16,6 +16,10 @@ assert_contains() {
 
 assert_contains "${SELF_HOSTED_LIB}" 'ensure_rust_toolchain_path'
 assert_contains "${SELF_HOSTED_LIB}" 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"'
+assert_contains "${SELF_HOSTED_LIB}" 'ci_cargo()'
+assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'ci_cargo run -p hostlet-api'
+assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ci_cargo run -p hostlet-api'
+assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ci_cargo run -p hostlet-agent'
 
 python3 - "${STAGING_WORKFLOW}" <<'PY'
 import re
