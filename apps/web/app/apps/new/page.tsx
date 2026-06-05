@@ -317,7 +317,7 @@ export default function CreateApp() {
                   <SummaryItem label="Runtime" value={`${form.runtime_kind === "compose" ? "Compose" : "Single"} · :${form.container_port}${form.health_path}`} />
                   <SummaryItem label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
                 </DataList>
-                <button className="mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
+                <button className="button mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
                   <Plus size={16} />
                   {creating ? "Creating..." : inspection?.deployable ? "Create and deploy" : "Create app"}
                 </button>

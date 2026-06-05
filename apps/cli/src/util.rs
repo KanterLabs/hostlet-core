@@ -364,6 +364,10 @@ mod tests {
                 "agent": {
                     "ref": "ghcr.io/shanekanterman04/hostlet-agent:v0.4.1",
                     "digest": "sha256:agent"
+                },
+                "screenshotter": {
+                    "ref": "ghcr.io/shanekanterman04/hostlet-screenshotter:v0.4.1",
+                    "digest": "sha256:screenshotter"
                 }
             }
         });
@@ -381,6 +385,16 @@ mod tests {
         assert_eq!(
             release.images.agent.as_ref().unwrap().digest.as_deref(),
             Some("sha256:agent")
+        );
+        assert_eq!(
+            release
+                .images
+                .screenshotter
+                .as_ref()
+                .unwrap()
+                .digest
+                .as_deref(),
+            Some("sha256:screenshotter")
         );
     }
 

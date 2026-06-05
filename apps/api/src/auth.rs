@@ -433,6 +433,21 @@ pub fn current_user_id(headers: &HeaderMap, state: &AppState) -> Option<Uuid> {
         .flatten()
 }
 
+#[cfg(test)]
+pub(crate) fn test_session_cookie_header(state: &AppState, user_id: Uuid) -> String {
+    let unlock = signed_value(
+        &state.session_secret,
+        "unlocked",
+        Duration::hours(UNLOCK_TTL_HOURS),
+    );
+    let session = signed_value(
+        &state.session_secret,
+        &user_id.to_string(),
+        Duration::days(SESSION_TTL_DAYS),
+    );
+    format!("{UNLOCK_COOKIE}={unlock}; {SESSION_COOKIE}={session}")
+}
+
 fn current_user_id_from_headers(headers: &HeaderMap, session_secret: &str) -> Option<Uuid> {
     let value = cookie_value(headers, SESSION_COOKIE)?;
     let user_id = verify_signed_value(session_secret, value)?;

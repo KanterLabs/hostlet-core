@@ -9,31 +9,50 @@ type StatusVariant = "active" | "success" | "failed" | "warning";
 
 const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: LucideIcon; tone: string }> = {
   active: {
-    values: ["queued", "running", "building", "starting", "health_checking", "routing"],
+    values: ["queued", "pending", "waiting", "running", "building", "starting", "health_checking", "routing"],
     icon: Loader2,
-    tone: "bg-amber-50 text-amber-800 ring-amber-200",
+    tone: "bg-amber-50 text-amber-900 ring-amber-300",
   },
   success: {
-    values: ["success", "online", "connected", "open", "enabled", "healthy"],
+    values: ["success", "online", "connected", "open", "enabled", "healthy", "live"],
     icon: CheckCircle2,
-    tone: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+    tone: "bg-emerald-50 text-emerald-900 ring-emerald-300",
   },
   failed: {
-    values: ["failed", "offline", "missing", "closed", "disabled", "not configured", "unhealthy"],
+    values: ["failed", "offline", "missing", "closed", "disabled", "not configured", "unhealthy", "rolled_back"],
     icon: XCircle,
-    tone: "bg-red-50 text-red-800 ring-red-200",
+    tone: "bg-red-50 text-red-900 ring-red-300",
   },
   warning: {
     values: ["needs attention", "not deployed", "degraded"],
     icon: AlertTriangle,
-    tone: "bg-amber-50 text-amber-800 ring-amber-200",
+    tone: "bg-amber-50 text-amber-900 ring-amber-300",
   },
 };
 
-const DEFAULT_STATUS = { icon: CircleDashed, tone: "bg-neutral-100 text-neutral-700 ring-neutral-200" };
+const DEFAULT_STATUS = { icon: CircleDashed, tone: "bg-neutral-100 text-neutral-800 ring-neutral-300" };
+
+export function statusLabel(status?: string | null) {
+  const value = (status || "unknown").replaceAll("_", " ").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    health_checking: "health checking",
+    rolled_back: "rolled back",
+    "not deployed": "not deployed",
+    "needs attention": "needs attention",
+  };
+  return labels[value] || value || "unknown";
+}
+
+export function statusToneClass(status?: string | null) {
+  const value = statusLabel(status);
+  const variant = (Object.keys(STATUS_VARIANTS) as StatusVariant[]).find((key) =>
+    STATUS_VARIANTS[key].values.includes(value),
+  );
+  return variant ? STATUS_VARIANTS[variant].tone : DEFAULT_STATUS.tone;
+}
 
 export function StatusPill({ status, label }: { status?: string | null; label?: string }) {
-  const value = status || "unknown";
+  const value = statusLabel(status);
   const variant = (Object.keys(STATUS_VARIANTS) as StatusVariant[]).find((key) =>
     STATUS_VARIANTS[key].values.includes(value),
   );
@@ -43,7 +62,7 @@ export function StatusPill({ status, label }: { status?: string | null; label?: 
   return (
     <span className={`pill ${tone}`}>
       <Icon size={13} className={active ? "animate-spin" : ""} />
-      {(label || value).replaceAll("_", " ")}
+      {label || value}
     </span>
   );
 }
@@ -91,7 +110,7 @@ export function Notice({
   const toneClass = {
     neutral: "border-line bg-surface text-ink",
     success: "border-emerald-200 bg-emerald-50 text-emerald-900",
-    warning: "border-amber-200 bg-amber-50 text-amber-900",
+    warning: "border-amber-300 bg-amber-50 text-amber-950",
     danger: "border-red-200 bg-red-50 text-red-900",
   }[tone];
   const titleClass = {

@@ -33,6 +33,19 @@ export type RuntimeHealthEvent = {
   createdAt: string;
 };
 
+export type AppScreenshot = {
+  id: string;
+  appId: string;
+  deploymentId?: string | null;
+  source: string;
+  contentType: string;
+  byteSize: number;
+  width?: number | null;
+  height?: number | null;
+  capturedAt: string;
+  publicUrl: string;
+};
+
 export type RuntimeMetadata = {
   packagingStrategy?: string | null;
   generatedDockerfile?: boolean | null;
@@ -131,4 +144,5 @@ export type BusyAction =
   | "env"
   | "health"
   | "restart"
+  | "screenshot"
   | "";

@@ -34,12 +34,13 @@ record_metric() {
   local build_seconds="$4"
   local max_build_seconds="$5"
   local health_seconds="$6"
+  local max_health_seconds="$7"
   if [ "${METRICS_FIRST}" = "0" ]; then
     printf ',\n' >>"${METRICS_FILE}"
   fi
   METRICS_FIRST=0
-  printf '  {"fixture":"%s","imageBytes":%s,"maxImageBytes":%s,"buildSeconds":%s,"maxBuildSeconds":%s,"healthSeconds":%s}' \
-    "${name}" "${image_bytes}" "${max_image_bytes}" "${build_seconds}" "${max_build_seconds}" "${health_seconds}" >>"${METRICS_FILE}"
+  printf '  {"fixture":"%s","imageBytes":%s,"maxImageBytes":%s,"buildSeconds":%s,"maxBuildSeconds":%s,"healthSeconds":%s,"maxHealthSeconds":%s}' \
+    "${name}" "${image_bytes}" "${max_image_bytes}" "${build_seconds}" "${max_build_seconds}" "${health_seconds}" "${max_health_seconds}" >>"${METRICS_FILE}"
 }
 
 finish_metrics() {
@@ -54,6 +55,7 @@ run_fixture() {
   local expected="$4"
   local max_image_bytes="$5"
   local max_build_seconds="$6"
+  local max_health_seconds="$7"
   local image="hostlet/railpack-fixture-${name}:${RUN_ID}"
   local container="hostlet-railpack-fixture-${RUN_ID}-${name}"
   local fixture="${ROOT}/scripts/fixtures/generated-apps/${name}"
@@ -80,8 +82,8 @@ run_fixture() {
   health_seconds="$((health_end - health_start))"
   curl -fsS "http://127.0.0.1:${published}/" | grep -q "${expected}"
   image_bytes="$(docker image inspect -f "{{.Size}}" "${image}")"
-  record_metric "${name}" "${image_bytes}" "${max_image_bytes}" "${build_seconds}" "${max_build_seconds}" "${health_seconds}"
-  echo "railpack fixture ${name} image bytes=${image_bytes} max=${max_image_bytes} build_seconds=${build_seconds} max=${max_build_seconds} health_seconds=${health_seconds}"
+  record_metric "${name}" "${image_bytes}" "${max_image_bytes}" "${build_seconds}" "${max_build_seconds}" "${health_seconds}" "${max_health_seconds}"
+  echo "railpack fixture ${name} image bytes=${image_bytes} max=${max_image_bytes} build_seconds=${build_seconds} max=${max_build_seconds} health_seconds=${health_seconds} max=${max_health_seconds}"
   if [ "${image_bytes}" -gt "${max_image_bytes}" ]; then
     echo "railpack fixture ${name} image size exceeded budget: ${image_bytes} > ${max_image_bytes}" >&2
     exit 1
@@ -90,17 +92,21 @@ run_fixture() {
     echo "railpack fixture ${name} build time exceeded budget: ${build_seconds}s > ${max_build_seconds}s" >&2
     exit 1
   fi
+  if [ "${health_seconds}" -gt "${max_health_seconds}" ]; then
+    echo "railpack fixture ${name} health time exceeded budget: ${health_seconds}s > ${max_health_seconds}s" >&2
+    exit 1
+  fi
   docker rm -f "${container}" >/dev/null
 }
 
-run_fixture python 3000 /health hostlet-generated-python 150000000 180
-run_fixture go 3000 /health hostlet-generated-go 60000000 180
-run_fixture rust 3000 /health hostlet-generated-rust 60000000 180
-run_fixture static 3000 / hostlet-generated-static 80000000 180
-run_fixture node 3000 /health hostlet-ci 180000000 180
-run_fixture bun 3000 /health hostlet-generated-bun 220000000 180
-run_fixture yarn 3000 /health hostlet-generated-yarn 180000000 180
-run_fixture next-pnpm 3000 / hostlet-generated-next-pnpm 320000000 240
+run_fixture python 3000 /health hostlet-generated-python 150000000 180 60
+run_fixture go 3000 /health hostlet-generated-go 60000000 180 60
+run_fixture rust 3000 /health hostlet-generated-rust 60000000 180 60
+run_fixture static 3000 / hostlet-generated-static 80000000 180 60
+run_fixture node 3000 /health hostlet-ci 180000000 180 60
+run_fixture bun 3000 /health hostlet-generated-bun 220000000 180 60
+run_fixture yarn 3000 /health hostlet-generated-yarn 180000000 180 60
+run_fixture next-pnpm 3000 / hostlet-generated-next-pnpm 320000000 240 60
 
 echo "Railpack generated fixture builds passed"
 echo "Railpack generated fixture metrics: ${METRICS_FILE}"

@@ -3,12 +3,12 @@
 import { useState } from "react";
 import { HardDrive, Server } from "lucide-react";
 import { api } from "@/lib/api";
+import { useVisibilityPoll, type VisibilityPollContext } from "@/lib/useVisibilityPoll";
 import { AppShell, EmptyState, Metric, MetricsGrid, PageHeader, Panel, StatusPill } from "@/components/ui";
 import {
   SERVERS_POLL_INTERVAL_MS,
   deriveServerCounts,
   formatLastSeen,
-  useVisibilityPoll,
   type ServerRow,
 } from "./servers-data";
 
@@ -17,16 +17,20 @@ export default function Servers() {
   const [emptyMessage, setEmptyMessage] = useState("Loading machines...");
   const [error, setError] = useState("");
 
-  useVisibilityPoll(loadServers, SERVERS_POLL_INTERVAL_MS);
+  useVisibilityPoll(loadServers, { intervalMs: SERVERS_POLL_INTERVAL_MS });
 
-  function loadServers() {
+  function loadServers({ isActive }: VisibilityPollContext) {
     api<ServerRow[]>("/api/servers")
       .then((rows) => {
+        if (!isActive()) return;
         setServers(rows);
         setError("");
         setEmptyMessage(rows.length ? "" : "No machines yet.");
       })
-      .catch((err) => setError(`Could not load machines. ${err instanceof Error ? err.message : "Sign in again."}`));
+      .catch((err) => {
+        if (!isActive()) return;
+        setError(`Could not load machines. ${err instanceof Error ? err.message : "Sign in again."}`);
+      });
   }
 
   const { online, local } = deriveServerCounts(servers);

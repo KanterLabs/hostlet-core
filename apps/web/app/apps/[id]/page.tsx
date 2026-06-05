@@ -1,12 +1,13 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Activity,
   AlertTriangle,
   Box,
+  Camera,
   Cpu,
   ExternalLink,
   GitBranch,
@@ -20,6 +21,8 @@ import {
   Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatTimestamp } from "@/lib/time";
+import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 import { webhookReadiness } from "@/lib/webhooks";
 import {
   AppShell,
@@ -52,6 +55,7 @@ import {
 import { emptySettings } from "./appDetail.types";
 import type {
   App,
+  AppScreenshot,
   ResourceStats,
   RuntimeHealth,
   RuntimeHealthEvent,
@@ -67,10 +71,23 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const [resources, setResources] = useState<ResourceStats | null>(null);
   const [health, setHealth] = useState<RuntimeHealth | null>(null);
   const [healthEvents, setHealthEvents] = useState<RuntimeHealthEvent[]>([]);
+  const [screenshot, setScreenshot] = useState<AppScreenshot | null>(null);
+  const [screenshotMessage, setScreenshotMessage] = useState("No generated screenshot yet.");
   const [envKeys, setEnvKeys] = useState<Array<{ key: string }>>([]);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [newEnv, setNewEnv] = useState({ key: "", value: "" });
   const [resourceMessage, setResourceMessage] = useState("Waiting for a successful deploy.");
+
+  const refreshScreenshot = useCallback(async () => {
+    try {
+      const latest = await api<AppScreenshot>(`/api/apps/${id}/screenshots/latest`);
+      setScreenshot(latest);
+      setScreenshotMessage("");
+    } catch {
+      setScreenshot(null);
+      setScreenshotMessage("No generated screenshot yet.");
+    }
+  }, [id]);
 
   const {
     message,
@@ -86,6 +103,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     saveEnvVar,
     checkHealthNow,
     restartContainer,
+    captureScreenshot,
     deleteEnvVar,
   } = useAppActions({
     id,
@@ -98,63 +116,51 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     setEnvKeys,
     setEnvValues,
     setNewEnv,
+    refreshScreenshot,
   });
 
   useEffect(() => {
     refreshApp();
+    refreshScreenshot();
     api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
-  }, [id, refreshApp]);
+  }, [id, refreshApp, refreshScreenshot]);
 
-  useEffect(() => {
-    let active = true;
-    async function loadHealth() {
+  useVisibilityPoll(
+    async ({ isActive }) => {
       try {
         const [snapshot, events] = await Promise.all([
           api<RuntimeHealth>(`/api/apps/${id}/health`),
           api<RuntimeHealthEvent[]>(`/api/apps/${id}/health/events`),
         ]);
-        if (!active) return;
+        if (!isActive()) return;
         setHealth(snapshot);
         setHealthEvents(events);
         setHealthMessage("");
       } catch (error) {
-        if (!active) return;
+        if (!isActive()) return;
         setHealth(null);
         setHealthEvents([]);
         setHealthMessage(error instanceof Error ? error.message : "Runtime health is not available yet.");
       }
-    }
-    loadHealth();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") loadHealth();
-    }, 5000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [id, setHealthMessage]);
+    },
+    { intervalMs: 5000, deps: [id, setHealthMessage] },
+  );
 
-  useEffect(() => {
-    let active = true;
-    async function loadResources() {
+  useVisibilityPoll(
+    async ({ isActive }) => {
       try {
         const stats = await api<ResourceStats>(`/api/apps/${id}/resources`);
-        if (!active) return;
+        if (!isActive()) return;
         setResources(stats);
         setResourceMessage("");
       } catch (error) {
-        if (!active) return;
+        if (!isActive()) return;
         setResources(null);
         setResourceMessage(error instanceof Error ? error.message : "Resource usage is not available yet.");
       }
-    }
-    loadResources();
-    const timer = setInterval(loadResources, 5000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [id]);
+    },
+    { intervalMs: 5000, deps: [id] },
+  );
 
   const deploymentStatus = app?.latestDeployment?.status || (app?.currentDeploymentId ? "success" : "not deployed");
   const active = isActiveDeploy(app?.latestDeployment?.status);
@@ -204,7 +210,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               <div>
                 <div className="eyebrow mb-2">Deploy</div>
                 <div className="flex flex-wrap gap-2">
-                  <button disabled={!!busyAction || active} onClick={deploy}><Play size={16} />{busyAction === "deploy" ? "Starting..." : "Deploy latest"}</button>
+                  <button className="button" disabled={!!busyAction || active} onClick={deploy}><Play size={16} />{busyAction === "deploy" ? "Starting..." : "Deploy latest"}</button>
                   <button disabled={!!busyAction || !!rollbackReason} title={rollbackReason || "Rollback to the previous successful deployment"} className="button-secondary" onClick={rollback}><RotateCcw size={16} />Rollback</button>
                 </div>
               </div>
@@ -245,7 +251,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               className="mb-6"
               title="This app has not been deployed yet."
               description="Start the first deployment to build, run, check health, and publish the route."
-              action={<button disabled={!!busyAction || active} onClick={deploy}><Play size={16} />Start first deployment</button>}
+              action={<button className="button" disabled={!!busyAction || active} onClick={deploy}><Play size={16} />Start first deployment</button>}
             />
           )}
 
@@ -280,8 +286,8 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
                       <Metric label="Status" value={health.status} detail={health.lastError || "latest agent check"} />
                       <Metric label="HTTP" value={health.httpStatus ? String(health.httpStatus) : "none"} detail={typeof health.latencyMs === "number" ? `${health.latencyMs} ms` : "no response"} />
-                      <Metric label="Failures" value={String(health.failureCount)} detail={health.lastCheckedAt ? `checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}` : "not checked yet"} />
-                      <Metric label="Last healthy" value={health.lastHealthyAt ? new Date(health.lastHealthyAt).toLocaleString() : "unknown"} />
+                      <Metric label="Failures" value={String(health.failureCount)} detail={health.lastCheckedAt ? `checked ${formatTimestamp(health.lastCheckedAt, "time")}` : "not checked yet"} />
+                      <Metric label="Last healthy" value={health.lastHealthyAt ? formatTimestamp(health.lastHealthyAt) : "unknown"} />
                       <Metric label="Container" value={health.containerName || "unknown"} />
                       <Metric label="Target" value={health.checkedUrl || "waiting"} />
                     </MetricsGrid>
@@ -289,7 +295,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       <div className="mt-4 overflow-hidden rounded-md border border-line">
                         {healthEvents.slice(0, 5).map((event) => (
                           <div key={event.id} className="grid gap-2 border-t border-line px-3 py-2 text-sm first:border-t-0 sm:grid-cols-[140px_110px_1fr]">
-                            <span className="text-muted">{new Date(event.createdAt).toLocaleTimeString()}</span>
+                            <span className="text-muted">{formatTimestamp(event.createdAt, "time")}</span>
                             <StatusPill status={event.status} />
                             <span className="min-w-0 truncate">{event.error || healthEventSummary(event)}</span>
                           </div>
@@ -306,7 +312,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 <SectionHeader
                   title="Resource usage"
                   description="Live Docker stats for the current running container."
-                  action={resources?.sampledAt && <p className="text-xs text-muted">Updated {new Date(resources.sampledAt).toLocaleTimeString()}</p>}
+                  action={resources?.sampledAt && <p className="text-xs text-muted">Updated {formatTimestamp(resources.sampledAt, "time")}</p>}
                 />
                 {resources ? (
                   <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
@@ -380,7 +386,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       </div>
                       <div className="flex gap-2">
                         <input type="password" value={envValues[key] || ""} onChange={(event) => setEnvValues({ ...envValues, [key]: event.target.value })} placeholder="New value" />
-                        <button disabled={!!busyAction || !envValues[key]} onClick={() => saveEnvVar(key, envValues[key])}>Save</button>
+                        <button className="button" disabled={!!busyAction || !envValues[key]} onClick={() => saveEnvVar(key, envValues[key])}>Save</button>
                       </div>
                     </div>
                   ))}
@@ -388,9 +394,40 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <div className="rounded-md border border-line bg-surface-alt p-3">
                     <input value={newEnv.key} onChange={(event) => setNewEnv({ ...newEnv, key: event.target.value.toUpperCase() })} placeholder="KEY" />
                     <input className="mt-2" type="password" value={newEnv.value} onChange={(event) => setNewEnv({ ...newEnv, value: event.target.value })} placeholder="Value" />
-                    <button className="mt-2 w-full" disabled={!!busyAction || !newEnv.key || !newEnv.value} onClick={() => saveEnvVar(newEnv.key, newEnv.value)}><KeyRound size={16} />Add variable</button>
+                    <button className="button mt-2 w-full" disabled={!!busyAction || !newEnv.key || !newEnv.value} onClick={() => saveEnvVar(newEnv.key, newEnv.value)}><KeyRound size={16} />Add variable</button>
                   </div>
                 </div>
+              </Panel>
+
+              <Panel>
+                <SectionHeader
+                  icon={Camera}
+                  title="Showcase screenshot"
+                  action={
+                    <button
+                      className="button-secondary"
+                      disabled={!!busyAction || !app?.currentDeploymentId || !app?.publicExposure}
+                      onClick={captureScreenshot}
+                      title={!app?.publicExposure ? "Publish the app URL before capture" : "Capture screenshot"}
+                    >
+                      <Camera size={16} />
+                      {busyAction === "screenshot" ? "Capturing..." : "Capture"}
+                    </button>
+                  }
+                />
+                {screenshot ? (
+                  <a className="mt-4 block overflow-hidden rounded-md border border-line bg-surface-alt" href={screenshot.publicUrl} target="_blank" rel="noreferrer">
+                    <img className="aspect-video w-full object-cover" src={screenshot.publicUrl} alt={`${app?.name || "App"} screenshot`} />
+                  </a>
+                ) : (
+                  <div className="mt-4 flex aspect-video items-center justify-center rounded-md border border-dashed border-line bg-surface-alt text-sm text-muted">
+                    {screenshotMessage}
+                  </div>
+                )}
+                <DataList className="mt-4">
+                  <SummaryItem label="Captured" value={screenshot?.capturedAt ? formatTimestamp(screenshot.capturedAt) : "waiting"} />
+                  <SummaryItem label="Source" value={screenshot?.source || "generated"} />
+                </DataList>
               </Panel>
 
               <Panel>

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
 import { api } from "@/lib/api";
+import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 import { AppShell, Notice, PageHeader } from "@/components/ui";
 import {
   DASHBOARD_POLL_INTERVAL_MS,
@@ -21,32 +22,24 @@ export default function Dashboard() {
   const [version, setVersion] = useState<VersionPayload | null>(null);
   const [message, setMessage] = useState("Loading Hostlet...");
 
-  useEffect(() => {
-    let active = true;
-    async function loadDashboard() {
+  useVisibilityPoll(
+    async ({ isActive }) => {
       try {
         const [appRows, serverRows] = await Promise.all([
           api<App[]>("/api/apps"),
           api<Server[]>("/api/servers"),
         ]);
-        if (!active) return;
+        if (!isActive()) return;
         setApps(appRows);
         setServers(serverRows);
         setMessage("");
       } catch (err) {
-        if (!active) return;
+        if (!isActive()) return;
         setMessage(err instanceof Error ? err.message : "Could not load Hostlet.");
       }
-    }
-    loadDashboard();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") loadDashboard();
-    }, DASHBOARD_POLL_INTERVAL_MS);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, []);
+    },
+    { intervalMs: DASHBOARD_POLL_INTERVAL_MS },
+  );
 
   useEffect(() => {
     let active = true;

@@ -136,7 +136,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             </label>
           )}
           {error && <Notice tone="danger" description={error} />}
-          <button className="w-full" disabled={saving || !status}>
+          <button className="button w-full" disabled={saving || !status}>
             {saving ? "Saving..." : setup ? "Set password" : "Unlock"}
           </button>
         </form>

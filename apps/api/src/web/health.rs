@@ -269,11 +269,13 @@ pub async fn check_app_health_now(
     .await
 }
 
-pub(in crate::web) async fn system_health_counts(state: &AppState) -> serde_json::Value {
+pub(in crate::web) async fn system_health_counts(
+    state: &AppState,
+) -> Result<serde_json::Value, sqlx::Error> {
     let rows = sqlx::query(&HEALTH_COUNTS_QUERY.replace("{filter}", ""))
         .fetch_all(&state.db)
-        .await;
-    health_counts_json(rows.unwrap_or_default())
+        .await?;
+    Ok(health_counts_json(rows))
 }
 
 fn health_counts_json(rows: Vec<sqlx::postgres::PgRow>) -> serde_json::Value {

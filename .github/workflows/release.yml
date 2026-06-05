@@ -72,7 +72,15 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-agent:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-agent:${SHA_TAG}" \
             .
-          for image in hostlet-api hostlet-web hostlet-agent; do
+          docker build \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.version="${RELEASE_TAG}" \
+            -f apps/screenshotter/Dockerfile \
+            -t "${IMAGE_REGISTRY}/hostlet-screenshotter:${RELEASE_TAG}" \
+            -t "${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}" \
+            .
+          for image in hostlet-api hostlet-web hostlet-agent hostlet-screenshotter; do
             docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"
             docker push "${IMAGE_REGISTRY}/${image}:${SHA_TAG}"
           done
@@ -81,7 +89,7 @@ jobs:
         env:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
-          for image in hostlet-api hostlet-web hostlet-agent; do
+          for image in hostlet-api hostlet-web hostlet-agent hostlet-screenshotter; do
             digest="$(docker manifest inspect -v "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}" | node -e '
               const fs = require("fs");
               const data = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -124,6 +132,10 @@ jobs:
               "agent": {
                 "ref": "ghcr.io/shanekanterman04/hostlet-agent:${IMAGE_TAG}",
                 "digest": "${HOSTLET_AGENT_DIGEST:-}"
+              },
+              "screenshotter": {
+                "ref": "ghcr.io/shanekanterman04/hostlet-screenshotter:${IMAGE_TAG}",
+                "digest": "${HOSTLET_SCREENSHOTTER_DIGEST:-}"
               }
             },
             "assets": {

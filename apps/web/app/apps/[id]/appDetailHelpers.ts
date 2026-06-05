@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { formatTimestamp } from "@/lib/time";
 import type { AgentJob, App, RuntimeHealth, RuntimeHealthEvent } from "./appDetail.types";
 
 export function webhookSummary(webhook?: App["latestWebhook"] | null) {
@@ -39,7 +40,7 @@ export function healthMetricDetail(health?: RuntimeHealth | null) {
   if (!health) return "waiting for agent";
   if (health.lastError) return health.lastError;
   if (typeof health.latencyMs === "number") return `${health.latencyMs} ms`;
-  return health.lastCheckedAt ? `checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}` : "not checked yet";
+  return health.lastCheckedAt ? `checked ${formatTimestamp(health.lastCheckedAt, "time")}` : "not checked yet";
 }
 
 export function healthEventSummary(event: RuntimeHealthEvent) {

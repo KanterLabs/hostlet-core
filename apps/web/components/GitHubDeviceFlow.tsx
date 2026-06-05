@@ -138,7 +138,7 @@ export function GitHubDeviceFlow({
   if (!flow) {
     return (
       <div className={className}>
-        <button className={fullWidth ? "w-full" : ""} onClick={start} disabled={busy}>
+        <button className={fullWidth ? "button w-full" : "button"} onClick={start} disabled={busy}>
           {busy ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
           {busy ? "Starting..." : buttonLabel}
         </button>

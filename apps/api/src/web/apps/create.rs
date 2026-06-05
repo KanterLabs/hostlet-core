@@ -78,11 +78,7 @@ pub async fn create_app(
     };
     let server_id = match body.server_id {
         Some(id) => id,
-        None => Uuid::parse_str(
-            &std::env::var("LOCAL_SERVER_ID")
-                .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000001".into()),
-        )
-        .unwrap(),
+        None => state.local_server_id,
     };
     let server = sqlx::query("SELECT id FROM servers WHERE id=$1 AND kind='local'")
         .bind(server_id)

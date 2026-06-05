@@ -12,6 +12,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cd "${ROOT}"
 if [ ! -d apps/web/.next ]; then

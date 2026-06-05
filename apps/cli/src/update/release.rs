@@ -27,6 +27,7 @@ pub(crate) struct ReleaseImages {
     api: Option<ReleaseImage>,
     pub(crate) web: Option<ReleaseImage>,
     pub(crate) agent: Option<ReleaseImage>,
+    pub(crate) screenshotter: Option<ReleaseImage>,
 }
 
 pub(crate) struct ReleaseImage {
@@ -46,7 +47,10 @@ impl ReleaseInfo {
     }
 
     pub(crate) fn has_release_images(&self) -> bool {
-        self.images.api.is_some() && self.images.web.is_some() && self.images.agent.is_some()
+        self.images.api.is_some()
+            && self.images.web.is_some()
+            && self.images.agent.is_some()
+            && self.images.screenshotter.is_some()
     }
 }
 
@@ -159,6 +163,8 @@ pub(crate) fn apply_release_manifest_value(release: &mut ReleaseInfo, value: &Va
         release.images.web = parse_release_image(images.get("web")).or(release.images.web.take());
         release.images.agent =
             parse_release_image(images.get("agent")).or(release.images.agent.take());
+        release.images.screenshotter = parse_release_image(images.get("screenshotter"))
+            .or(release.images.screenshotter.take());
     }
 }
 
@@ -191,7 +197,7 @@ pub(crate) fn print_update_check(release: &ReleaseInfo) {
     if release.has_release_images() {
         println!("Image tag:       {}", release.image_tag());
         println!(
-            "Images:          api={} web={} agent={}",
+            "Images:          api={} web={} agent={} screenshotter={}",
             release
                 .images
                 .api
@@ -206,17 +212,23 @@ pub(crate) fn print_update_check(release: &ReleaseInfo) {
                 .images
                 .agent
                 .as_ref()
+                .map_or("missing", |image| image.reference.as_str()),
+            release
+                .images
+                .screenshotter
+                .as_ref()
                 .map_or("missing", |image| image.reference.as_str())
         );
         let signed_digests = [
             release.images.api.as_ref(),
             release.images.web.as_ref(),
             release.images.agent.as_ref(),
+            release.images.screenshotter.as_ref(),
         ]
         .iter()
         .filter(|image| image.and_then(|image| image.digest.as_ref()).is_some())
         .count();
-        println!("Image digests:   {signed_digests}/3 available");
+        println!("Image digests:   {signed_digests}/4 available");
     }
     println!(
         "Checksum signing: {}",

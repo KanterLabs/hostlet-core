@@ -136,6 +136,125 @@ pub fn valid_health_path(value: &str) -> bool {
         && !value.chars().any(|c| c.is_control() || c == '\\')
 }
 
+pub fn valid_root_directory(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('/')
+        && !value.starts_with('\\')
+        && !value.split('/').any(|part| part == "..")
+        && !value.chars().any(|c| c.is_control() || c == '\\')
+}
+
+pub fn valid_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+pub fn valid_env_value(value: &str) -> bool {
+    value.len() <= 65_536
+}
+
+pub fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub fn clean_command(value: Option<String>) -> Result<Option<String>, &'static str> {
+    let Some(value) = clean_optional(value) else {
+        return Ok(None);
+    };
+    if value.len() > 500 || value.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
+        return Err("commands cannot contain newlines, NUL bytes, or more than 500 characters");
+    }
+    Ok(Some(value))
+}
+
+pub fn clean_runtime_kind(value: Option<&str>) -> Result<String, &'static str> {
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("single");
+    match value {
+        "single" | "compose" => Ok(value.to_string()),
+        _ => Err("runtime kind must be single or compose"),
+    }
+}
+
+pub fn clean_packaging_strategy(value: Option<&str>) -> Result<String, &'static str> {
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("auto");
+    match value {
+        "auto" | "dockerfile" | "generated" => Ok(value.to_string()),
+        _ => Err("packaging strategy must be auto, dockerfile, or generated"),
+    }
+}
+
+pub fn parse_github_repo(input: &str) -> Option<String> {
+    let trimmed = input.trim().trim_end_matches(".git");
+    if let Some(repo) = trimmed
+        .strip_prefix("git@github.com:")
+        .and_then(parse_owner_repo)
+    {
+        return Some(repo);
+    }
+    if let Ok(url) = url::Url::parse(trimmed) {
+        if url.host_str()? != "github.com" {
+            return None;
+        }
+        return parse_owner_repo(url.path().trim_start_matches('/'));
+    }
+    parse_owner_repo(trimmed)
+}
+
+pub fn parse_owner_repo(value: &str) -> Option<String> {
+    let mut parts = value.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some() || !valid_repo_part(owner) || !valid_repo_part(repo) {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn valid_repo_part(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+}
+
+pub fn valid_commit_sha(value: &str) -> bool {
+    value.len() == 40
+        && value.chars().all(|c| c.is_ascii_hexdigit())
+        && !value.chars().all(|c| c == '0')
+}
+
+pub fn version_is_newer(current: &str, latest: &str) -> bool {
+    version_parts(latest) > version_parts(current)
+}
+
+pub fn version_parts(value: &str) -> (u64, u64, u64) {
+    let mut parts = value
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
 string_status_enum! {
     /// Lifecycle status of a single deployment, as persisted in the
     /// `deployments` table and sent over the wire.
@@ -150,6 +269,102 @@ string_status_enum! {
         Failed => "failed",
         RolledBack => "rolled_back",
         Canceled => "canceled",
+    }
+}
+
+#[cfg(test)]
+mod contract_helper_tests {
+    use super::*;
+
+    #[test]
+    fn github_repo_inputs_parse_to_owner_repo() {
+        assert_eq!(
+            parse_github_repo("https://github.com/go-gitea/gitea"),
+            Some("go-gitea/gitea".into())
+        );
+        assert_eq!(
+            parse_github_repo("git@github.com:owner/repo.git"),
+            Some("owner/repo".into())
+        );
+        assert_eq!(parse_github_repo("owner/repo"), Some("owner/repo".into()));
+        assert_eq!(parse_github_repo("https://example.com/owner/repo"), None);
+    }
+
+    #[test]
+    fn commit_sha_rejects_delete_marker() {
+        assert!(!valid_commit_sha(
+            "0000000000000000000000000000000000000000"
+        ));
+        assert!(valid_commit_sha("0123456789abcdef0123456789abcdef01234567"));
+    }
+
+    #[test]
+    fn version_comparison_uses_numeric_triplets() {
+        assert!(version_is_newer("v0.9.9", "v0.10.0"));
+        assert!(!version_is_newer("v1.2.3", "v1.2.3"));
+        assert_eq!(version_parts("v1.bad.3"), (1, 0, 3));
+    }
+
+    #[test]
+    fn packaging_strategy_is_normalized() {
+        assert_eq!(clean_packaging_strategy(None), Ok("auto".into()));
+        assert_eq!(
+            clean_packaging_strategy(Some(" generated ")),
+            Ok("generated".into())
+        );
+        assert_eq!(
+            clean_packaging_strategy(Some("compose")),
+            Err("packaging strategy must be auto, dockerfile, or generated")
+        );
+    }
+
+    #[test]
+    fn dockerfile_inference_prefers_web_port_and_prompts_env() {
+        let inference = infer_dockerfile(
+            r#"
+FROM alpine
+ENV APP_SECRET=
+ARG BUILD_TOKEN
+EXPOSE 22 3000/tcp
+VOLUME ["/data"]
+"#,
+        );
+
+        assert_eq!(inference.port, Some(3000));
+        assert!(inference.env.iter().any(|item| item["key"] == "APP_SECRET"));
+        assert!(inference
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("multiple ports")));
+        assert!(inference
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("BUILD_TOKEN")));
+    }
+
+    #[test]
+    fn package_json_inference_detects_framework_and_manager() {
+        let inference = infer_package_json(
+            r#"{"dependencies":{"next":"16.0.0"},"packageManager":"pnpm@10.0.0"}"#,
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(inference.framework, "Next.js");
+        assert_eq!(inference.package_manager, "pnpm");
+    }
+
+    #[test]
+    fn inspection_payloads_emit_packaging_contract() {
+        let value = railpack_inspection("owner/repo", "main", "main", "Python");
+
+        assert_eq!(value["packagingStrategy"], "auto");
+        assert_eq!(
+            value["packagingOptions"],
+            serde_json::json!(["auto", "generated"])
+        );
+        assert_eq!(value["recommendedPackagingStrategy"], "generated");
     }
 }
 
@@ -192,6 +407,7 @@ pub enum AgentJobPayload {
     Rollback(Box<RollbackJob>),
     DeleteApp(Box<DeleteAppJob>),
     HealthCheck(Box<HealthCheckJob>),
+    CaptureScreenshot(Box<CaptureScreenshotJob>),
     RestartContainer(Box<RestartContainerJob>),
     DockerCleanup(Box<DockerCleanupJob>),
 }
@@ -240,6 +456,334 @@ pub struct DeployJob {
     pub github_token: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DockerfileInference {
+    pub port: Option<i32>,
+    pub env: Vec<Value>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackageInference {
+    pub framework: &'static str,
+    pub package_manager: &'static str,
+}
+
+pub fn infer_package_json(
+    contents: &str,
+    has_bun_lock: bool,
+    has_pnpm_lock: bool,
+    has_yarn_lock: bool,
+) -> PackageInference {
+    let package: Value = serde_json::from_str(contents).unwrap_or_else(|_| serde_json::json!({}));
+    let mut deps = std::collections::HashSet::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(map) = package.get(key).and_then(|value| value.as_object()) {
+            deps.extend(map.keys().map(String::as_str));
+        }
+    }
+    let framework = if deps.contains("next") {
+        "Next.js"
+    } else if deps.contains("astro") {
+        "Astro"
+    } else if deps.contains("nuxt") {
+        "Nuxt"
+    } else if deps.contains("@remix-run/node") || deps.contains("@remix-run/react") {
+        "Remix"
+    } else if deps.contains("@sveltejs/kit") {
+        "SvelteKit"
+    } else if deps.contains("vite") {
+        "Vite"
+    } else {
+        "Node"
+    };
+    PackageInference {
+        framework,
+        package_manager: infer_package_manager(
+            contents,
+            has_bun_lock,
+            has_pnpm_lock,
+            has_yarn_lock,
+        ),
+    }
+}
+
+pub fn infer_package_manager(
+    package_json: &str,
+    has_bun_lock: bool,
+    has_pnpm_lock: bool,
+    has_yarn_lock: bool,
+) -> &'static str {
+    let package: Value =
+        serde_json::from_str(package_json).unwrap_or_else(|_| serde_json::json!({}));
+    let fallback_package_manager = if has_bun_lock {
+        "bun"
+    } else if has_pnpm_lock {
+        "pnpm"
+    } else if has_yarn_lock {
+        "yarn"
+    } else {
+        "npm"
+    };
+    package
+        .get("packageManager")
+        .and_then(|value| value.as_str())
+        .and_then(package_manager_from_field)
+        .unwrap_or(fallback_package_manager)
+}
+
+fn package_manager_from_field(value: &str) -> Option<&'static str> {
+    let manager = value.split('@').next().unwrap_or(value);
+    match manager {
+        "bun" => Some("bun"),
+        "pnpm" => Some("pnpm"),
+        "yarn" => Some("yarn"),
+        "npm" => Some("npm"),
+        _ => None,
+    }
+}
+
+pub fn infer_dockerfile(contents: &str) -> DockerfileInference {
+    let mut ports = Vec::new();
+    let mut env = Vec::new();
+    let mut warnings = vec![
+        "Public Dockerfiles run arbitrary build steps on this machine. Review the upstream project before deploying.".to_string(),
+    ];
+    for line in contents.lines().map(str::trim) {
+        let upper = line.to_ascii_uppercase();
+        if upper.starts_with("EXPOSE ") {
+            for token in line[7..].split_whitespace() {
+                let port = token
+                    .split('/')
+                    .next()
+                    .and_then(|part| part.parse::<i32>().ok());
+                if let Some(port) = port {
+                    ports.push(port);
+                }
+            }
+        } else if upper.starts_with("ENV ") {
+            for item in line[4..].split_whitespace() {
+                let key = item.split('=').next().unwrap_or("").trim();
+                if valid_env_prompt_key(key) {
+                    env.push(serde_json::json!({"key": key, "required": false, "value": "", "source": "Dockerfile ENV"}));
+                }
+            }
+        } else if upper.starts_with("ARG ") {
+            let key = line[4..].split('=').next().unwrap_or("").trim();
+            if valid_env_prompt_key(key) {
+                warnings.push(format!("Dockerfile declares build arg {key}; Hostlet does not prompt for build args yet."));
+            }
+        } else if upper.starts_with("VOLUME ") {
+            warnings.push("Dockerfile declares volumes. Hostlet provides /data automatically; verify the app persists data where expected.".into());
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    let preferred = [3000, 8080, 8000, 80, 5000, 4000]
+        .into_iter()
+        .find(|port| ports.contains(port))
+        .or_else(|| ports.iter().copied().find(|port| *port != 22));
+    if ports.len() > 1 {
+        warnings.push(format!(
+            "Dockerfile exposes multiple ports ({ports:?}); Hostlet selected {}.",
+            preferred.unwrap_or(3000)
+        ));
+    }
+    DockerfileInference {
+        port: preferred,
+        env,
+        warnings,
+    }
+}
+
+fn valid_env_prompt_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+}
+
+pub fn dockerfile_inspection(
+    repo: &str,
+    branch: &str,
+    default_branch: &str,
+    inference: DockerfileInference,
+) -> Value {
+    inspection_base(InspectionBaseInput {
+        repo,
+        branch,
+        default_branch,
+        deployable: true,
+        container_port: serde_json::json!(inference.port.unwrap_or(3000)),
+        packaging_options: serde_json::json!(["auto", "dockerfile", "generated"]),
+        recommended_packaging_strategy: "auto",
+        env: serde_json::json!(inference.env),
+        warnings: serde_json::json!(inference.warnings),
+        summary: "Dockerfile detected. Hostlet inferred a single-container runtime.".to_string(),
+    })
+}
+
+pub fn node_inspection(
+    repo: &str,
+    branch: &str,
+    default_branch: &str,
+    inference: PackageInference,
+) -> Value {
+    let mut result = object_map(inspection_base(InspectionBaseInput {
+        repo,
+        branch,
+        default_branch,
+        deployable: true,
+        container_port: serde_json::json!(3000),
+        packaging_options: serde_json::json!(["auto", "generated"]),
+        recommended_packaging_strategy: "generated",
+        env: serde_json::json!([]),
+        warnings: serde_json::json!(["Node app detected. Hostlet will build it with Railpack unless a repository Dockerfile is selected. Set custom build/start commands if the preview is incomplete."]),
+        summary: format!(
+            "{} app detected. Hostlet will use generated Railpack runtime support with {}.",
+            inference.framework, inference.package_manager
+        ),
+    }));
+    result.insert(
+        "detectedFramework".into(),
+        serde_json::json!(inference.framework),
+    );
+    result.insert(
+        "packageManager".into(),
+        serde_json::json!(inference.package_manager),
+    );
+    Value::Object(result)
+}
+
+pub fn railpack_inspection(
+    repo: &str,
+    branch: &str,
+    default_branch: &str,
+    language: &str,
+) -> Value {
+    inspection_base(InspectionBaseInput {
+        repo,
+        branch,
+        default_branch,
+        deployable: true,
+        container_port: serde_json::json!(3000),
+        packaging_options: serde_json::json!(["auto", "generated"]),
+        recommended_packaging_strategy: "generated",
+        env: serde_json::json!([]),
+        warnings: serde_json::json!([format!("{language} app detected. Hostlet will build it with Railpack if there is no repository Dockerfile.")]),
+        summary: format!("{language} app detected. Hostlet will use generated Railpack runtime support."),
+    })
+}
+
+pub fn unknown_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
+    inspection_base(InspectionBaseInput {
+        repo,
+        branch,
+        default_branch,
+        deployable: false,
+        container_port: serde_json::json!(3000),
+        packaging_options: serde_json::json!(["auto"]),
+        recommended_packaging_strategy: "auto",
+        env: serde_json::json!([]),
+        warnings: serde_json::json!(["No root Dockerfile, package.json, Python, Go, Rust, static, or Hostlet Compose marker was found. Add a start command or a supported app manifest before deploying."]),
+        summary: "Hostlet could not infer a runnable app shape.".to_string(),
+    })
+}
+
+const GITEA_GENERATED_COMPOSE: &str = "\
+services:
+  server:
+    image: docker.gitea.com/gitea:latest-rootless
+    restart: unless-stopped
+    environment:
+      GITEA__server__DOMAIN: localhost
+      GITEA__server__HTTP_PORT: \"3000\"
+      GITEA__database__DB_TYPE: sqlite3
+    volumes:
+      - gitea-data:/var/lib/gitea
+      - gitea-config:/etc/gitea
+volumes:
+  gitea-data:
+  gitea-config:
+";
+
+pub fn gitea_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
+    serde_json::json!({
+        "repoFullName": repo,
+        "defaultBranch": default_branch,
+        "branch": branch,
+        "appName": "gitea",
+        "deployable": true,
+        "runtimeKind": "compose",
+        "rootDirectory": ".",
+        "containerPort": 3000,
+        "healthPath": "/",
+        "hostletConfigPath": "hostlet.yml",
+        "runtimeConfig": {
+            "generatedCompose": {
+                "composeFile": "compose.generated.hostlet.yml",
+                "webService": "server",
+                "port": 3000,
+                "healthPath": "/",
+                "compose": GITEA_GENERATED_COMPOSE
+            }
+        },
+        "packagingStrategy": "auto",
+        "packagingOptions": ["auto"],
+        "recommendedPackagingStrategy": "auto",
+        "env": [],
+        "warnings": ["Gitea SSH Git access is not exposed in Hostlet 0.3.9; use HTTPS Git through the web route.", "The generated Gitea default uses SQLite and named Docker volumes for the simplest self-hosted setup."],
+        "summary": "Gitea detected. Hostlet will use the official rootless image with SQLite and persistent named volumes.",
+        "autoDeployAvailable": false
+    })
+}
+
+struct InspectionBaseInput<'a> {
+    repo: &'a str,
+    branch: &'a str,
+    default_branch: &'a str,
+    deployable: bool,
+    container_port: Value,
+    packaging_options: Value,
+    recommended_packaging_strategy: &'a str,
+    env: Value,
+    warnings: Value,
+    summary: String,
+}
+
+fn inspection_base(input: InspectionBaseInput<'_>) -> Value {
+    serde_json::json!({
+        "repoFullName": input.repo,
+        "defaultBranch": input.default_branch,
+        "branch": input.branch,
+        "appName": input.repo.split('/').nth(1).unwrap_or("app"),
+        "deployable": input.deployable,
+        "runtimeKind": "single",
+        "rootDirectory": ".",
+        "containerPort": input.container_port,
+        "healthPath": "/",
+        "hostletConfigPath": "hostlet.yml",
+        "runtimeConfig": {},
+        "packagingStrategy": "auto",
+        "packagingOptions": input.packaging_options,
+        "recommendedPackagingStrategy": input.recommended_packaging_strategy,
+        "env": input.env,
+        "warnings": input.warnings,
+        "summary": input.summary,
+        "autoDeployAvailable": false
+    })
+}
+
+fn object_map(value: Value) -> serde_json::Map<String, Value> {
+    let Value::Object(map) = value else {
+        unreachable!("inspection_base always returns an object")
+    };
+    map
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RollbackJob {
     pub deployment_id: Uuid,
@@ -271,6 +815,17 @@ pub struct HealthCheckJob {
     pub container_name: String,
     pub published_port: i32,
     pub health_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CaptureScreenshotJob {
+    pub app_id: Uuid,
+    pub deployment_id: Uuid,
+    pub capture_url: String,
+    pub width: i32,
+    pub height: i32,
+    pub format: String,
+    pub screenshotter_image: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -397,6 +952,36 @@ mod tests {
         let event = AgentEvent::Heartbeat;
         let value = serde_json::to_value(event).unwrap();
         assert_eq!(value["type"], "heartbeat");
+    }
+
+    #[test]
+    fn capture_screenshot_payload_keeps_wire_shape() {
+        let app_id = Uuid::from_u128(1);
+        let deployment_id = Uuid::from_u128(2);
+        let payload = AgentJobPayload::CaptureScreenshot(Box::new(CaptureScreenshotJob {
+            app_id,
+            deployment_id,
+            capture_url: "https://demo.example.test/".into(),
+            width: 1280,
+            height: 720,
+            format: "jpeg".into(),
+            screenshotter_image: "local/hostlet-screenshotter:test".into(),
+        }));
+
+        let value = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(value["type"], "capture_screenshot");
+        assert_eq!(value["app_id"], app_id.to_string());
+        assert_eq!(value["deployment_id"], deployment_id.to_string());
+        assert_eq!(value["capture_url"], "https://demo.example.test/");
+        assert_eq!(
+            value["screenshotter_image"],
+            "local/hostlet-screenshotter:test"
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentJobPayload>(value).unwrap(),
+            payload
+        );
     }
 
     #[test]

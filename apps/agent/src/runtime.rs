@@ -238,6 +238,7 @@ pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()
             health_check_job(&cfg, &payload).await;
             Ok(())
         }
+        Some("capture_screenshot") => capture_screenshot_job(&cfg, &payload).await,
         Some("restart_container") => {
             restart_container_job(&cfg, &payload).await?;
             Ok(())

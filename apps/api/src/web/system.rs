@@ -1,4 +1,6 @@
 use super::*;
+use hostlet_contracts::version_is_newer;
+use sqlx::PgPool;
 
 /// Returns an `UNAUTHORIZED` response unless the request carries a valid user
 /// session. Used by handlers that only require an authenticated user.
@@ -64,23 +66,20 @@ pub async fn operator_status(
     if let Err(response) = require_operator(&headers, &state).await {
         return *response;
     }
-    let health = system_health_counts(&state).await;
-    let servers = sqlx::query("SELECT status,count(*) AS count FROM servers GROUP BY status")
-        .fetch_all(&state.db)
-        .await;
-    let route_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM apps WHERE public_exposure=true AND current_deployment_id IS NOT NULL",
-    )
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-    let mut server_counts = serde_json::json!({});
-    if let Ok(rows) = servers {
-        for row in rows {
-            let status: String = row.get("status");
-            server_counts[status] = serde_json::json!(row.get::<i64, _>("count"));
+    let health = match system_health_counts(&state).await {
+        Ok(health) => health,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load operator health counts");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-    }
+    };
+    let summary = match operator_database_summary(&state.db).await {
+        Ok(summary) => summary,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load operator database summary");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "mode": state.mode.as_str(),
@@ -95,12 +94,37 @@ pub async fn operator_status(
             "connected": true,
         },
         "routing": {
-            "publicAppRouteCount": route_count,
+            "publicAppRouteCount": summary.route_count,
         },
         "health": health,
-        "servers": server_counts,
+        "servers": summary.server_counts,
     }))
     .into_response()
+}
+
+struct OperatorDatabaseSummary {
+    route_count: i64,
+    server_counts: serde_json::Value,
+}
+
+async fn operator_database_summary(db: &PgPool) -> Result<OperatorDatabaseSummary, sqlx::Error> {
+    let route_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM apps WHERE public_exposure=true AND current_deployment_id IS NOT NULL",
+    )
+    .fetch_one(db)
+    .await?;
+    let servers = sqlx::query("SELECT status,count(*) AS count FROM servers GROUP BY status")
+        .fetch_all(db)
+        .await?;
+    let mut server_counts = serde_json::json!({});
+    for row in servers {
+        let status: String = row.get("status");
+        server_counts[status] = serde_json::json!(row.get::<i64, _>("count"));
+    }
+    Ok(OperatorDatabaseSummary {
+        route_count,
+        server_counts,
+    })
 }
 
 pub async fn operator_cleanup_preview(
@@ -332,22 +356,6 @@ async fn refresh_update_check(state: &AppState) -> anyhow::Result<serde_json::Va
     Ok(value)
 }
 
-fn version_is_newer(current: &str, latest: &str) -> bool {
-    version_parts(latest) > version_parts(current)
-}
-
-fn version_parts(value: &str) -> (u64, u64, u64) {
-    let mut parts = value
-        .trim_start_matches('v')
-        .split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0));
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    )
-}
-
 pub(in crate::web) fn domain_host(value: &str) -> Option<&str> {
     if let Some((host, port)) = value.rsplit_once(':') {
         if port.parse::<u16>().is_ok() {
@@ -355,4 +363,22 @@ pub(in crate::web) fn domain_host(value: &str) -> Option<&str> {
         }
     }
     Some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    async fn operator_database_summary_reports_query_failures() {
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(10))
+            .connect_lazy("postgres://127.0.0.1:1/hostlet")
+            .unwrap();
+
+        let result = operator_database_summary(&pool).await;
+
+        assert!(result.is_err());
+    }
 }

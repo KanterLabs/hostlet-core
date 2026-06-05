@@ -6,6 +6,7 @@ pub mod deploy;
 pub mod github;
 pub mod policies;
 pub mod rate_limit;
+pub mod screenshots;
 pub mod state;
 pub mod web;
 
@@ -130,6 +131,10 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
         .route("/api/agent/register", post(agent::register))
         .route("/api/agent/events", post(agent::event))
         .route("/api/agent/health-targets", get(agent::health_targets))
+        .route(
+            "/api/agent/screenshots",
+            post(screenshots::upload_agent_screenshot),
+        )
         .route("/api/agent/jobs/claim", post(agent::claim_job))
         .route("/api/agent/jobs/:id/complete", post(agent::complete_job))
         .route("/api/apps", get(web::list_apps).post(web::create_app))
@@ -147,6 +152,14 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
             post(web::check_app_health_now),
         )
         .route("/api/apps/:id/restart", post(web::restart_app_container))
+        .route(
+            "/api/apps/:id/screenshots",
+            post(screenshots::capture_app_screenshot),
+        )
+        .route(
+            "/api/apps/:id/screenshots/latest",
+            get(screenshots::latest_app_screenshot),
+        )
         .route("/api/health/summary", get(web::health_summary))
         .route("/api/apps/:id/env", get(web::app_env_vars))
         .route(
@@ -161,6 +174,10 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
         .route("/api/agent-jobs/:id/cancel", post(web::cancel_agent_job))
         .route("/api/deployments/:id", get(deploy::get_deployment))
         .route("/api/deployments/:id/logs", get(deploy::deployment_logs))
+        .route(
+            "/api/public/screenshots/:id",
+            get(screenshots::public_screenshot),
+        )
         .route("/ws/agent", get(agent::ws))
         .route("/ws/logs/:deployment_id", get(deploy::logs_ws))
         .route("/webhooks/github", post(github::webhook))
@@ -223,13 +240,6 @@ async fn browser_origin_guard(
     next.run(req).await
 }
 
-/// Path prefixes whose mutating requests are made by machine clients (the
-/// agent), not browsers, and therefore skip the CSRF/Origin guard.
-///
-/// Keep in sync with the agent routes registered in [`core_router`]
-/// (`/api/agent/...`, `/ws/agent`).
-const ORIGIN_GUARD_EXEMPT_PREFIXES: &[&str] = &["/api/agent/"];
-
 /// Exact paths whose mutating requests are non-browser (first-run setup token,
 /// the operator cleanup hook, and the GitHub webhook) and so skip the guard.
 ///
@@ -244,10 +254,21 @@ fn requires_browser_origin(method: &Method, path: &str) -> bool {
     matches!(
         method,
         &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
-    ) && !ORIGIN_GUARD_EXEMPT_PREFIXES
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
+    ) && !is_machine_agent_path(path)
         && !ORIGIN_GUARD_EXEMPT_PATHS.contains(&path)
+}
+
+fn is_machine_agent_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/agent/register"
+            | "/api/agent/events"
+            | "/api/agent/jobs/claim"
+            | "/api/agent/screenshots"
+    ) || path
+        .strip_prefix("/api/agent/jobs/")
+        .and_then(|rest| rest.strip_suffix("/complete"))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
 }
 
 fn request_origin(headers: &HeaderMap) -> Option<String> {
@@ -309,6 +330,36 @@ mod tests {
     #[test]
     fn machine_webhooks_skip_browser_origin_guard() {
         assert!(!requires_browser_origin(&Method::POST, "/webhooks/github"));
+    }
+
+    #[test]
+    fn known_machine_agent_routes_skip_browser_origin_guard() {
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/register"
+        ));
+        assert!(!requires_browser_origin(&Method::POST, "/api/agent/events"));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/jobs/claim"
+        ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/jobs/00000000-0000-0000-0000-000000000001/complete"
+        ));
+    }
+
+    #[test]
+    fn unknown_agent_like_mutations_require_browser_origin_guard() {
+        assert!(requires_browser_origin(&Method::POST, "/api/agent/unknown"));
+        assert!(requires_browser_origin(
+            &Method::POST,
+            "/api/agent/jobs/not-a-uuid/complete"
+        ));
+        assert!(requires_browser_origin(
+            &Method::POST,
+            "/api/agent/jobs/00000000-0000-0000-0000-000000000001/retry"
+        ));
     }
 
     #[test]

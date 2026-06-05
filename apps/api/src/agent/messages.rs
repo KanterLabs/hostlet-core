@@ -113,6 +113,11 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
             .bind(msg.get("local_url").and_then(|v| v.as_str()))
             .execute(&state.db)
             .await;
+        if let Err(err) =
+            crate::screenshots::enqueue_auto_screenshot_for_deployment(state, id).await
+        {
+            tracing::warn!(error = %err, deployment_id = %id, "failed to enqueue automatic screenshot");
+        }
     }
 }
 

@@ -5,11 +5,11 @@ set -euo pipefail
 #
 # WHY THE LINE CAPS: a hard ceiling forces real domain decomposition instead of
 # letting any single authored file grow without bound. ${limit} (default 1000)
-# is the CI-failing ceiling; ${warn_limit} (default 750) is a soft heads-up at
-# 75% of the cap so authors can split a file *before* it trips the gate. Both are
+# is the CI-failing ceiling; ${warn_limit} (default 900) is a soft heads-up near
+# the cap so authors can split a file *before* it trips the gate. Both are
 # overridable via env vars only so the policy lives in CI config, not per-repo.
 limit="${HOSTLET_LINE_CAP:-1000}"
-warn_limit="${HOSTLET_WARN_LINE_CAP:-750}"
+warn_limit="${HOSTLET_WARN_LINE_CAP:-900}"
 fail=0
 fake_modules=0
 warned=0

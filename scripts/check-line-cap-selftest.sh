@@ -13,6 +13,8 @@ shard_fixture="zz_linecap_selftest_part1.rs"
 include_fixture="zz_linecap_selftest_include.rs"
 cleanup() { rm -f "${shard_fixture}" "${include_fixture}"; }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() { echo "check-line-cap self-test FAILED: $1" >&2; exit 1; }
 

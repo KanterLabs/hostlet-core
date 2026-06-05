@@ -1,5 +1,10 @@
 export { cx } from "@/components/ui/cx";
+export { CopyButton, IconButton, Menu, MenuButton, copyTextToClipboard } from "@/components/ui/actions";
+export { ConfirmDialog, ConfirmProvider, useConfirm } from "@/components/ui/dialog";
 export { AppShell, IconFrame, PageHeader, Panel, PanelHeader, SectionHeader } from "@/components/ui/layout";
-export { EmptyState, Notice, StatusPill } from "@/components/ui/status";
-export { DataList, DataRow, KeyValueGrid, KeyValueItem, Metric, MetricsGrid, SummaryItem } from "@/components/ui/data";
+export { LogViewer, firstErrorLine } from "@/components/ui/logs";
+export { EmptyState, Notice, StatusPill, statusLabel, statusToneClass } from "@/components/ui/status";
+export { DataList, DataRow, KeyValueGrid, KeyValueItem, Metric, MetricsGrid, Skeleton, SummaryItem } from "@/components/ui/data";
 export { Field, FilterTabs, SelectField, ToggleCard } from "@/components/ui/forms";
+export { SecretField } from "@/components/ui/secret-field";
+export { ToastProvider, useToast } from "@/components/ui/toast";

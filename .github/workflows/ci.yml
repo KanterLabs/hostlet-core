@@ -32,6 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check-line-cap.sh
       - run: scripts/check-line-cap-selftest.sh
+      - run: scripts/ci-core-workflow-contracts.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
@@ -90,3 +91,4 @@ jobs:
       - run: docker build -f apps/web/Dockerfile -t hostlet-web-ci .
       - run: docker build -f apps/api/Dockerfile -t hostlet-api-ci .
       - run: docker build -f apps/agent/Dockerfile -t hostlet-agent-ci .
+      - run: docker build -f apps/screenshotter/Dockerfile -t hostlet-screenshotter-ci .

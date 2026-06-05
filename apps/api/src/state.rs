@@ -1,10 +1,11 @@
 use crate::crypto::{hash_token, Crypto};
 use crate::rate_limit::RateLimiter;
+use crate::screenshots::{NoopScreenshotHooks, ScreenshotHooks};
 use anyhow::{bail, Context};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -42,12 +43,15 @@ pub struct AppState {
     pub db: PgPool,
     pub crypto: Crypto,
     pub mode: HostletMode,
+    pub local_server_id: Uuid,
     pub http: reqwest::Client,
     pub github_client_id: String,
     pub github_webhook_secret: String,
     pub public_webhook_url: String,
     pub public_api_url: String,
     pub public_web_url: String,
+    pub screenshot_dir: PathBuf,
+    pub screenshot_hooks: Arc<dyn ScreenshotHooks>,
     pub allowed_web_origins: Vec<String>,
     pub base_domain: Option<String>,
     pub domain_prefix: String,
@@ -91,7 +95,15 @@ impl AppState {
         let local_agent_token = secret_from_env("LOCAL_AGENT_TOKEN", allow_insecure_dev_defaults)?;
         let job_signing_secret =
             secret_from_env("JOB_SIGNING_SECRET", allow_insecure_dev_defaults)?;
-        seed_local_server(&db, &crypto, &local_agent_token, &job_signing_secret).await?;
+        let local_server_id = local_server_id_from_env()?;
+        seed_local_server(
+            &db,
+            &crypto,
+            local_server_id,
+            &local_agent_token,
+            &job_signing_secret,
+        )
+        .await?;
 
         // Pure configuration assembly (no I/O beyond reading env vars).
         let allowed_github_logins = allowed_github_logins();
@@ -103,6 +115,7 @@ impl AppState {
         let public_api_url = public_api_url();
         let public_webhook_url = public_webhook_url(&public_api_url);
         let public_web_url = public_web_url();
+        let screenshot_dir = screenshot_dir();
         let allowed_web_origins =
             allowed_web_origins(&public_web_url, allow_insecure_dev_defaults)?;
         let setup_token = nonempty_env("HOSTLET_SETUP_TOKEN");
@@ -117,6 +130,7 @@ impl AppState {
             db,
             crypto,
             mode,
+            local_server_id,
             http: http_client()?,
             github_client_id: std::env::var("GITHUB_CLIENT_ID").unwrap_or_default(),
             github_webhook_secret: secret_from_env(
@@ -126,6 +140,8 @@ impl AppState {
             public_webhook_url,
             public_api_url,
             public_web_url,
+            screenshot_dir,
+            screenshot_hooks: Arc::new(NoopScreenshotHooks),
             allowed_web_origins,
             base_domain: base_domain(),
             domain_prefix: domain_prefix(),
@@ -141,6 +157,12 @@ impl AppState {
             rate_limiter: Arc::new(RateLimiter::default()),
             logs,
         })
+    }
+
+    #[cfg(test)]
+    pub fn with_screenshot_hooks(mut self, hooks: Arc<dyn ScreenshotHooks>) -> Self {
+        self.screenshot_hooks = hooks;
+        self
     }
 }
 
@@ -192,6 +214,13 @@ fn public_web_url() -> String {
     std::env::var("PUBLIC_WEB_URL").unwrap_or_else(|_| "http://localhost:3000".into())
 }
 
+fn screenshot_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("HOSTLET_SCREENSHOT_DIR")
+            .unwrap_or_else(|_| "/var/lib/hostlet/screenshots".into()),
+    )
+}
+
 fn base_domain() -> Option<String> {
     nonempty_env("HOSTLET_BASE_DOMAIN")
         .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase())
@@ -226,11 +255,10 @@ impl AppState {
 async fn seed_local_server(
     db: &PgPool,
     crypto: &Crypto,
+    local_server_id: Uuid,
     local_agent_token: &str,
     job_signing_secret: &str,
 ) -> anyhow::Result<()> {
-    let local_server_id = std::env::var("LOCAL_SERVER_ID")
-        .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000001".into());
     let public_ip = std::env::var("HOSTLET_PRIVATE_APP_HOST")
         .or_else(|_| std::env::var("LOCAL_SERVER_PUBLIC_IP"))
         .unwrap_or_else(|_| "127.0.0.1".into());
@@ -244,13 +272,22 @@ async fn seed_local_server(
            name='This machine',
            public_ip=EXCLUDED.public_ip",
     )
-    .bind(uuid::Uuid::parse_str(&local_server_id)?)
+    .bind(local_server_id)
     .bind(public_ip)
     .bind(hash_token(local_agent_token))
     .bind(crypto.encrypt(job_signing_secret)?)
     .execute(db)
     .await?;
     Ok(())
+}
+
+pub(crate) fn local_server_id_from_env() -> anyhow::Result<Uuid> {
+    parse_local_server_id(std::env::var("LOCAL_SERVER_ID").ok())
+}
+
+fn parse_local_server_id(value: Option<String>) -> anyhow::Result<Uuid> {
+    let value = value.unwrap_or_else(|| "00000000-0000-0000-0000-000000000001".into());
+    Uuid::parse_str(&value).context("LOCAL_SERVER_ID must be a UUID")
 }
 
 fn secret_from_env(key: &str, allow_insecure_dev_defaults: bool) -> anyhow::Result<String> {
@@ -389,5 +426,19 @@ mod tests {
     #[test]
     fn rejects_non_http_origins() {
         assert!(normalize_origin("file:///tmp/index.html").is_none());
+    }
+
+    #[test]
+    fn local_server_id_uses_stable_default_when_env_is_missing() {
+        assert_eq!(
+            parse_local_server_id(None).unwrap(),
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+        );
+    }
+
+    #[test]
+    fn local_server_id_rejects_invalid_uuid() {
+        let err = parse_local_server_id(Some("not-a-uuid".into())).unwrap_err();
+        assert!(err.to_string().contains("LOCAL_SERVER_ID must be a UUID"));
     }
 }
