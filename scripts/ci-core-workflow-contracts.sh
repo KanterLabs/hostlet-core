@@ -3,6 +3,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGING_WORKFLOW="${ROOT}/.github/workflows/staging.yml"
+SELF_HOSTED_LIB="${ROOT}/scripts/ci-self-hosted-lib.sh"
+
+assert_contains() {
+  local file="$1"
+  local needle="$2"
+  if ! grep -Fq -- "${needle}" "${file}"; then
+    echo "${file#${ROOT}/} missing expected text: ${needle}" >&2
+    exit 1
+  fi
+}
+
+assert_contains "${SELF_HOSTED_LIB}" 'ensure_rust_toolchain_path'
+assert_contains "${SELF_HOSTED_LIB}" 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"'
+assert_contains "${SELF_HOSTED_LIB}" 'export RUSTC="${RUSTC:-${rustc_path}}"'
 
 python3 - "${STAGING_WORKFLOW}" <<'PY'
 import re
