@@ -115,25 +115,14 @@ async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::
     let container = railpack_buildkit_container();
     let output = command_output(
         "docker",
-        &[
-            "inspect",
-            "-f",
-            "{{.State.Running}}",
-            container.as_str(),
-        ],
+        &["inspect", "-f", "{{.State.Running}}", container.as_str()],
         Duration::from_secs(30),
     )
     .await;
     match output {
         Ok(output) if output.status.success() => {
             if String::from_utf8_lossy(&output.stdout).trim() != "true" {
-                run_log(
-                    cfg,
-                    deployment_id,
-                    "docker",
-                    &["start", container.as_str()],
-                )
-                .await?;
+                run_log(cfg, deployment_id, "docker", &["start", container.as_str()]).await?;
             }
         }
         _ => {
@@ -210,7 +199,10 @@ mod tests {
 
     #[test]
     fn railpack_buildkit_container_can_be_overridden_for_ci() {
-        std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER", "hostlet-buildkit-ci-123");
+        std::env::set_var(
+            "HOSTLET_RAILPACK_BUILDKIT_CONTAINER",
+            "hostlet-buildkit-ci-123",
+        );
         assert_eq!(railpack_buildkit_container(), "hostlet-buildkit-ci-123");
         std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER");
     }
