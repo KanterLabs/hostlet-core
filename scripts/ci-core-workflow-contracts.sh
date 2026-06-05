@@ -16,7 +16,6 @@ assert_contains() {
 
 assert_contains "${SELF_HOSTED_LIB}" 'ensure_rust_toolchain_path'
 assert_contains "${SELF_HOSTED_LIB}" 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"'
-assert_contains "${SELF_HOSTED_LIB}" 'export RUSTC="${RUSTC:-${rustc_path}}"'
 
 python3 - "${STAGING_WORKFLOW}" <<'PY'
 import re

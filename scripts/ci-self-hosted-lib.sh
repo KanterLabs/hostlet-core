@@ -20,13 +20,6 @@ ensure_rust_toolchain_path() {
   fi
 
   export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-  if command -v rustup >/dev/null 2>&1; then
-    local rustc_path
-    rustc_path="$(rustup which rustc 2>/dev/null || true)"
-    if [ -n "${rustc_path}" ]; then
-      export RUSTC="${RUSTC:-${rustc_path}}"
-    fi
-  fi
 }
 
 ensure_rust_toolchain_path
