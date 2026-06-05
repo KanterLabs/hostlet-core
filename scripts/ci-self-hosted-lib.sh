@@ -31,6 +31,14 @@ ci_cargo() {
   "${cargo_bin}" "$@"
 }
 
+ci_tmp_dir() {
+  local name="$1"
+  local run_id="$2"
+  local parent="${RUNNER_TEMP:-/tmp}"
+  mkdir -p "${parent}"
+  mktemp -d "${parent}/${name}-${run_id}.XXXXXX"
+}
+
 # json_get <dotted.path>: read JSON from stdin and print the value at the path,
 # exiting non-zero if any segment is missing/null.
 json_get() {

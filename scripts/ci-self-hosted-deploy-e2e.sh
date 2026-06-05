@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/ci-self-hosted-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
-TMP_DIR="$(mktemp -d "/tmp/hostlet-self-deploy-${RUN_ID}.XXXXXX")"
+TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"
 POSTGRES_CONTAINER="hostlet-ci-self-deploy-postgres-${RUN_ID}"
 API_PID=""
 AGENT_PID=""
@@ -42,6 +42,15 @@ mark_failed() {
 trap mark_failed ERR
 
 cleanup() {
+  local exit_code="$?"
+  if [ "${exit_code}" -ne 0 ]; then
+    FAILED=1
+    echo "self-hosted deploy E2E failed with exit code ${exit_code}; preserving ${TMP_DIR}" >&2
+    echo "--- agent log ---" >&2
+    tail -200 "${AGENT_LOG}" >&2 || true
+    echo "--- api log ---" >&2
+    tail -200 "${API_LOG}" >&2 || true
+  fi
   if [ -n "${AGENT_PID}" ] && kill -0 "${AGENT_PID}" >/dev/null 2>&1; then
     kill "${AGENT_PID}" >/dev/null 2>&1 || true
     wait "${AGENT_PID}" >/dev/null 2>&1 || true

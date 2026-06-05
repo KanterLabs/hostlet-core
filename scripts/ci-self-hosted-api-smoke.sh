@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/ci-self-hosted-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
-TMP_DIR="$(mktemp -d "/tmp/hostlet-self-api-${RUN_ID}.XXXXXX")"
+TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"
 POSTGRES_CONTAINER="hostlet-ci-self-api-postgres-${RUN_ID}"
 API_PID=""
 API_PORT="${HOSTLET_SELF_API_SMOKE_PORT:-$(pick_local_port)}"
@@ -14,12 +14,18 @@ API_LOG="${TMP_DIR}/api.log"
 AUTH_COOKIE=""
 
 cleanup() {
+  local exit_code="$?"
   if [ -n "${API_PID}" ] && kill -0 "${API_PID}" >/dev/null 2>&1; then
     kill "${API_PID}" >/dev/null 2>&1 || true
     wait "${API_PID}" >/dev/null 2>&1 || true
   fi
   docker rm -f "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
-  rm -rf "${TMP_DIR}"
+  if [ "${exit_code}" -eq 0 ]; then
+    rm -rf "${TMP_DIR}"
+  else
+    echo "self-hosted API smoke failed with exit code ${exit_code}; preserving ${TMP_DIR}" >&2
+    tail -200 "${API_LOG}" >&2 || true
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
