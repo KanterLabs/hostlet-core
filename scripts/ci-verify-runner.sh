@@ -5,6 +5,22 @@ allowed_names="${HOSTLET_ALLOWED_RUNNER_NAMES:-}"
 expected_os="${HOSTLET_EXPECTED_RUNNER_OS:-Linux}"
 expected_arch="${HOSTLET_EXPECTED_RUNNER_ARCH:-X64}"
 
+disk_use_percent() {
+  df -P "$1" | awk 'NR == 2 { gsub("%", "", $5); print $5 }'
+}
+
+check_disk_below_threshold() {
+  local path="$1"
+  local label="$2"
+  local threshold="$3"
+  local use_percent
+  use_percent="$(disk_use_percent "${path}")"
+  if [ -n "${use_percent}" ] && [ "${use_percent}" -ge "${threshold}" ]; then
+    echo "runner ${label} disk is ${use_percent}% full; refusing CI above ${threshold}%" >&2
+    exit 1
+  fi
+}
+
 if [ -z "${RUNNER_NAME:-}" ]; then
   echo "RUNNER_NAME is not set; this check must run inside GitHub Actions" >&2
   exit 1
@@ -41,12 +57,23 @@ if [ -n "${allowed_names}" ]; then
 fi
 
 if [ "${HOSTLET_ALLOW_LOW_DISK:-0}" != "1" ]; then
-  disk_use_percent="$(df -P / | awk 'NR == 2 { gsub("%", "", $5); print $5 }')"
   disk_fail_percent="${HOSTLET_RUNNER_DISK_FAIL_PERCENT:-92}"
-  if [ -n "${disk_use_percent}" ] && [ "${disk_use_percent}" -ge "${disk_fail_percent}" ]; then
-    echo "runner root disk is ${disk_use_percent}% full; refusing CI above ${disk_fail_percent}%" >&2
-    exit 1
-  fi
+  check_disk_below_threshold / root "${disk_fail_percent}"
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker daemon is not reachable on this runner" >&2
+  exit 1
+fi
+
+if ! mountpoint -q /var/lib/docker; then
+  echo "/var/lib/docker is not a dedicated mount; refusing CI without isolated Docker storage" >&2
+  exit 1
+fi
+
+if [ "${HOSTLET_ALLOW_LOW_DOCKER_DISK:-0}" != "1" ]; then
+  docker_disk_fail_percent="${HOSTLET_RUNNER_DOCKER_DISK_FAIL_PERCENT:-92}"
+  check_disk_below_threshold /var/lib/docker Docker "${docker_disk_fail_percent}"
 fi
 
 echo "verified self-hosted runner ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"

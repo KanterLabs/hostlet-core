@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGING_WORKFLOW="${ROOT}/.github/workflows/staging.yml"
 SELF_HOSTED_LIB="${ROOT}/scripts/ci-self-hosted-lib.sh"
+CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
+STAGING_DEPLOYABILITY="${ROOT}/.github/workflows/deployability.yml"
+FULL_CI_WORKFLOW="${ROOT}/.github/workflows/full-ci.yml"
 
 assert_contains() {
   local file="$1"
@@ -19,11 +22,21 @@ assert_contains "${SELF_HOSTED_LIB}" 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAI
 assert_contains "${SELF_HOSTED_LIB}" 'ci_cargo()'
 assert_contains "${SELF_HOSTED_LIB}" 'ci_tmp_dir()'
 assert_contains "${SELF_HOSTED_LIB}" 'local parent="${RUNNER_TEMP:-/tmp}"'
+assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
+assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-core-workflow-contracts.sh'
+assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
+assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'ci_cargo run -p hostlet-api'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ci_cargo run -p hostlet-api'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ci_cargo run -p hostlet-agent'
+assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'docker info'
+assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'mountpoint -q /var/lib/docker'
+assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'HOSTLET_RUNNER_DOCKER_DISK_FAIL_PERCENT'
+assert_contains "${ROOT}/scripts/ci-verify-runner-selftest.sh" 'STUB_DOCKER_FAIL=1'
+assert_contains "${ROOT}/scripts/ci-verify-runner-selftest.sh" 'HOSTLET_ALLOW_LOW_DOCKER_DISK=1'
 
 python3 - "${STAGING_WORKFLOW}" <<'PY'
 import re

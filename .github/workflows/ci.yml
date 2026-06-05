@@ -33,6 +33,7 @@ jobs:
       - run: scripts/check-line-cap.sh
       - run: scripts/check-line-cap-selftest.sh
       - run: scripts/ci-core-workflow-contracts.sh
+      - run: scripts/ci-verify-runner-selftest.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
