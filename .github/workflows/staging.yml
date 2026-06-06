@@ -86,6 +86,11 @@ jobs:
               -t "${IMAGE_REGISTRY}/hostlet-${app}:staging" \
               -t "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}" \
               .
+            if [ "${app}" = "screenshotter" ]; then
+              HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}" \
+              HOSTLET_SCREENSHOTTER_SKIP_BUILD=1 \
+                scripts/ci-screenshotter-smoke.sh
+            fi
             docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"
             docker push "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}"
           done
