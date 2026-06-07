@@ -873,15 +873,25 @@ pub struct LogEvent {
     pub line: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceStatsEvent {
     pub container: String,
     pub cpu_percent: String,
+    pub cpu_percent_value: Option<f64>,
     pub memory_usage: String,
+    pub memory_usage_bytes: Option<i64>,
+    pub memory_limit_bytes: Option<i64>,
     pub memory_percent: String,
+    pub memory_percent_value: Option<f64>,
     pub network_io: String,
+    pub network_rx_bytes: Option<i64>,
+    pub network_tx_bytes: Option<i64>,
     pub block_io: String,
+    pub block_read_bytes: Option<i64>,
+    pub block_write_bytes: Option<i64>,
     pub pids: String,
+    pub pids_current: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -952,6 +962,40 @@ mod tests {
         let event = AgentEvent::Heartbeat;
         let value = serde_json::to_value(event).unwrap();
         assert_eq!(value["type"], "heartbeat");
+    }
+
+    #[test]
+    fn resource_stats_event_uses_camelcase_numeric_metrics() {
+        let event = ResourceStatsEvent {
+            container: "hostlet-demo".into(),
+            cpu_percent: "12.5%".into(),
+            cpu_percent_value: Some(12.5),
+            memory_usage: "12.5MiB / 1GiB".into(),
+            memory_usage_bytes: Some(13_107_200),
+            memory_limit_bytes: Some(1_073_741_824),
+            memory_percent: "1.22%".into(),
+            memory_percent_value: Some(1.22),
+            network_io: "1.2kB / 0B".into(),
+            network_rx_bytes: Some(1_200),
+            network_tx_bytes: Some(0),
+            block_io: "4.0MB / 1.0MB".into(),
+            block_read_bytes: Some(4_000_000),
+            block_write_bytes: Some(1_000_000),
+            pids: "7".into(),
+            pids_current: Some(7),
+        };
+
+        let value = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(value["cpuPercent"], "12.5%");
+        assert_eq!(value["cpuPercentValue"], 12.5);
+        assert_eq!(value["memoryUsageBytes"], 13_107_200);
+        assert_eq!(value["networkRxBytes"], 1_200);
+        assert_eq!(value["blockReadBytes"], 4_000_000);
+        assert_eq!(
+            serde_json::from_value::<ResourceStatsEvent>(value).unwrap(),
+            event
+        );
     }
 
     #[test]

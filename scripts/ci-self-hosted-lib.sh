@@ -33,6 +33,17 @@ ci_cargo() {
   "${cargo_bin}" "$@"
 }
 
+ci_binary_path() {
+  local binary="$1"
+  printf '%s/debug/%s' "${CARGO_TARGET_DIR:-target}" "${binary}"
+}
+
+ci_build_binary() {
+  local package="$1"
+  local binary="$2"
+  ci_cargo build -p "${package}" --bin "${binary}"
+}
+
 ci_tmp_dir() {
   local name="$1"
   local run_id="$2"

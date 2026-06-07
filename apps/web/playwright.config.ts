@@ -1,9 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const port = Number(process.env.HOSTLET_WEB_TEST_PORT || 13002);
+const outputDir = process.env.HOSTLET_PLAYWRIGHT_OUTPUT_DIR || "/tmp/hostlet-core-playwright-results";
 
 export default defineConfig({
   testDir: "./tests",
+  outputDir,
   timeout: 30_000,
   expect: { timeout: 5_000 },
   use: {

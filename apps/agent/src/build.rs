@@ -1,6 +1,9 @@
 use super::*;
 
 pub(crate) const NO_NATIVE_BUILD_PLAN: &str = "No repository Dockerfile selected";
+const HEALTH_CHECK_ATTEMPTS: u8 = 30;
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const HEALTH_CHECK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn normalize_git_remote(value: &str) -> String {
     value
@@ -235,6 +238,84 @@ pub(crate) fn build_runtime_metadata(
     })
 }
 
+pub(crate) fn add_git_sync_runtime_metadata(
+    mut metadata: Value,
+    git_sync_duration_ms: u128,
+) -> Value {
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("gitSyncDurationMs".into(), json!(git_sync_duration_ms));
+        metadata
+    } else {
+        json!({
+            "gitSyncDurationMs": git_sync_duration_ms,
+        })
+    }
+}
+
+pub(crate) fn add_build_plan_runtime_metadata(
+    mut metadata: Value,
+    build_plan_duration_ms: u128,
+) -> Value {
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("buildPlanDurationMs".into(), json!(build_plan_duration_ms));
+        metadata
+    } else {
+        json!({
+            "buildPlanDurationMs": build_plan_duration_ms,
+        })
+    }
+}
+
+pub(crate) fn build_prepare_failure_runtime_metadata(
+    build_plan_duration_ms: u128,
+    git_sync_duration_ms: u128,
+) -> Value {
+    add_git_sync_runtime_metadata(
+        add_build_plan_runtime_metadata(json!({}), build_plan_duration_ms),
+        git_sync_duration_ms,
+    )
+}
+
+pub(crate) fn add_startup_runtime_metadata(
+    mut metadata: Value,
+    container_start_duration_ms: u128,
+    health_check_duration_ms: u128,
+) -> Value {
+    let boot_duration_ms = container_start_duration_ms + health_check_duration_ms;
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "containerStartDurationMs".into(),
+            json!(container_start_duration_ms),
+        );
+        object.insert(
+            "healthCheckDurationMs".into(),
+            json!(health_check_duration_ms),
+        );
+        object.insert("bootDurationMs".into(), json!(boot_duration_ms));
+        metadata
+    } else {
+        json!({
+            "containerStartDurationMs": container_start_duration_ms,
+            "healthCheckDurationMs": health_check_duration_ms,
+            "bootDurationMs": boot_duration_ms,
+        })
+    }
+}
+
+pub(crate) fn add_routing_runtime_metadata(
+    mut metadata: Value,
+    routing_duration_ms: u128,
+) -> Value {
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("routingDurationMs".into(), json!(routing_duration_ms));
+        metadata
+    } else {
+        json!({
+            "routingDurationMs": routing_duration_ms,
+        })
+    }
+}
+
 pub(crate) async fn stream_lines<R: tokio::io::AsyncRead + Unpin>(
     cfg: Config,
     deployment_id: Uuid,
@@ -253,8 +334,10 @@ pub(crate) async fn wait_health(
     container: &str,
     port: u16,
     path: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Duration> {
     let url = format!("http://{}:{port}{path}", cfg.health_host);
+    let started = Instant::now();
+    let health_client = &cfg.http;
     log(
         cfg,
         deployment_id,
@@ -262,11 +345,11 @@ pub(crate) async fn wait_health(
         &format!("Waiting for health check: {url}"),
     )
     .await;
-    for attempt in 1..=30 {
-        match reqwest::get(&url).await {
+    for attempt in 1..=HEALTH_CHECK_ATTEMPTS {
+        match health_check_request(health_client, &url, HEALTH_CHECK_REQUEST_TIMEOUT).await {
             Ok(resp) if resp.status().is_success() => {
                 log(cfg, deployment_id, "stdout", "Health check passed.").await;
-                return Ok(());
+                return Ok(started.elapsed());
             }
             Ok(resp) => {
                 log(
@@ -274,7 +357,7 @@ pub(crate) async fn wait_health(
                     deployment_id,
                     "stdout",
                     &format!(
-                        "Health check attempt {attempt}/30 returned HTTP {}.",
+                        "Health check attempt {attempt}/{HEALTH_CHECK_ATTEMPTS} returned HTTP {}.",
                         resp.status()
                     ),
                 )
@@ -285,7 +368,7 @@ pub(crate) async fn wait_health(
                     cfg,
                     deployment_id,
                     "stdout",
-                    &format!("Health check attempt {attempt}/30 did not connect: {err}"),
+                    &format!("Health check attempt {attempt}/{HEALTH_CHECK_ATTEMPTS} did not connect: {err}"),
                 )
                 .await;
             }
@@ -299,9 +382,23 @@ pub(crate) async fn wait_health(
             )
             .await;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if should_wait_before_next_health_attempt(attempt) {
+            tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
+        }
     }
     bail!("no successful response from {url}");
+}
+
+fn should_wait_before_next_health_attempt(attempt: u8) -> bool {
+    attempt < HEALTH_CHECK_ATTEMPTS
+}
+
+async fn health_check_request(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> Result<reqwest::Response, reqwest::Error> {
+    client.get(url).timeout(timeout).send().await
 }
 
 pub(crate) fn docker_port_map(port: u16) -> String {
@@ -376,4 +473,97 @@ pub(crate) fn render_local_caddy_route(app: &str, domain: &str, port: u16) -> St
     format!(
         "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n@{app} host {domain}\nreverse_proxy @{app} 127.0.0.1:{port}\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_build_plan() -> BuildPlan {
+        BuildPlan {
+            context: PathBuf::from("/tmp/hostlet-test-app"),
+            dockerfile: PathBuf::from("/tmp/hostlet-test-app/Dockerfile"),
+            generated: false,
+            packaging_strategy: PackagingStrategy::Dockerfile,
+        }
+    }
+
+    #[test]
+    fn build_runtime_metadata_records_build_time_and_image_size() {
+        let metadata = build_runtime_metadata(&test_build_plan(), 12_345, Some(149_422_080));
+
+        assert_eq!(metadata["packagingStrategy"], "dockerfile");
+        assert_eq!(metadata["generatedDockerfile"], false);
+        assert_eq!(metadata["buildDurationMs"], 12_345);
+        assert_eq!(metadata["imageSizeBytes"], 149_422_080);
+    }
+
+    #[test]
+    fn build_runtime_metadata_records_unknown_image_size() {
+        let metadata = build_runtime_metadata(&test_build_plan(), 3_000, None);
+
+        assert_eq!(metadata["packagingStrategy"], "dockerfile");
+        assert_eq!(metadata["buildDurationMs"], 3_000);
+        assert!(metadata["imageSizeBytes"].is_null());
+    }
+
+    #[test]
+    fn startup_runtime_metadata_preserves_build_metrics_and_records_boot_time() {
+        let metadata = build_runtime_metadata(&test_build_plan(), 2_000, Some(42_000));
+        let metadata = add_git_sync_runtime_metadata(metadata, 175);
+        let metadata = add_build_plan_runtime_metadata(metadata, 45);
+        let metadata = add_startup_runtime_metadata(metadata, 350, 1_250);
+        let metadata = add_routing_runtime_metadata(metadata, 90);
+
+        assert_eq!(metadata["gitSyncDurationMs"], 175);
+        assert_eq!(metadata["buildPlanDurationMs"], 45);
+        assert_eq!(metadata["buildDurationMs"], 2_000);
+        assert_eq!(metadata["imageSizeBytes"], 42_000);
+        assert_eq!(metadata["containerStartDurationMs"], 350);
+        assert_eq!(metadata["healthCheckDurationMs"], 1_250);
+        assert_eq!(metadata["bootDurationMs"], 1_600);
+        assert_eq!(metadata["routingDurationMs"], 90);
+    }
+
+    #[test]
+    fn build_prepare_failure_runtime_metadata_records_sync_and_planning_time() {
+        let metadata = build_prepare_failure_runtime_metadata(35, 175);
+
+        assert_eq!(metadata["buildPlanDurationMs"], 35);
+        assert_eq!(metadata["gitSyncDurationMs"], 175);
+        assert!(metadata.as_object().is_some_and(|object| object.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn health_check_request_times_out_per_probe() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((_socket, _peer)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+
+        let started = Instant::now();
+        let err = health_check_request(
+            &reqwest::Client::new(),
+            &format!("http://{addr}/health"),
+            Duration::from_millis(25),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.is_timeout());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn health_check_retry_schedule_skips_delay_after_final_attempt() {
+        assert!(should_wait_before_next_health_attempt(
+            HEALTH_CHECK_ATTEMPTS - 1
+        ));
+        assert!(!should_wait_before_next_health_attempt(
+            HEALTH_CHECK_ATTEMPTS
+        ));
+    }
 }

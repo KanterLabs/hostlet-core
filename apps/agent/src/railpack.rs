@@ -7,6 +7,23 @@ pub(crate) struct RailpackBuildResult {
     pub(crate) runtime_metadata: Value,
 }
 
+struct RailpackBuildkitSession {
+    host: String,
+    container: Option<String>,
+}
+
+impl RailpackBuildkitSession {
+    async fn stop_after_build(&self, cfg: &Config, deployment_id: Uuid) {
+        if railpack_buildkit_keepalive() {
+            return;
+        }
+        let Some(container) = self.container.as_deref() else {
+            return;
+        };
+        let _ = run_log(cfg, deployment_id, "docker", &["stop", container]).await;
+    }
+}
+
 pub(crate) fn should_try_railpack(err: &anyhow::Error) -> bool {
     err.to_string() == NO_NATIVE_BUILD_PLAN
 }
@@ -21,7 +38,7 @@ pub(crate) async fn railpack_build_app(
     p: &Value,
 ) -> anyhow::Result<RailpackBuildResult> {
     let railpack = std::env::var("HOSTLET_RAILPACK_BIN").unwrap_or_else(|_| "railpack".into());
-    let buildkit_host = ensure_railpack_buildkit(cfg, deployment_id).await?;
+    let buildkit = ensure_railpack_buildkit(cfg, deployment_id).await?;
     log(
         cfg,
         deployment_id,
@@ -32,16 +49,17 @@ pub(crate) async fn railpack_build_app(
     let build_started = Instant::now();
     let args = railpack_build_args(image, app_name, port, project_dir, p)?;
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_log_in_dir_env(
+    let build_result = run_log_in_dir_env(
         cfg,
         deployment_id,
         project_dir,
-        &[("BUILDKIT_HOST", buildkit_host.as_str())],
+        &[("BUILDKIT_HOST", buildkit.host.as_str())],
         &railpack,
         &arg_refs,
     )
-    .await
-    .with_context(|| format!("Railpack failed to build {}", project_dir.display()))?;
+    .await;
+    buildkit.stop_after_build(cfg, deployment_id).await;
+    build_result.with_context(|| format!("Railpack failed to build {}", project_dir.display()))?;
     let build_duration_ms = build_started.elapsed().as_millis();
     let image_size = image_size_bytes(image).await.ok();
     if let Some(size) = image_size {
@@ -54,17 +72,24 @@ pub(crate) async fn railpack_build_app(
         .await;
     }
     Ok(RailpackBuildResult {
-        runtime_metadata: json!({
-            "packagingStrategy": "generated",
-            "generatedDockerfile": false,
-            "buildBackend": "railpack",
-            "detectedLanguage": null,
-            "detectedFramework": null,
-            "runtimeKind": null,
-            "packageManager": null,
-            "buildDurationMs": build_duration_ms,
-            "imageSizeBytes": image_size,
-        }),
+        runtime_metadata: railpack_runtime_metadata(build_duration_ms, image_size),
+    })
+}
+
+pub(crate) fn railpack_runtime_metadata(
+    build_duration_ms: u128,
+    image_size_bytes: Option<i64>,
+) -> Value {
+    json!({
+        "packagingStrategy": "generated",
+        "generatedDockerfile": false,
+        "buildBackend": "railpack",
+        "detectedLanguage": null,
+        "detectedFramework": null,
+        "runtimeKind": null,
+        "packageManager": null,
+        "buildDurationMs": build_duration_ms,
+        "imageSizeBytes": image_size_bytes,
     })
 }
 
@@ -106,10 +131,16 @@ fn railpack_build_args(
     Ok(args)
 }
 
-async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::Result<String> {
+async fn ensure_railpack_buildkit(
+    cfg: &Config,
+    deployment_id: Uuid,
+) -> anyhow::Result<RailpackBuildkitSession> {
     if let Ok(host) = std::env::var("BUILDKIT_HOST") {
         if !host.trim().is_empty() {
-            return Ok(host);
+            return Ok(RailpackBuildkitSession {
+                host,
+                container: None,
+            });
         }
     }
     let container = railpack_buildkit_container();
@@ -144,7 +175,10 @@ async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::
             .await?;
         }
     }
-    Ok(format!("docker-container://{container}"))
+    Ok(RailpackBuildkitSession {
+        host: format!("docker-container://{container}"),
+        container: Some(container),
+    })
 }
 
 fn railpack_buildkit_container() -> String {
@@ -152,6 +186,20 @@ fn railpack_buildkit_container() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| RAILPACK_BUILDKIT_CONTAINER.to_string())
+}
+
+fn railpack_buildkit_keepalive() -> bool {
+    let value = std::env::var("HOSTLET_RAILPACK_BUILDKIT_KEEPALIVE").ok();
+    railpack_buildkit_keepalive_value(value.as_deref())
+}
+
+fn railpack_buildkit_keepalive_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -205,5 +253,29 @@ mod tests {
         );
         assert_eq!(railpack_buildkit_container(), "hostlet-buildkit-ci-123");
         std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER");
+    }
+
+    #[test]
+    fn railpack_buildkit_keepalive_defaults_to_stop_after_build() {
+        assert!(!railpack_buildkit_keepalive_value(None));
+        assert!(!railpack_buildkit_keepalive_value(Some("")));
+        assert!(!railpack_buildkit_keepalive_value(Some("false")));
+    }
+
+    #[test]
+    fn railpack_buildkit_keepalive_accepts_true_values() {
+        assert!(railpack_buildkit_keepalive_value(Some("1")));
+        assert!(railpack_buildkit_keepalive_value(Some("true")));
+        assert!(railpack_buildkit_keepalive_value(Some(" YES ")));
+    }
+
+    #[test]
+    fn railpack_runtime_metadata_records_unknown_image_size() {
+        let metadata = railpack_runtime_metadata(1_500, None);
+
+        assert_eq!(metadata["packagingStrategy"], "generated");
+        assert_eq!(metadata["buildBackend"], "railpack");
+        assert_eq!(metadata["buildDurationMs"], 1_500);
+        assert!(metadata["imageSizeBytes"].is_null());
     }
 }

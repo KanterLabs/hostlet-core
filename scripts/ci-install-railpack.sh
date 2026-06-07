@@ -21,5 +21,7 @@ curl -fsSL "${url}" -o "${archive}"
 echo "${sha}  ${archive}" | sha256sum -c -
 tar -xzf "${archive}" -C "${install_dir}"
 chmod +x "${install_dir}/railpack"
-echo "HOSTLET_RAILPACK_BIN=${install_dir}/railpack" >> "${GITHUB_ENV}"
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "HOSTLET_RAILPACK_BIN=${install_dir}/railpack" >> "${GITHUB_ENV}"
+fi
 "${install_dir}/railpack" --version

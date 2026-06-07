@@ -1,5 +1,9 @@
 use super::*;
 
+const DOCKER_METRIC_MAX_BYTES: f64 = 1_125_899_906_842_624.0;
+const DOCKER_METRIC_MAX_COUNT: i64 = 1_000_000;
+const DOCKER_METRIC_MAX_PERCENT: f64 = 1_000_000.0;
+
 pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
     let tmp = target.with_extension(format!("caddy.tmp-{}", std::process::id()));
     tokio::fs::write(&tmp, contents).await?;
@@ -116,22 +120,22 @@ pub(crate) struct StatusDetails<'a> {
 }
 
 pub(crate) async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
-    post_reliable(
-        cfg,
-        json!({
-            "type": "deployment_status",
-            "deployment_id": id,
-            "status": status,
-            "failure": details.failure,
-            "image_tag": details.image,
-            "container_name": details.container,
-            "local_url": details.local_url,
-            "published_port": details.published_port,
-            "compose_project": details.compose_project,
-            "runtime_metadata": details.runtime_metadata,
-        }),
-    )
-    .await;
+    post_reliable(cfg, deployment_status_event(id, status, details)).await;
+}
+
+fn deployment_status_event(id: Uuid, status: &str, details: StatusDetails<'_>) -> Value {
+    json!({
+        "type": "deployment_status",
+        "deployment_id": id,
+        "status": status,
+        "failure": details.failure,
+        "image_tag": details.image,
+        "container_name": details.container,
+        "local_url": details.local_url,
+        "published_port": details.published_port,
+        "compose_project": details.compose_project,
+        "runtime_metadata": details.runtime_metadata,
+    })
 }
 
 pub(crate) async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
@@ -567,7 +571,12 @@ pub(crate) fn health_error_for_status(status: StatusCode) -> Option<String> {
 pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
     let output = command_output(
         "docker",
-        &["inspect", "-f", "{{.State.Running}}", container],
+        &[
+            "inspect",
+            "-f",
+            "{{.State.Running}} {{.State.Restarting}} {{.State.OOMKilled}} {{.State.ExitCode}}",
+            container,
+        ],
         Duration::from_secs(10),
     )
     .await?;
@@ -575,8 +584,25 @@ pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
         bail!("container does not exist");
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim() != "true" {
-        bail!("container is not running");
+    inspect_container_state(stdout.trim())
+}
+
+fn inspect_container_state(value: &str) -> anyhow::Result<()> {
+    let mut parts = value.split_whitespace();
+    let running = parts.next();
+    let restarting = parts.next();
+    let oom_killed = parts.next();
+    let exit_code = parts.next();
+    if restarting == Some("true") {
+        let exit_code = exit_code.unwrap_or("unknown");
+        bail!("container is restarting after exit code {exit_code}");
+    }
+    if oom_killed == Some("true") {
+        bail!("container was OOM-killed");
+    }
+    if running != Some("true") {
+        let exit_code = exit_code.unwrap_or("unknown");
+        bail!("container is not running; last exit code {exit_code}");
     }
     Ok(())
 }
@@ -611,21 +637,102 @@ pub(crate) async fn publish_resource_stats(cfg: &Config) {
         if !valid_container_name(container) {
             continue;
         }
+        let cpu_percent = raw.get("CPUPerc").and_then(|v| v.as_str()).unwrap_or("0%");
+        let memory_usage = raw
+            .get("MemUsage")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0B / 0B");
+        let memory_percent = raw.get("MemPerc").and_then(|v| v.as_str()).unwrap_or("0%");
+        let network_io = raw
+            .get("NetIO")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0B / 0B");
+        let block_io = raw
+            .get("BlockIO")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0B / 0B");
+        let pids = raw.get("PIDs").and_then(|v| v.as_str()).unwrap_or("0");
+        let (memory_usage_bytes, memory_limit_bytes) = parse_docker_byte_pair(memory_usage);
+        let (network_rx_bytes, network_tx_bytes) = parse_docker_byte_pair(network_io);
+        let (block_read_bytes, block_write_bytes) = parse_docker_byte_pair(block_io);
         post(
             cfg,
             json!({
                 "type": "resource_stats",
                 "container": container,
-                "cpuPercent": raw.get("CPUPerc").and_then(|v| v.as_str()).unwrap_or("0%"),
-                "memoryUsage": raw.get("MemUsage").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
-                "memoryPercent": raw.get("MemPerc").and_then(|v| v.as_str()).unwrap_or("0%"),
-                "networkIo": raw.get("NetIO").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
-                "blockIo": raw.get("BlockIO").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
-                "pids": raw.get("PIDs").and_then(|v| v.as_str()).unwrap_or("0")
+                "cpuPercent": cpu_percent,
+                "cpuPercentValue": parse_percent(cpu_percent),
+                "memoryUsage": memory_usage,
+                "memoryUsageBytes": memory_usage_bytes,
+                "memoryLimitBytes": memory_limit_bytes,
+                "memoryPercent": memory_percent,
+                "memoryPercentValue": parse_percent(memory_percent),
+                "networkIo": network_io,
+                "networkRxBytes": network_rx_bytes,
+                "networkTxBytes": network_tx_bytes,
+                "blockIo": block_io,
+                "blockReadBytes": block_read_bytes,
+                "blockWriteBytes": block_write_bytes,
+                "pids": pids,
+                "pidsCurrent": parse_metric_count(pids)
             }),
         )
         .await;
     }
+}
+
+fn parse_percent(value: &str) -> Option<f64> {
+    let percent = value.trim().trim_end_matches('%').parse::<f64>().ok()?;
+    (percent.is_finite() && (0.0..=DOCKER_METRIC_MAX_PERCENT).contains(&percent)).then_some(percent)
+}
+
+fn parse_docker_byte_pair(value: &str) -> (Option<i64>, Option<i64>) {
+    let mut parts = value.split('/').map(str::trim);
+    let first = parts.next().and_then(parse_docker_bytes);
+    let second = parts.next().and_then(parse_docker_bytes);
+    (first, second)
+}
+
+fn parse_metric_count(value: &str) -> Option<i64> {
+    let count = value.trim().parse::<i64>().ok()?;
+    (0..=DOCKER_METRIC_MAX_COUNT)
+        .contains(&count)
+        .then_some(count)
+}
+
+fn parse_docker_bytes(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let number_len = value
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
+        .last()
+        .map(|(idx, c)| idx + c.len_utf8())
+        .unwrap_or(0);
+    if number_len == 0 {
+        return None;
+    }
+    let number = value[..number_len].parse::<f64>().ok()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    let unit = value[number_len..].trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "" | "b" => 1.0,
+        "kb" => 1_000.0,
+        "kib" => 1024.0,
+        "mb" => 1_000_000.0,
+        "mib" => 1024.0 * 1024.0,
+        "gb" => 1_000_000_000.0,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        "tb" => 1_000_000_000_000.0,
+        "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    let bytes = (number * multiplier).round();
+    (bytes.is_finite() && (0.0..=DOCKER_METRIC_MAX_BYTES).contains(&bytes)).then_some(bytes as i64)
 }
 
 pub(crate) async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
@@ -795,6 +902,107 @@ pub(crate) fn valid_container_name(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn failed_deployment_status_event_keeps_runtime_metrics() {
+        let deployment_id = Uuid::from_u128(42);
+        let event = deployment_status_event(
+            deployment_id,
+            "failed",
+            StatusDetails {
+                failure: Some("Health check failed"),
+                image: Some("hostlet/demo:latest"),
+                container: Some("hostlet-demo"),
+                published_port: Some(32001),
+                compose_project: Some("hostlet_app_0000000000000000000000000000002a"),
+                runtime_metadata: Some(json!({
+                    "containerStartDurationMs": 125,
+                    "healthCheckDurationMs": 4_000,
+                    "bootDurationMs": 4_125,
+                })),
+                ..StatusDetails::default()
+            },
+        );
+
+        assert_eq!(event["type"], "deployment_status");
+        assert_eq!(event["deployment_id"], deployment_id.to_string());
+        assert_eq!(event["status"], "failed");
+        assert_eq!(event["failure"], "Health check failed");
+        assert_eq!(event["image_tag"], "hostlet/demo:latest");
+        assert_eq!(event["container_name"], "hostlet-demo");
+        assert_eq!(event["published_port"], 32001);
+        assert_eq!(
+            event["compose_project"],
+            "hostlet_app_0000000000000000000000000000002a"
+        );
+        assert_eq!(event["runtime_metadata"]["containerStartDurationMs"], 125);
+        assert_eq!(event["runtime_metadata"]["healthCheckDurationMs"], 4_000);
+        assert_eq!(event["runtime_metadata"]["bootDurationMs"], 4_125);
+    }
+
+    #[test]
+    fn docker_resource_stats_are_parseable_for_budget_checks() {
+        assert_eq!(parse_percent("12.5%"), Some(12.5));
+        assert_eq!(parse_docker_bytes("1.5MiB"), Some(1_572_864));
+        assert_eq!(parse_docker_bytes("2kB"), Some(2_000));
+        assert_eq!(parse_docker_bytes("1TiB"), Some(1_099_511_627_776));
+        assert_eq!(parse_metric_count("7"), Some(7));
+        assert_eq!(
+            parse_docker_byte_pair("12.5MiB / 1GiB"),
+            (Some(13_107_200), Some(1_073_741_824))
+        );
+        assert_eq!(parse_docker_byte_pair("1.2kB / 0B"), (Some(1_200), Some(0)));
+    }
+
+    #[test]
+    fn docker_resource_stats_reject_invalid_numeric_values() {
+        assert_eq!(parse_percent("-1%"), None);
+        assert_eq!(parse_percent("NaN%"), None);
+        assert_eq!(parse_percent("inf%"), None);
+        assert_eq!(parse_percent("1000001%"), None);
+
+        assert_eq!(parse_docker_bytes("-1B"), None);
+        assert_eq!(parse_docker_bytes("NaNB"), None);
+        assert_eq!(parse_docker_bytes("2PiB"), None);
+        assert_eq!(parse_docker_bytes("1125899906842625B"), None);
+        assert_eq!(parse_metric_count("-1"), None);
+        assert_eq!(parse_metric_count("1000001"), None);
+        assert_eq!(parse_docker_byte_pair("NaNB / 2PiB"), (None, None));
+    }
+
+    #[test]
+    fn inspect_container_state_accepts_running_container() {
+        inspect_container_state("true false false 0").unwrap();
+    }
+
+    #[test]
+    fn inspect_container_state_reports_restart_loop() {
+        let err = inspect_container_state("true true false 1").unwrap_err();
+
+        assert_eq!(err.to_string(), "container is restarting after exit code 1");
+    }
+
+    #[test]
+    fn inspect_container_state_reports_oom_kill() {
+        let err = inspect_container_state("false false true 137").unwrap_err();
+
+        assert_eq!(err.to_string(), "container was OOM-killed");
+    }
+
+    #[test]
+    fn inspect_container_state_reports_stopped_exit_code() {
+        let err = inspect_container_state("false false false 2").unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "container is not running; last exit code 2"
+        );
+    }
 }
 
 #[cfg(test)]

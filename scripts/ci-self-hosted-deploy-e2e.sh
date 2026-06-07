@@ -138,6 +138,18 @@ wait_job_status() {
   return 1
 }
 
+ensure_railpack() {
+  if [ -n "${HOSTLET_RAILPACK_BIN:-}" ] && [ -x "${HOSTLET_RAILPACK_BIN}" ]; then
+    return 0
+  fi
+  if [ -z "${HOSTLET_RAILPACK_BIN:-}" ] && command -v railpack >/dev/null 2>&1; then
+    return 0
+  fi
+  export HOSTLET_RAILPACK_INSTALL_DIR="${HOSTLET_RAILPACK_INSTALL_DIR:-${TMP_DIR}/railpack-bin}"
+  "${ROOT}/scripts/ci-install-railpack.sh"
+  export HOSTLET_RAILPACK_BIN="${HOSTLET_RAILPACK_INSTALL_DIR}/railpack"
+}
+
 make_fixture_repo() {
   local repo_name="$1"
   local fixture="$2"
@@ -157,9 +169,30 @@ make_fixture_repo() {
 EOF
 }
 
+assert_runtime_metric() {
+  local payload="$1"
+  local path="$2"
+  local mode="${3:-non_negative}"
+  local value
+  value="$(printf '%s' "${payload}" | json_get "${path}")"
+  case "${mode}" in
+    positive)
+      printf '%s' "${value}" | grep -Eq '^[1-9][0-9]*$'
+      ;;
+    non_negative)
+      printf '%s' "${value}" | grep -Eq '^[0-9]+$'
+      ;;
+    *)
+      echo "unknown runtime metric assertion mode: ${mode}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Bring up Postgres and the git fixture repo.
 # ---------------------------------------------------------------------------
+ensure_railpack
 start_postgres_container postgres:16-alpine
 wait_postgres_ready
 POSTGRES_PORT="$(discover_postgres_port)"
@@ -191,7 +224,8 @@ export GIT_CONFIG_GLOBAL
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 
 cd "${ROOT}"
-ci_cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
+ci_build_binary hostlet-api hostlet-api
+"$(ci_binary_path hostlet-api)" >"${API_LOG}" 2>&1 &
 API_PID="$!"
 
 BASE_URL="http://127.0.0.1:${API_PORT}"
@@ -229,13 +263,24 @@ published_app_serves() {
   curl -fsS "http://127.0.0.1:${port}/" | grep -q "${expected}"
 }
 
+assert_container_readonly_rootfs() {
+  local container="$1"
+  local expected="$2"
+  local actual
+  actual="$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "${container}")"
+  if [ "${actual}" != "${expected}" ]; then
+    echo "expected ${container} ReadonlyRootfs=${expected}, got ${actual}" >&2
+    exit 1
+  fi
+}
+
 deploy_railpack_fixture() {
   local fixture_name="$1"
   local repo_name="$2"
   local health_path="$3"
   local expected="$4"
   local railpack_payload railpack_app_payload railpack_app_id railpack_deploy_payload railpack_deployment_id
-  local railpack_detail railpack_published_port railpack_logs railpack_delete_payload railpack_delete_job
+  local railpack_detail railpack_published_port railpack_container railpack_logs railpack_delete_payload railpack_delete_job
 
   railpack_payload="$(cat <<JSON
 {
@@ -268,15 +313,26 @@ JSON
 
   railpack_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${railpack_app_id}")"
   railpack_published_port="$(printf '%s' "${railpack_detail}" | json_get currentDeployment.publishedPort)"
+  railpack_container="hostlet-app-${railpack_app_id}-${railpack_deployment_id}"
   curl -fsS "http://127.0.0.1:${railpack_published_port}${health_path}" >/dev/null
   curl -fsS "http://127.0.0.1:${railpack_published_port}/" | grep -q "${expected}"
   printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.buildBackend | grep -q '^railpack$'
   printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.packagingStrategy | grep -q '^generated$'
+  printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.readOnlyRootFilesystem | grep -q '^false$'
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.buildPlanDurationMs
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.buildDurationMs positive
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.imageSizeBytes positive
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.gitSyncDurationMs
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.containerStartDurationMs
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.healthCheckDurationMs
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.bootDurationMs
+  assert_runtime_metric "${railpack_detail}" latestDeployment.runtimeMetadata.routingDurationMs
 
   railpack_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${railpack_deployment_id}/logs")"
   printf '%s' "${railpack_logs}" | grep -q 'Building generated runtime with Railpack'
   printf '%s' "${railpack_logs}" | grep -q 'Health check passed'
   docker ps --filter "name=hostlet-app-${railpack_app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+  assert_container_readonly_rootfs "${railpack_container}" "false"
 
   railpack_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${railpack_app_id}")"
   railpack_delete_job="$(printf '%s' "${railpack_delete_payload}" | json_get jobId)"
@@ -299,7 +355,8 @@ AUTH_COOKIE="hostlet_unlock=${unlock_cookie}; hostlet_session=$(signed_cookie "$
 # ---------------------------------------------------------------------------
 # Start the agent and wait for it to register online.
 # ---------------------------------------------------------------------------
-ci_cargo run -p hostlet-agent >"${AGENT_LOG}" 2>&1 &
+ci_build_binary hostlet-agent hostlet-agent
+"$(ci_binary_path hostlet-agent)" >"${AGENT_LOG}" 2>&1 &
 AGENT_PID="$!"
 
 agent_ready=0
@@ -358,6 +415,7 @@ wait_deployment_status "${deployment_id}"
 
 app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
 published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
+container_name="hostlet-app-${app_id}-${deployment_id}"
 curl -fsS "http://127.0.0.1:${published_port}/health" | grep -q '^ok$'
 curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
 
@@ -366,11 +424,21 @@ printf '%s' "${logs_payload}" | grep -q 'Health check passed'
 printf '%s' "${logs_payload}" | grep -q 'Building generated runtime with Railpack'
 printf '%s' "${app_detail}" | json_get latestDeployment.runtimeMetadata.buildBackend | grep -q '^railpack$'
 printf '%s' "${app_detail}" | json_get latestDeployment.runtimeMetadata.generatedDockerfile | grep -q '^false$'
+printf '%s' "${app_detail}" | json_get latestDeployment.runtimeMetadata.readOnlyRootFilesystem | grep -q '^false$'
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.buildPlanDurationMs
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.buildDurationMs positive
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.imageSizeBytes positive
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.gitSyncDurationMs
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.containerStartDurationMs
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.healthCheckDurationMs
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.bootDurationMs
+assert_runtime_metric "${app_detail}" latestDeployment.runtimeMetadata.routingDurationMs
 if printf '%s' "${logs_payload}" | grep -q 'secret-value-for-redaction'; then
   echo "deployment logs exposed a raw secret" >&2
   exit 1
 fi
 docker ps --filter "name=hostlet-app-${app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+assert_container_readonly_rootfs "${container_name}" "false"
 
 # ---------------------------------------------------------------------------
 # Redeploy v2: bumping APP_VERSION and redeploying serves v2 (data volume keeps
@@ -449,6 +517,12 @@ curl -fsS "http://127.0.0.1:${compose_published_port}/health" | grep -q '^ok$'
 curl -fsS "http://127.0.0.1:${compose_published_port}/" | grep -q 'hostlet-compose-fullstack'
 printf '%s' "${compose_detail}" | json_get latestDeployment.runtimeMetadata.runtime | grep -q '^compose$'
 printf '%s' "${compose_detail}" | json_get latestDeployment.runtimeMetadata.webService | grep -q '^web$'
+assert_runtime_metric "${compose_detail}" latestDeployment.runtimeMetadata.composeUpDurationMs
+assert_runtime_metric "${compose_detail}" latestDeployment.runtimeMetadata.gitSyncDurationMs
+assert_runtime_metric "${compose_detail}" latestDeployment.runtimeMetadata.containerStartDurationMs
+assert_runtime_metric "${compose_detail}" latestDeployment.runtimeMetadata.healthCheckDurationMs
+assert_runtime_metric "${compose_detail}" latestDeployment.runtimeMetadata.bootDurationMs
+assert_runtime_metric "${compose_detail}" latestDeployment.runtimeMetadata.routingDurationMs
 
 compose_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${compose_deployment_id}/logs")"
 printf '%s' "${compose_logs}" | grep -q 'Detected Hostlet Compose app'

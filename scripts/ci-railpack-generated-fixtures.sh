@@ -8,7 +8,7 @@ BUILDKIT_CONTAINER="${HOSTLET_RAILPACK_BUILDKIT_CONTAINER:-hostlet-railpack-buil
 BUILDKIT_IMAGE="${HOSTLET_RAILPACK_BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1}"
 TMP_DIR="$(mktemp -d "/tmp/hostlet-railpack-fixtures-${RUN_ID}.XXXXXX")"
 METRICS_FILE="${HOSTLET_RAILPACK_METRICS_FILE:-${TMP_DIR}/metrics.json}"
-METRICS_FIRST=1
+METRICS_EVENTS="${TMP_DIR}/metrics.ndjson"
 
 cleanup() {
   docker ps -aq --filter "name=hostlet-railpack-fixture-${RUN_ID}" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -27,7 +27,29 @@ fi
 docker run -d --name "${BUILDKIT_CONTAINER}" --privileged "${BUILDKIT_IMAGE}" >/dev/null
 export BUILDKIT_HOST="docker-container://${BUILDKIT_CONTAINER}"
 mkdir -p "$(dirname "${METRICS_FILE}")"
-printf '[\n' >"${METRICS_FILE}"
+printf '[]\n' >"${METRICS_FILE}"
+
+write_metrics_file() {
+  local tmp="${METRICS_FILE}.tmp"
+  local first=1
+  {
+    printf '[\n'
+    if [ -f "${METRICS_EVENTS}" ]; then
+      while IFS= read -r metric; do
+        if [ -z "${metric}" ]; then
+          continue
+        fi
+        if [ "${first}" = "0" ]; then
+          printf ',\n'
+        fi
+        first=0
+        printf '  %s' "${metric}"
+      done <"${METRICS_EVENTS}"
+    fi
+    printf '\n]\n'
+  } >"${tmp}"
+  mv "${tmp}" "${METRICS_FILE}"
+}
 
 record_metric() {
   local name="$1"
@@ -37,18 +59,11 @@ record_metric() {
   local max_build_seconds="$5"
   local health_seconds="$6"
   local max_health_seconds="$7"
-  if [ "${METRICS_FIRST}" = "0" ]; then
-    printf ',\n' >>"${METRICS_FILE}"
-  fi
-  METRICS_FIRST=0
-  printf '  {"fixture":"%s","imageBytes":%s,"maxImageBytes":%s,"buildSeconds":%s,"maxBuildSeconds":%s,"healthSeconds":%s,"maxHealthSeconds":%s}' \
-    "${name}" "${image_bytes}" "${max_image_bytes}" "${build_seconds}" "${max_build_seconds}" "${health_seconds}" "${max_health_seconds}" >>"${METRICS_FILE}"
+  printf '{"fixture":"%s","imageBytes":%s,"maxImageBytes":%s,"buildSeconds":%s,"maxBuildSeconds":%s,"bootSeconds":%s,"maxBootSeconds":%s,"healthSeconds":%s,"maxHealthSeconds":%s}\n' \
+    "${name}" "${image_bytes}" "${max_image_bytes}" "${build_seconds}" "${max_build_seconds}" "${health_seconds}" "${max_health_seconds}" "${health_seconds}" "${max_health_seconds}" >>"${METRICS_EVENTS}"
+  write_metrics_file
 }
-
-finish_metrics() {
-  printf '\n]\n' >>"${METRICS_FILE}"
-}
-trap 'finish_metrics; cleanup' EXIT
+trap 'write_metrics_file; cleanup' EXIT
 
 run_fixture() {
   local name="$1"

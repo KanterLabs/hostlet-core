@@ -53,7 +53,8 @@ export_self_hosted_env "${POSTGRES_PORT}" "${API_PORT}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 
 cd "${ROOT}"
-ci_cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
+ci_build_binary hostlet-api hostlet-api
+"$(ci_binary_path hostlet-api)" >"${API_LOG}" 2>&1 &
 API_PID="$!"
 
 api_ready=0

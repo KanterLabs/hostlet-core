@@ -3,6 +3,8 @@
 // help text in one place avoids duplicating the literal status strings
 // across the progress UI and the help text.
 
+export { formatBytes } from "@/lib/format";
+
 export const DEPLOYMENT_STEPS = [
   "queued",
   "running",
@@ -32,21 +34,9 @@ export function statusHelp(status: string) {
 }
 
 export function formatDuration(ms?: number | null) {
-  if (!ms || ms < 0) return "n/a";
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "n/a";
   if (ms < 1000) return `${ms} ms`;
   return `${(ms / 1000).toFixed(1)} s`;
-}
-
-export function formatBytes(bytes?: number | null) {
-  if (!bytes || bytes < 0) return "n/a";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
 export type SocketState = "connecting" | "connected" | "reconnecting" | "closed";

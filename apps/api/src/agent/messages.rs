@@ -15,6 +15,12 @@ const HTTP_STATUS_RANGE: std::ops::RangeInclusive<i64> = 100..=599;
 const LATENCY_MS_RANGE: std::ops::RangeInclusive<i64> = 0..=300_000;
 /// Sanity cap on reported consecutive success/failure counters.
 const HEALTH_COUNTER_RANGE: std::ops::RangeInclusive<i64> = 0..=1_000_000;
+/// Sanity cap on byte counters reported by Docker resource stats (1 PiB).
+const RESOURCE_BYTES_RANGE: std::ops::RangeInclusive<i64> = 0..=1_125_899_906_842_624;
+/// Sanity cap on count fields reported by Docker resource stats.
+const RESOURCE_COUNT_RANGE: std::ops::RangeInclusive<i64> = 0..=1_000_000;
+/// Docker CPU percentage can exceed 100% on multi-core hosts; this only rejects nonsense.
+const RESOURCE_PERCENT_MAX: f64 = 1_000_000.0;
 /// Max characters kept from short resource-stat fields (e.g. "12.3%").
 const RESOURCE_STAT_MAX_CHARS: usize = 128;
 /// Max characters kept from free-form health text (checked URL, error).
@@ -37,6 +43,22 @@ fn bounded_i32(
     msg.get(key)
         .and_then(|v| v.as_i64())
         .and_then(|v| range.contains(&v).then_some(v as i32))
+}
+
+fn bounded_i64(
+    msg: &serde_json::Value,
+    key: &str,
+    range: std::ops::RangeInclusive<i64>,
+) -> Option<i64> {
+    msg.get(key)
+        .and_then(|v| v.as_i64())
+        .filter(|v| range.contains(v))
+}
+
+fn bounded_f64(msg: &serde_json::Value, key: &str, max: f64) -> Option<f64> {
+    msg.get(key)
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v <= max)
 }
 
 /// Read a string field and truncate it to at most `max_chars` characters.
@@ -178,12 +200,18 @@ async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
             .take(RESOURCE_STAT_MAX_CHARS)
             .collect::<String>()
     };
+    let percent = |key: &str| bounded_f64(msg, key, RESOURCE_PERCENT_MAX);
+    let bytes = |key: &str| bounded_i64(msg, key, RESOURCE_BYTES_RANGE);
+    let count = |key: &str| bounded_i64(msg, key, RESOURCE_COUNT_RANGE);
     // Keep the latest sample per container (upsert keyed on container_name).
     let _ = sqlx::query(
         r#"
                 INSERT INTO app_resource_snapshots
-                  (container_name,cpu_percent,memory_usage,memory_percent,network_io,block_io,pids,sampled_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+                  (container_name,cpu_percent,memory_usage,memory_percent,network_io,block_io,pids,
+                   cpu_percent_value,memory_usage_bytes,memory_limit_bytes,memory_percent_value,
+                   network_rx_bytes,network_tx_bytes,block_read_bytes,block_write_bytes,pids_current,
+                   sampled_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
                 ON CONFLICT (container_name) DO UPDATE SET
                   cpu_percent=EXCLUDED.cpu_percent,
                   memory_usage=EXCLUDED.memory_usage,
@@ -191,6 +219,15 @@ async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
                   network_io=EXCLUDED.network_io,
                   block_io=EXCLUDED.block_io,
                   pids=EXCLUDED.pids,
+                  cpu_percent_value=EXCLUDED.cpu_percent_value,
+                  memory_usage_bytes=EXCLUDED.memory_usage_bytes,
+                  memory_limit_bytes=EXCLUDED.memory_limit_bytes,
+                  memory_percent_value=EXCLUDED.memory_percent_value,
+                  network_rx_bytes=EXCLUDED.network_rx_bytes,
+                  network_tx_bytes=EXCLUDED.network_tx_bytes,
+                  block_read_bytes=EXCLUDED.block_read_bytes,
+                  block_write_bytes=EXCLUDED.block_write_bytes,
+                  pids_current=EXCLUDED.pids_current,
                   sampled_at=EXCLUDED.sampled_at
                 "#,
     )
@@ -201,6 +238,15 @@ async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
     .bind(value("networkIo", "0B / 0B"))
     .bind(value("blockIo", "0B / 0B"))
     .bind(value("pids", "0"))
+    .bind(percent("cpuPercentValue"))
+    .bind(bytes("memoryUsageBytes"))
+    .bind(bytes("memoryLimitBytes"))
+    .bind(percent("memoryPercentValue"))
+    .bind(bytes("networkRxBytes"))
+    .bind(bytes("networkTxBytes"))
+    .bind(bytes("blockReadBytes"))
+    .bind(bytes("blockWriteBytes"))
+    .bind(count("pidsCurrent"))
     .execute(&state.db)
     .await;
 }
