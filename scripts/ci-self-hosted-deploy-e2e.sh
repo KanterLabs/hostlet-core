@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/ci-self-hosted-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
+# shellcheck source=scripts/ci-metrics-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-metrics-lib.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"
 POSTGRES_CONTAINER="hostlet-ci-self-deploy-postgres-${RUN_ID}"
@@ -189,6 +191,68 @@ assert_runtime_metric() {
   esac
 }
 
+record_deployment_metric() {
+  local fixture="$1"
+  local scenario="$2"
+  local detail="$3"
+  if [ -z "${HOSTLET_RAILPACK_METRICS_FILE:-}" ]; then
+    return 0
+  fi
+  python3 - "${fixture}" "${scenario}" "${detail}" <<'PY' | ci_metrics_append_object "${HOSTLET_RAILPACK_METRICS_FILE}"
+import json
+import sys
+
+fixture = sys.argv[1]
+scenario = sys.argv[2]
+detail = json.loads(sys.argv[3])
+metadata = ((detail.get("latestDeployment") or {}).get("runtimeMetadata") or {})
+
+
+def int_value(key, default=None):
+    value = metadata.get(key, default)
+    if value is None:
+        return None
+    return int(value)
+
+
+def include(payload, key, source_key):
+    value = int_value(source_key)
+    if value is not None:
+        payload[key] = value
+
+
+image_bytes = int_value("imageSizeBytes", 0)
+build_duration_ms = int_value("buildDurationMs", 0)
+boot_duration_ms = int_value("bootDurationMs", 0)
+payload = {
+    "fixture": fixture,
+    "scenario": scenario,
+    "imageBytes": image_bytes,
+    "maxImageBytes": 500_000_000 if image_bytes > 0 else 1,
+    "buildSeconds": build_duration_ms // 1000,
+    "maxBuildSeconds": 300,
+    "bootSeconds": boot_duration_ms // 1000,
+    "maxBootSeconds": 120,
+    "healthSeconds": boot_duration_ms // 1000,
+    "maxHealthSeconds": 120,
+}
+
+for key in (
+    "buildDurationMs",
+    "containerStartDurationMs",
+    "bootDurationMs",
+    "gitSyncDurationMs",
+    "buildPlanDurationMs",
+    "healthCheckDurationMs",
+    "routingDurationMs",
+    "composeUpDurationMs",
+):
+    include(payload, key, key)
+
+print(json.dumps(payload, sort_keys=True))
+PY
+}
+
 # ---------------------------------------------------------------------------
 # Bring up Postgres and the git fixture repo.
 # ---------------------------------------------------------------------------
@@ -333,6 +397,7 @@ JSON
   printf '%s' "${railpack_logs}" | grep -q 'Health check passed'
   docker ps --filter "name=hostlet-app-${railpack_app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
   assert_container_readonly_rootfs "${railpack_container}" "false"
+  record_deployment_metric "e2e-railpack-${fixture_name}" "selfHostedDeployE2e" "${railpack_detail}"
 
   railpack_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${railpack_app_id}")"
   railpack_delete_job="$(printf '%s' "${railpack_delete_payload}" | json_get jobId)"
@@ -439,6 +504,7 @@ if printf '%s' "${logs_payload}" | grep -q 'secret-value-for-redaction'; then
 fi
 docker ps --filter "name=hostlet-app-${app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
 assert_container_readonly_rootfs "${container_name}" "false"
+record_deployment_metric "e2e-node-primary" "selfHostedDeployE2e" "${app_detail}"
 
 # ---------------------------------------------------------------------------
 # Redeploy v2: bumping APP_VERSION and redeploying serves v2 (data volume keeps
@@ -532,6 +598,7 @@ if printf '%s' "${compose_logs}" | grep -q 'compose-secret-value-for-redaction';
   exit 1
 fi
 docker ps --filter "label=com.docker.compose.project=hostlet-app-${compose_app_id//-/}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+record_deployment_metric "e2e-compose-fullstack" "selfHostedDeployE2e" "${compose_detail}"
 
 compose_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${compose_app_id}")"
 compose_delete_job="$(printf '%s' "${compose_delete_payload}" | json_get jobId)"
