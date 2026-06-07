@@ -43,8 +43,6 @@ jobs:
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: ../../scripts/ci-verify-runner.sh
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.33.2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
