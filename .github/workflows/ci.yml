@@ -15,19 +15,17 @@ concurrency:
 
 jobs:
   secrets:
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: scripts/ci-verify-runner.sh
       - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 detect --source=/repo --redact --verbose
 
   rust:
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check-line-cap.sh
@@ -39,13 +37,12 @@ jobs:
       - run: cargo test --workspace
 
   web:
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
-      - run: ../../scripts/ci-verify-runner.sh
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -62,7 +59,7 @@ jobs:
       - run: ../../scripts/ci-security-artifact-smoke.sh
 
   compose:
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: ubuntu-latest
     env:
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
@@ -78,15 +75,13 @@ jobs:
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-verify-runner.sh
       - run: docker compose -f infra/docker-compose.yml config >/dev/null
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
 
   docker:
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-verify-runner.sh
       - run: docker build -f apps/web/Dockerfile -t hostlet-web-ci .
       - run: docker build -f apps/api/Dockerfile -t hostlet-api-ci .
       - run: docker build -f apps/agent/Dockerfile -t hostlet-agent-ci .

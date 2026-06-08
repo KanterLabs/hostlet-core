@@ -33,7 +33,8 @@ assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-core-workflow-contracts.sh'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
-assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${CI_WORKFLOW}" 'runs-on: ubuntu-latest'
+assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: ubuntu-latest'
 assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"'
@@ -76,6 +77,25 @@ required = [
 for needle in required:
     if needle not in payload:
         raise SystemExit(f"dispatch payload missing {needle}")
+PY
+
+python3 - "${ROOT}/.github/workflows" <<'PY'
+import sys
+import re
+from pathlib import Path
+
+workflow_dir = Path(sys.argv[1])
+violations = []
+for workflow in workflow_dir.glob("*.yml"):
+    text = workflow.read_text()
+    if "pull_request:" not in text:
+        continue
+    if re.search(r"runs-on:\s*(?:\[.*self-hosted.*\]|self-hosted)", text):
+        violations.append(workflow.name)
+
+if violations:
+    joined = ", ".join(sorted(violations))
+    raise SystemExit(f"pull_request workflows must not use self-hosted runners: {joined}")
 PY
 
 python3 - "${STAGING_WORKFLOW}" "${ROOT}/.github/workflows/release.yml" <<'PY'
