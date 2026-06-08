@@ -1,7 +1,6 @@
 name: Deployability CI
 
 on:
-  pull_request:
   push:
     branches:
       - main
@@ -17,7 +16,7 @@ concurrency:
 
 jobs:
   generated-apps:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-install-railpack.sh
@@ -34,7 +33,7 @@ jobs:
           retention-days: 14
 
   self-hosted-api:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
