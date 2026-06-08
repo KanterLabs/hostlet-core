@@ -1,7 +1,10 @@
 use super::*;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const RAILPACK_BUILDKIT_CONTAINER: &str = "hostlet-railpack-buildkit";
 const DEFAULT_RAILPACK_BUILDKIT_IMAGE: &str = "moby/buildkit:buildx-stable-1";
+const DEFAULT_RAILPACK_BUILDKIT_IDLE_SECONDS: u64 = 1_800;
 
 pub(crate) struct RailpackBuildResult {
     pub(crate) runtime_metadata: Value,
@@ -14,13 +17,14 @@ struct RailpackBuildkitSession {
 
 impl RailpackBuildkitSession {
     async fn stop_after_build(&self, cfg: &Config, deployment_id: Uuid) {
-        if railpack_buildkit_keepalive() {
-            return;
-        }
-        let Some(container) = self.container.as_deref() else {
+        let Some(container) = self.container.clone() else {
             return;
         };
-        let _ = run_log(cfg, deployment_id, "docker", &["stop", container]).await;
+        if railpack_buildkit_keepalive() {
+            schedule_railpack_buildkit_idle_stop(cfg.clone(), deployment_id, container);
+            return;
+        }
+        let _ = run_log(cfg, deployment_id, "docker", &["stop", &container]).await;
     }
 }
 
@@ -159,20 +163,9 @@ async fn ensure_railpack_buildkit(
         _ => {
             let image = std::env::var("HOSTLET_RAILPACK_BUILDKIT_IMAGE")
                 .unwrap_or_else(|_| DEFAULT_RAILPACK_BUILDKIT_IMAGE.into());
-            run_log(
-                cfg,
-                deployment_id,
-                "docker",
-                &[
-                    "run",
-                    "-d",
-                    "--name",
-                    container.as_str(),
-                    "--privileged",
-                    &image,
-                ],
-            )
-            .await?;
+            let args = railpack_buildkit_run_args(&image, &container);
+            let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            run_log(cfg, deployment_id, "docker", &arg_refs).await?;
         }
     }
     Ok(RailpackBuildkitSession {
@@ -200,6 +193,82 @@ fn railpack_buildkit_keepalive_value(value: Option<&str>) -> bool {
             "1" | "true" | "yes"
         )
     })
+}
+
+fn railpack_buildkit_idle_seconds() -> u64 {
+    std::env::var("HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS")
+        .ok()
+        .as_deref()
+        .and_then(railpack_buildkit_idle_seconds_value)
+        .unwrap_or(DEFAULT_RAILPACK_BUILDKIT_IDLE_SECONDS)
+}
+
+fn railpack_buildkit_idle_seconds_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok().filter(|seconds| *seconds > 0)
+}
+
+fn railpack_buildkit_memory_limit_mb() -> Option<u64> {
+    std::env::var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB")
+        .ok()
+        .as_deref()
+        .and_then(railpack_buildkit_memory_limit_mb_value)
+}
+
+fn railpack_buildkit_memory_limit_mb_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok().filter(|mb| *mb >= 128)
+}
+
+fn railpack_buildkit_run_args(image: &str, container: &str) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        container.to_string(),
+        "--privileged".to_string(),
+    ];
+    if let Some(memory_mb) = railpack_buildkit_memory_limit_mb() {
+        args.push("--memory".to_string());
+        args.push(format!("{memory_mb}m"));
+    }
+    args.push(image.to_string());
+    args
+}
+
+type BuildkitUseMap = Arc<Mutex<HashMap<String, Instant>>>;
+
+fn railpack_buildkit_last_used() -> BuildkitUseMap {
+    static LAST_USED: OnceLock<BuildkitUseMap> = OnceLock::new();
+    LAST_USED
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
+fn schedule_railpack_buildkit_idle_stop(cfg: Config, deployment_id: Uuid, container: String) {
+    let last_used = railpack_buildkit_last_used();
+    let used_at = Instant::now();
+    {
+        let mut map = last_used.lock().expect("buildkit last-used mutex poisoned");
+        map.insert(container.clone(), used_at);
+    }
+    let idle = Duration::from_secs(railpack_buildkit_idle_seconds());
+    tokio::spawn(async move {
+        tokio::time::sleep(idle).await;
+        let should_stop = {
+            let map = last_used.lock().expect("buildkit last-used mutex poisoned");
+            map.get(&container).is_some_and(|latest| *latest == used_at)
+        };
+        if should_stop {
+            let _ = run_log(&cfg, deployment_id, "docker", &["stop", &container]).await;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -267,6 +336,35 @@ mod tests {
         assert!(railpack_buildkit_keepalive_value(Some("1")));
         assert!(railpack_buildkit_keepalive_value(Some("true")));
         assert!(railpack_buildkit_keepalive_value(Some(" YES ")));
+    }
+
+    #[test]
+    fn railpack_buildkit_idle_seconds_defaults_and_rejects_invalid_values() {
+        assert_eq!(railpack_buildkit_idle_seconds_value("45"), Some(45));
+        assert_eq!(railpack_buildkit_idle_seconds_value(" 1800 "), Some(1_800));
+        assert_eq!(railpack_buildkit_idle_seconds_value("0"), None);
+        assert_eq!(railpack_buildkit_idle_seconds_value(""), None);
+        assert_eq!(railpack_buildkit_idle_seconds_value("soon"), None);
+    }
+
+    #[test]
+    fn railpack_buildkit_memory_limit_requires_reasonable_mb() {
+        assert_eq!(railpack_buildkit_memory_limit_mb_value("512"), Some(512));
+        assert_eq!(railpack_buildkit_memory_limit_mb_value(" 256 "), Some(256));
+        assert_eq!(railpack_buildkit_memory_limit_mb_value("127"), None);
+        assert_eq!(railpack_buildkit_memory_limit_mb_value(""), None);
+        assert_eq!(railpack_buildkit_memory_limit_mb_value("large"), None);
+    }
+
+    #[test]
+    fn railpack_buildkit_run_args_include_optional_memory_limit() {
+        std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB", "512");
+
+        let args = railpack_buildkit_run_args("moby/buildkit:buildx-stable-1", "hostlet-buildkit");
+
+        assert!(args.windows(2).any(|pair| pair == ["--memory", "512m"]));
+        assert_eq!(args.last().unwrap(), "moby/buildkit:buildx-stable-1");
+        std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB");
     }
 
     #[test]
