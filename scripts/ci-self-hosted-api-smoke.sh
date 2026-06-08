@@ -5,21 +5,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/ci-self-hosted-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
-TMP_DIR="$(mktemp -d "/tmp/hostlet-self-api-${RUN_ID}.XXXXXX")"
+TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"
 POSTGRES_CONTAINER="hostlet-ci-self-api-postgres-${RUN_ID}"
 API_PID=""
-API_PORT="${HOSTLET_SELF_API_SMOKE_PORT:-18081}"
+API_PORT="${HOSTLET_SELF_API_SMOKE_PORT:-$(pick_local_port)}"
 COOKIE_JAR="${TMP_DIR}/cookies.txt"
 API_LOG="${TMP_DIR}/api.log"
+API_STARTUP_ATTEMPTS="${HOSTLET_SELF_HOSTED_STARTUP_ATTEMPTS:-300}"
 AUTH_COOKIE=""
 
 cleanup() {
+  local exit_code="$?"
   if [ -n "${API_PID}" ] && kill -0 "${API_PID}" >/dev/null 2>&1; then
     kill "${API_PID}" >/dev/null 2>&1 || true
     wait "${API_PID}" >/dev/null 2>&1 || true
   fi
   docker rm -f "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
-  rm -rf "${TMP_DIR}"
+  if [ "${exit_code}" -eq 0 ]; then
+    rm -rf "${TMP_DIR}"
+  else
+    echo "self-hosted API smoke failed with exit code ${exit_code}; preserving ${TMP_DIR}" >&2
+    tail -200 "${API_LOG}" >&2 || true
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -43,14 +50,17 @@ wait_postgres_ready
 POSTGRES_PORT="$(discover_postgres_port)"
 
 export_self_hosted_env "${POSTGRES_PORT}" "${API_PORT}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hostlet-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 
 cd "${ROOT}"
-cargo run -p hostlet-api >"${API_LOG}" 2>&1 &
+ci_build_binary hostlet-api hostlet-api
+"$(ci_binary_path hostlet-api)" >"${API_LOG}" 2>&1 &
 API_PID="$!"
 
-for _ in $(seq 1 90); do
+api_ready=0
+for _ in $(seq 1 "${API_STARTUP_ATTEMPTS}"); do
   if curl -fsS "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1; then
+    api_ready=1
     break
   fi
   if ! kill -0 "${API_PID}" >/dev/null 2>&1; then
@@ -59,6 +69,11 @@ for _ in $(seq 1 90); do
   fi
   sleep 1
 done
+if [ "${api_ready}" != "1" ]; then
+  echo "timed out waiting for self-hosted API after ${API_STARTUP_ATTEMPTS}s" >&2
+  tail -200 "${API_LOG}" >&2 || true
+  exit 1
+fi
 
 base="http://127.0.0.1:${API_PORT}"
 origin="http://127.0.0.1:3000"

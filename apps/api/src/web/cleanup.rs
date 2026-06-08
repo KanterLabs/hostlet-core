@@ -131,6 +131,7 @@ struct CleanupDatabasePreview {
 struct CleanupDockerPreview {
     keep_containers: usize,
     keep_images: usize,
+    stale_deployment_containers: i64,
     job_will_run: bool,
 }
 
@@ -157,6 +158,8 @@ const RETENTION: CleanupRetention = CleanupRetention {
     failed_agent_job_days: 90,
 };
 
+const LIVE_DOCKER_DEPLOYMENT_STATUSES: &[&str] = &["success", "rolled_back"];
+
 pub(in crate::web) async fn cleanup_plan(
     state: &AppState,
     _user_id: Uuid,
@@ -169,11 +172,15 @@ pub(in crate::web) async fn cleanup_plan(
         completed_agent_jobs: cleanup_count(state, &COMPLETED_AGENT_JOBS_RULE.count_sql()).await?,
         failed_agent_jobs: cleanup_count(state, &FAILED_AGENT_JOBS_RULE.count_sql()).await?,
     };
+    let active_statuses = deployment_status_strings(deploy::ACTIVE_DEPLOYMENT_STATUSES);
+    let protected_statuses = docker_cleanup_keep_statuses();
     let keep_rows = sqlx::query(
         r#"
-        WITH ranked AS (
-          SELECT d.container_name,
+        WITH candidates AS (
+          SELECT d.id,
+                 d.container_name,
                  d.image_tag,
+                 d.status,
                  row_number() OVER (
                    PARTITION BY d.app_id
                    ORDER BY
@@ -183,13 +190,15 @@ pub(in crate::web) async fn cleanup_plan(
                  ) AS rn
           FROM deployments d
           JOIN apps a ON a.id=d.app_id
-          WHERE d.status IN ('success','rolled_back')
+          WHERE d.status = ANY($1)
         )
         SELECT container_name,image_tag
-        FROM ranked
-        WHERE rn <= 2
+        FROM candidates
+        WHERE status = ANY($2) OR rn <= 2
         "#,
     )
+    .bind(&protected_statuses)
+    .bind(&active_statuses)
     .fetch_all(&state.db)
     .await?;
     let mut keep_containers = keep_rows
@@ -204,6 +213,37 @@ pub(in crate::web) async fn cleanup_plan(
         .collect::<Vec<_>>();
     keep_images.sort();
     keep_images.dedup();
+    let stale_deployment_containers = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH candidates AS (
+          SELECT d.id,
+                 d.status,
+                 row_number() OVER (
+                   PARTITION BY d.app_id
+                   ORDER BY
+                     CASE WHEN a.current_deployment_id=d.id THEN 0 ELSE 1 END,
+                     d.finished_at DESC NULLS LAST,
+                     d.created_at DESC
+                 ) AS rn
+          FROM deployments d
+          JOIN apps a ON a.id=d.app_id
+          WHERE d.status = ANY($1)
+        ),
+        protected AS (
+          SELECT id
+          FROM candidates
+          WHERE status = ANY($2) OR rn <= 2
+        )
+        SELECT count(*)::bigint
+        FROM deployments d
+        WHERE d.container_name IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM protected p WHERE p.id=d.id)
+        "#,
+    )
+    .bind(&protected_statuses)
+    .bind(&active_statuses)
+    .fetch_one(&state.db)
+    .await?;
     let local_server_id =
         sqlx::query_scalar::<_, Uuid>("SELECT id FROM servers WHERE kind='local' LIMIT 1")
             .fetch_optional(&state.db)
@@ -214,12 +254,26 @@ pub(in crate::web) async fn cleanup_plan(
         docker: CleanupDockerPreview {
             keep_containers: keep_containers.len(),
             keep_images: keep_images.len(),
+            stale_deployment_containers,
             job_will_run: local_server_id.is_some(),
         },
         local_server_id,
         keep_containers,
         keep_images,
     })
+}
+
+fn deployment_status_strings(statuses: &[&str]) -> Vec<String> {
+    statuses
+        .iter()
+        .map(|status| (*status).to_string())
+        .collect()
+}
+
+fn docker_cleanup_keep_statuses() -> Vec<String> {
+    let mut statuses = deployment_status_strings(deploy::ACTIVE_DEPLOYMENT_STATUSES);
+    statuses.extend(deployment_status_strings(LIVE_DOCKER_DEPLOYMENT_STATUSES));
+    statuses
 }
 
 async fn cleanup_count(state: &AppState, sql: &str) -> anyhow::Result<i64> {
@@ -331,3 +385,121 @@ const FAILED_AGENT_JOBS_RULE: RetentionRule = RetentionRule {
     predicate: r#"j.status IN ('failed','expired')
   AND COALESCE(j.finished_at,j.updated_at,j.created_at) < now() - interval '90 days'"#,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn db_cleanup_plan_marks_failed_deployment_containers_stale() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cleanup_db(&state).await;
+        let user_id = insert_cleanup_user(&state).await;
+        let app_id = insert_cleanup_app(&state, user_id).await;
+        let current_deployment = insert_cleanup_deployment(
+            &state,
+            app_id,
+            "success",
+            "hostlet/app-current:latest",
+            "hostlet-app-current",
+        )
+        .await;
+        insert_cleanup_deployment(
+            &state,
+            app_id,
+            "health_checking",
+            "hostlet/app-active:latest",
+            "hostlet-app-active",
+        )
+        .await;
+        insert_cleanup_deployment(
+            &state,
+            app_id,
+            "failed",
+            "hostlet/app-failed:latest",
+            "hostlet-app-failed",
+        )
+        .await;
+        sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+            .bind(current_deployment)
+            .bind(app_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let plan = cleanup_plan(&state, user_id).await.unwrap();
+
+        assert_eq!(plan.docker.stale_deployment_containers, 1);
+        assert_eq!(
+            plan.keep_containers,
+            vec!["hostlet-app-active", "hostlet-app-current"]
+        );
+        assert_eq!(
+            plan.keep_images,
+            vec!["hostlet/app-active:latest", "hostlet/app-current:latest"]
+        );
+        assert!(!plan.keep_containers.contains(&"hostlet-app-failed".into()));
+        assert!(!plan
+            .keep_images
+            .contains(&"hostlet/app-failed:latest".into()));
+    }
+
+    async fn reset_cleanup_db(state: &AppState) {
+        sqlx::query(
+            "TRUNCATE deployment_logs, app_health_events, app_health_snapshots, app_resource_snapshots, agent_jobs,
+             deployments, app_env_vars, apps, users CASCADE",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_cleanup_user(state: &AppState) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO users (github_id, login) VALUES ($1,'cleanup-user') RETURNING id",
+        )
+        .bind(9_090_001_i64)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_cleanup_app(state: &AppState, user_id: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO apps
+               (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,root_directory,public_exposure,auto_deploy)
+             VALUES ($1,$2,'cleanup-app','hostlet-ci/node-hello','main',3000,'/health','cleanup.example.test','single','.',true,false)
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(state.local_server_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_cleanup_deployment(
+        state: &AppState,
+        app_id: Uuid,
+        status: &str,
+        image_tag: &str,
+        container_name: &str,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO deployments
+               (app_id,server_id,status,commit_sha,image_tag,container_name,started_at,finished_at,runtime_kind)
+             VALUES ($1,$2,$3,'HEAD',$4,$5,now(),now(),'single')
+             RETURNING id",
+        )
+        .bind(app_id)
+        .bind(state.local_server_id)
+        .bind(status)
+        .bind(image_tag)
+        .bind(container_name)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+}

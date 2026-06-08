@@ -148,6 +148,7 @@ pub(crate) async fn deploy_compose(
     fallback_port: i64,
     domain: &str,
     fallback_health_path: &str,
+    git_sync_duration_ms: u128,
 ) -> anyhow::Result<()> {
     ensure_docker_compose().await?;
     let build_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
@@ -187,6 +188,7 @@ pub(crate) async fn deploy_compose(
         &format!("Detected Hostlet Compose app. Project {project}, web service {web_service}."),
     )
     .await;
+    let compose_up_started = Instant::now();
     run_log_in_dir(
         &cfg,
         deployment_id,
@@ -218,28 +220,77 @@ pub(crate) async fn deploy_compose(
     )
     .await?;
     let internal_port = docker_published_port(&container, port).await?;
+    let container_start_duration_ms = compose_up_started.elapsed().as_millis();
     status(&cfg, deployment_id, "health_checking", None).await;
-    if let Err(err) = wait_health(&cfg, deployment_id, &container, internal_port, health_path).await
+    let runtime_metadata = json!({
+        "runtime": "compose",
+        "composeFile": compose_file_name,
+        "hostletConfigPath": manifest_path,
+        "webService": web_service,
+        "targetPort": port,
+        "healthPath": health_path,
+        "project": project,
+        "appName": app_name,
+        "composeUpDurationMs": container_start_duration_ms,
+        "gitSyncDurationMs": git_sync_duration_ms,
+    });
+    let health_check_started = Instant::now();
+    let health_check_duration = match wait_health(
+        &cfg,
+        deployment_id,
+        &container,
+        internal_port,
+        health_path,
+    )
+    .await
     {
-        let _ = run_log_in_dir(
-            &cfg,
-            deployment_id,
-            project_dir,
-            "docker",
-            &compose_invocation(
-                &project,
-                compose_file,
-                &override_file,
-                &["logs", "--tail", "120"],
-            )?,
-        )
-        .await;
-        status(&cfg, deployment_id, "failed", Some(&format!("Compose health check failed: {err}. The previous working route was preserved; inspect Compose service logs for details."))).await;
-        return Ok(());
-    }
+        Ok(duration) => duration,
+        Err(err) => {
+            let _ = run_log_in_dir(
+                &cfg,
+                deployment_id,
+                project_dir,
+                "docker",
+                &compose_invocation(
+                    &project,
+                    compose_file,
+                    &override_file,
+                    &["logs", "--tail", "120"],
+                )?,
+            )
+            .await;
+            let failure = format!("Compose health check failed: {err}. The previous working route was preserved; inspect Compose service logs for details.");
+            let runtime_metadata = add_startup_runtime_metadata(
+                runtime_metadata,
+                container_start_duration_ms,
+                health_check_started.elapsed().as_millis(),
+            );
+            status_extra(
+                &cfg,
+                deployment_id,
+                "failed",
+                StatusDetails {
+                    failure: Some(&failure),
+                    container: Some(&container),
+                    published_port: Some(internal_port),
+                    compose_project: Some(&project),
+                    runtime_metadata: Some(runtime_metadata),
+                    ..StatusDetails::default()
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    };
+    let runtime_metadata = add_startup_runtime_metadata(
+        runtime_metadata,
+        container_start_duration_ms,
+        health_check_duration.as_millis(),
+    );
     status(&cfg, deployment_id, "routing", None).await;
     let mut local_url = None;
-    if cfg.local_mode {
+    let routing_started = Instant::now();
+    let routing_result = if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
             apply_local_caddy_route(
                 &cfg,
@@ -249,15 +300,39 @@ pub(crate) async fn deploy_compose(
                 domain,
                 internal_port,
             )
-            .await?;
+            .await
+        } else {
+            Ok(())
         }
+    } else {
+        apply_caddy_route(&cfg, deployment_id, route_key, domain, internal_port).await
+    };
+    let runtime_metadata =
+        add_routing_runtime_metadata(runtime_metadata, routing_started.elapsed().as_millis());
+    if let Err(err) = routing_result {
+        let failure = format!("Compose routing failed after health check: {err}. The Compose project was left running and the previous working route was preserved when possible.");
+        status_extra(
+            &cfg,
+            deployment_id,
+            "failed",
+            StatusDetails {
+                failure: Some(&failure),
+                container: Some(&container),
+                published_port: Some(internal_port),
+                compose_project: Some(&project),
+                runtime_metadata: Some(runtime_metadata.clone()),
+                ..StatusDetails::default()
+            },
+        )
+        .await;
+        return Err(reported_deployment_failure(failure));
+    }
+    if cfg.local_mode {
         local_url = Some(if cfg.local_router.is_some() {
             domain.to_string()
         } else {
             format!("localhost:{internal_port}")
         });
-    } else {
-        apply_caddy_route(&cfg, deployment_id, route_key, domain, internal_port).await?;
     }
     status_extra(
         &cfg,
@@ -268,16 +343,7 @@ pub(crate) async fn deploy_compose(
             local_url: local_url.as_deref(),
             published_port: Some(internal_port),
             compose_project: Some(&project),
-            runtime_metadata: Some(json!({
-                "runtime": "compose",
-                "composeFile": compose_file_name,
-                "hostletConfigPath": manifest_path,
-                "webService": web_service,
-                "targetPort": port,
-                "healthPath": health_path,
-                "project": project,
-                "appName": app_name,
-            })),
+            runtime_metadata: Some(runtime_metadata),
             ..StatusDetails::default()
         },
     )
@@ -409,16 +475,10 @@ pub(crate) async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
 
     let containers = hostlet_containers_all().await?;
     for container in containers {
-        if keep_containers.contains(&container) {
-            continue;
-        }
-        if docker_compose_managed_container(&container).await? {
-            continue;
-        }
-        if !valid_container_name(&container) {
-            bail!("refusing to clean invalid managed container name");
-        }
-        if !dry_run {
+        let compose_managed = docker_compose_managed_container(&container).await?;
+        if cleanup_should_remove_container(&container, &keep_containers, compose_managed)?
+            && !dry_run
+        {
             run_quiet_absent_ok("docker", &["rm", "-f", &container], &["No such container"])
                 .await?;
         }
@@ -438,6 +498,20 @@ pub(crate) async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn cleanup_should_remove_container(
+    container: &str,
+    keep_containers: &HashSet<String>,
+    compose_managed: bool,
+) -> anyhow::Result<bool> {
+    if keep_containers.contains(container) || compose_managed {
+        return Ok(false);
+    }
+    if !valid_container_name(container) {
+        bail!("refusing to clean invalid managed container name");
+    }
+    Ok(true)
 }
 
 pub(crate) async fn run_log(
@@ -495,30 +569,49 @@ async fn run_log_streamed(
         cmd.env(key, value);
     }
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to start {bin}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            log(
+                cfg,
+                deployment_id,
+                "stderr",
+                &command_start_failure_log_line(bin, &err),
+            )
+            .await;
+            return Err(err).with_context(|| format!("failed to start {bin}"));
+        }
+    };
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let c1 = cfg.clone();
     let c2 = cfg.clone();
-    tokio::spawn(async move {
+    let stdout_task = tokio::spawn(async move {
         stream_lines(c1, deployment_id, "stdout", stdout).await;
     });
-    tokio::spawn(async move {
+    let stderr_task = tokio::spawn(async move {
         stream_lines(c2, deployment_id, "stderr", stderr).await;
     });
     let status = match tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
             let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
             bail!("{bin} timed out after 1800 seconds");
         }
     };
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
     if !status.success() {
         bail!("{bin} exited with {status}");
     }
     Ok(())
+}
+
+fn command_start_failure_log_line(bin: &str, err: &std::io::Error) -> String {
+    redact(&format!("Failed to start {bin}: {err}"))
 }
 
 pub(crate) async fn run_quiet(bin: &str, args: &[&str]) -> anyhow::Result<()> {
@@ -620,4 +713,66 @@ pub(crate) async fn verify_git_head(
         bail!("checked-out commit did not match the signed deployment commit");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_start_failure_log_line_includes_command_and_error() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory");
+
+        let line = command_start_failure_log_line("railpack", &err);
+
+        assert!(line.contains("Failed to start railpack:"));
+        assert!(line.contains("No such file or directory"));
+    }
+
+    #[test]
+    fn command_start_failure_log_line_redacts_sensitive_error_text() {
+        let err = std::io::Error::other("token=abc123");
+
+        let line = command_start_failure_log_line("railpack", &err);
+
+        assert_eq!(line, "[redacted]");
+    }
+
+    #[test]
+    fn docker_cleanup_removes_unkept_hostlet_app_containers() {
+        let keep_containers = HashSet::from(["hostlet-app-current".to_string()]);
+
+        let should_remove = cleanup_should_remove_container(
+            "hostlet-app-stale-restarting",
+            &keep_containers,
+            false,
+        )
+        .unwrap();
+
+        assert!(should_remove);
+    }
+
+    #[test]
+    fn docker_cleanup_keeps_protected_and_compose_containers() {
+        let keep_containers = HashSet::from(["hostlet-app-current".to_string()]);
+
+        assert!(
+            !cleanup_should_remove_container("hostlet-app-current", &keep_containers, false)
+                .unwrap()
+        );
+        assert!(
+            !cleanup_should_remove_container("hostlet-app-compose", &keep_containers, true)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn docker_cleanup_rejects_invalid_unkept_container_names() {
+        let err =
+            cleanup_should_remove_container("not-hostlet-app", &HashSet::new(), false).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("refusing to clean invalid managed container name"));
+    }
 }

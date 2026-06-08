@@ -1,10 +1,31 @@
 use super::*;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const RAILPACK_BUILDKIT_CONTAINER: &str = "hostlet-railpack-buildkit";
 const DEFAULT_RAILPACK_BUILDKIT_IMAGE: &str = "moby/buildkit:buildx-stable-1";
+const DEFAULT_RAILPACK_BUILDKIT_IDLE_SECONDS: u64 = 1_800;
 
 pub(crate) struct RailpackBuildResult {
     pub(crate) runtime_metadata: Value,
+}
+
+struct RailpackBuildkitSession {
+    host: String,
+    container: Option<String>,
+}
+
+impl RailpackBuildkitSession {
+    async fn stop_after_build(&self, cfg: &Config, deployment_id: Uuid) {
+        let Some(container) = self.container.clone() else {
+            return;
+        };
+        if railpack_buildkit_keepalive() {
+            schedule_railpack_buildkit_idle_stop(cfg.clone(), deployment_id, container);
+            return;
+        }
+        let _ = run_log(cfg, deployment_id, "docker", &["stop", &container]).await;
+    }
 }
 
 pub(crate) fn should_try_railpack(err: &anyhow::Error) -> bool {
@@ -21,7 +42,7 @@ pub(crate) async fn railpack_build_app(
     p: &Value,
 ) -> anyhow::Result<RailpackBuildResult> {
     let railpack = std::env::var("HOSTLET_RAILPACK_BIN").unwrap_or_else(|_| "railpack".into());
-    let buildkit_host = ensure_railpack_buildkit(cfg, deployment_id).await?;
+    let buildkit = ensure_railpack_buildkit(cfg, deployment_id).await?;
     log(
         cfg,
         deployment_id,
@@ -32,16 +53,17 @@ pub(crate) async fn railpack_build_app(
     let build_started = Instant::now();
     let args = railpack_build_args(image, app_name, port, project_dir, p)?;
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_log_in_dir_env(
+    let build_result = run_log_in_dir_env(
         cfg,
         deployment_id,
         project_dir,
-        &[("BUILDKIT_HOST", buildkit_host.as_str())],
+        &[("BUILDKIT_HOST", buildkit.host.as_str())],
         &railpack,
         &arg_refs,
     )
-    .await
-    .with_context(|| format!("Railpack failed to build {}", project_dir.display()))?;
+    .await;
+    buildkit.stop_after_build(cfg, deployment_id).await;
+    build_result.with_context(|| format!("Railpack failed to build {}", project_dir.display()))?;
     let build_duration_ms = build_started.elapsed().as_millis();
     let image_size = image_size_bytes(image).await.ok();
     if let Some(size) = image_size {
@@ -54,17 +76,24 @@ pub(crate) async fn railpack_build_app(
         .await;
     }
     Ok(RailpackBuildResult {
-        runtime_metadata: json!({
-            "packagingStrategy": "generated",
-            "generatedDockerfile": false,
-            "buildBackend": "railpack",
-            "detectedLanguage": null,
-            "detectedFramework": null,
-            "runtimeKind": null,
-            "packageManager": null,
-            "buildDurationMs": build_duration_ms,
-            "imageSizeBytes": image_size,
-        }),
+        runtime_metadata: railpack_runtime_metadata(build_duration_ms, image_size),
+    })
+}
+
+pub(crate) fn railpack_runtime_metadata(
+    build_duration_ms: u128,
+    image_size_bytes: Option<i64>,
+) -> Value {
+    json!({
+        "packagingStrategy": "generated",
+        "generatedDockerfile": false,
+        "buildBackend": "railpack",
+        "detectedLanguage": null,
+        "detectedFramework": null,
+        "runtimeKind": null,
+        "packageManager": null,
+        "buildDurationMs": build_duration_ms,
+        "imageSizeBytes": image_size_bytes,
     })
 }
 
@@ -106,55 +135,140 @@ fn railpack_build_args(
     Ok(args)
 }
 
-async fn ensure_railpack_buildkit(cfg: &Config, deployment_id: Uuid) -> anyhow::Result<String> {
+async fn ensure_railpack_buildkit(
+    cfg: &Config,
+    deployment_id: Uuid,
+) -> anyhow::Result<RailpackBuildkitSession> {
     if let Ok(host) = std::env::var("BUILDKIT_HOST") {
         if !host.trim().is_empty() {
-            return Ok(host);
+            return Ok(RailpackBuildkitSession {
+                host,
+                container: None,
+            });
         }
     }
+    let container = railpack_buildkit_container();
     let output = command_output(
         "docker",
-        &[
-            "inspect",
-            "-f",
-            "{{.State.Running}}",
-            RAILPACK_BUILDKIT_CONTAINER,
-        ],
+        &["inspect", "-f", "{{.State.Running}}", container.as_str()],
         Duration::from_secs(30),
     )
     .await;
     match output {
         Ok(output) if output.status.success() => {
             if String::from_utf8_lossy(&output.stdout).trim() != "true" {
-                run_log(
-                    cfg,
-                    deployment_id,
-                    "docker",
-                    &["start", RAILPACK_BUILDKIT_CONTAINER],
-                )
-                .await?;
+                run_log(cfg, deployment_id, "docker", &["start", container.as_str()]).await?;
             }
         }
         _ => {
             let image = std::env::var("HOSTLET_RAILPACK_BUILDKIT_IMAGE")
                 .unwrap_or_else(|_| DEFAULT_RAILPACK_BUILDKIT_IMAGE.into());
-            run_log(
-                cfg,
-                deployment_id,
-                "docker",
-                &[
-                    "run",
-                    "-d",
-                    "--name",
-                    RAILPACK_BUILDKIT_CONTAINER,
-                    "--privileged",
-                    &image,
-                ],
-            )
-            .await?;
+            let args = railpack_buildkit_run_args(&image, &container);
+            let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            run_log(cfg, deployment_id, "docker", &arg_refs).await?;
         }
     }
-    Ok(format!("docker-container://{RAILPACK_BUILDKIT_CONTAINER}"))
+    Ok(RailpackBuildkitSession {
+        host: format!("docker-container://{container}"),
+        container: Some(container),
+    })
+}
+
+fn railpack_buildkit_container() -> String {
+    std::env::var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| RAILPACK_BUILDKIT_CONTAINER.to_string())
+}
+
+fn railpack_buildkit_keepalive() -> bool {
+    let value = std::env::var("HOSTLET_RAILPACK_BUILDKIT_KEEPALIVE").ok();
+    railpack_buildkit_keepalive_value(value.as_deref())
+}
+
+fn railpack_buildkit_keepalive_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
+fn railpack_buildkit_idle_seconds() -> u64 {
+    std::env::var("HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS")
+        .ok()
+        .as_deref()
+        .and_then(railpack_buildkit_idle_seconds_value)
+        .unwrap_or(DEFAULT_RAILPACK_BUILDKIT_IDLE_SECONDS)
+}
+
+fn railpack_buildkit_idle_seconds_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok().filter(|seconds| *seconds > 0)
+}
+
+fn railpack_buildkit_memory_limit_mb() -> Option<u64> {
+    std::env::var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB")
+        .ok()
+        .as_deref()
+        .and_then(railpack_buildkit_memory_limit_mb_value)
+}
+
+fn railpack_buildkit_memory_limit_mb_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok().filter(|mb| *mb >= 128)
+}
+
+fn railpack_buildkit_run_args(image: &str, container: &str) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        container.to_string(),
+        "--privileged".to_string(),
+    ];
+    if let Some(memory_mb) = railpack_buildkit_memory_limit_mb() {
+        args.push("--memory".to_string());
+        args.push(format!("{memory_mb}m"));
+    }
+    args.push(image.to_string());
+    args
+}
+
+type BuildkitUseMap = Arc<Mutex<HashMap<String, Instant>>>;
+
+fn railpack_buildkit_last_used() -> BuildkitUseMap {
+    static LAST_USED: OnceLock<BuildkitUseMap> = OnceLock::new();
+    LAST_USED
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
+fn schedule_railpack_buildkit_idle_stop(cfg: Config, deployment_id: Uuid, container: String) {
+    let last_used = railpack_buildkit_last_used();
+    let used_at = Instant::now();
+    {
+        let mut map = last_used.lock().expect("buildkit last-used mutex poisoned");
+        map.insert(container.clone(), used_at);
+    }
+    let idle = Duration::from_secs(railpack_buildkit_idle_seconds());
+    tokio::spawn(async move {
+        tokio::time::sleep(idle).await;
+        let should_stop = {
+            let map = last_used.lock().expect("buildkit last-used mutex poisoned");
+            map.get(&container).is_some_and(|latest| *latest == used_at)
+        };
+        if should_stop {
+            let _ = run_log(&cfg, deployment_id, "docker", &["stop", &container]).await;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -198,5 +312,68 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--start-cmd", "python main.py"]));
         assert_eq!(args.last().unwrap(), "/tmp/demo-app");
+    }
+
+    #[test]
+    fn railpack_buildkit_container_can_be_overridden_for_ci() {
+        std::env::set_var(
+            "HOSTLET_RAILPACK_BUILDKIT_CONTAINER",
+            "hostlet-buildkit-ci-123",
+        );
+        assert_eq!(railpack_buildkit_container(), "hostlet-buildkit-ci-123");
+        std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER");
+    }
+
+    #[test]
+    fn railpack_buildkit_keepalive_defaults_to_stop_after_build() {
+        assert!(!railpack_buildkit_keepalive_value(None));
+        assert!(!railpack_buildkit_keepalive_value(Some("")));
+        assert!(!railpack_buildkit_keepalive_value(Some("false")));
+    }
+
+    #[test]
+    fn railpack_buildkit_keepalive_accepts_true_values() {
+        assert!(railpack_buildkit_keepalive_value(Some("1")));
+        assert!(railpack_buildkit_keepalive_value(Some("true")));
+        assert!(railpack_buildkit_keepalive_value(Some(" YES ")));
+    }
+
+    #[test]
+    fn railpack_buildkit_idle_seconds_defaults_and_rejects_invalid_values() {
+        assert_eq!(railpack_buildkit_idle_seconds_value("45"), Some(45));
+        assert_eq!(railpack_buildkit_idle_seconds_value(" 1800 "), Some(1_800));
+        assert_eq!(railpack_buildkit_idle_seconds_value("0"), None);
+        assert_eq!(railpack_buildkit_idle_seconds_value(""), None);
+        assert_eq!(railpack_buildkit_idle_seconds_value("soon"), None);
+    }
+
+    #[test]
+    fn railpack_buildkit_memory_limit_requires_reasonable_mb() {
+        assert_eq!(railpack_buildkit_memory_limit_mb_value("512"), Some(512));
+        assert_eq!(railpack_buildkit_memory_limit_mb_value(" 256 "), Some(256));
+        assert_eq!(railpack_buildkit_memory_limit_mb_value("127"), None);
+        assert_eq!(railpack_buildkit_memory_limit_mb_value(""), None);
+        assert_eq!(railpack_buildkit_memory_limit_mb_value("large"), None);
+    }
+
+    #[test]
+    fn railpack_buildkit_run_args_include_optional_memory_limit() {
+        std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB", "512");
+
+        let args = railpack_buildkit_run_args("moby/buildkit:buildx-stable-1", "hostlet-buildkit");
+
+        assert!(args.windows(2).any(|pair| pair == ["--memory", "512m"]));
+        assert_eq!(args.last().unwrap(), "moby/buildkit:buildx-stable-1");
+        std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB");
+    }
+
+    #[test]
+    fn railpack_runtime_metadata_records_unknown_image_size() {
+        let metadata = railpack_runtime_metadata(1_500, None);
+
+        assert_eq!(metadata["packagingStrategy"], "generated");
+        assert_eq!(metadata["buildBackend"], "railpack");
+        assert_eq!(metadata["buildDurationMs"], 1_500);
+        assert!(metadata["imageSizeBytes"].is_null());
     }
 }

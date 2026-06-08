@@ -1,5 +1,9 @@
 use super::*;
 
+mod resource_stats;
+
+pub(crate) use resource_stats::publish_resource_stats;
+
 pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
     let tmp = target.with_extension(format!("caddy.tmp-{}", std::process::id()));
     tokio::fs::write(&tmp, contents).await?;
@@ -116,22 +120,22 @@ pub(crate) struct StatusDetails<'a> {
 }
 
 pub(crate) async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
-    post_reliable(
-        cfg,
-        json!({
-            "type": "deployment_status",
-            "deployment_id": id,
-            "status": status,
-            "failure": details.failure,
-            "image_tag": details.image,
-            "container_name": details.container,
-            "local_url": details.local_url,
-            "published_port": details.published_port,
-            "compose_project": details.compose_project,
-            "runtime_metadata": details.runtime_metadata,
-        }),
-    )
-    .await;
+    post_reliable(cfg, deployment_status_event(id, status, details)).await;
+}
+
+fn deployment_status_event(id: Uuid, status: &str, details: StatusDetails<'_>) -> Value {
+    json!({
+        "type": "deployment_status",
+        "deployment_id": id,
+        "status": status,
+        "failure": details.failure,
+        "image_tag": details.image,
+        "container_name": details.container,
+        "local_url": details.local_url,
+        "published_port": details.published_port,
+        "compose_project": details.compose_project,
+        "runtime_metadata": details.runtime_metadata,
+    })
 }
 
 pub(crate) async fn log(cfg: &Config, id: Uuid, stream: &str, line: &str) {
@@ -567,7 +571,12 @@ pub(crate) fn health_error_for_status(status: StatusCode) -> Option<String> {
 pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
     let output = command_output(
         "docker",
-        &["inspect", "-f", "{{.State.Running}}", container],
+        &[
+            "inspect",
+            "-f",
+            "{{.State.Running}} {{.State.Restarting}} {{.State.OOMKilled}} {{.State.ExitCode}}",
+            container,
+        ],
         Duration::from_secs(10),
     )
     .await?;
@@ -575,57 +584,27 @@ pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
         bail!("container does not exist");
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim() != "true" {
-        bail!("container is not running");
-    }
-    Ok(())
+    inspect_container_state(stdout.trim())
 }
 
-pub(crate) async fn publish_resource_stats(cfg: &Config) {
-    let Ok(containers) = hostlet_containers().await else {
-        return;
-    };
-    if containers.is_empty() {
-        return;
+fn inspect_container_state(value: &str) -> anyhow::Result<()> {
+    let mut parts = value.split_whitespace();
+    let running = parts.next();
+    let restarting = parts.next();
+    let oom_killed = parts.next();
+    let exit_code = parts.next();
+    if restarting == Some("true") {
+        let exit_code = exit_code.unwrap_or("unknown");
+        bail!("container is restarting after exit code {exit_code}");
     }
-    let mut args = vec!["stats", "--no-stream", "--format", "json"];
-    args.extend(containers.iter().map(String::as_str));
-    let Ok(output) = command_output("docker", &args, Duration::from_secs(15)).await else {
-        return;
-    };
-    if !output.status.success() {
-        return;
+    if oom_killed == Some("true") {
+        bail!("container was OOM-killed");
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(raw) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(container) = raw
-            .get("Container")
-            .or_else(|| raw.get("Name"))
-            .and_then(|v| v.as_str())
-        else {
-            continue;
-        };
-        if !valid_container_name(container) {
-            continue;
-        }
-        post(
-            cfg,
-            json!({
-                "type": "resource_stats",
-                "container": container,
-                "cpuPercent": raw.get("CPUPerc").and_then(|v| v.as_str()).unwrap_or("0%"),
-                "memoryUsage": raw.get("MemUsage").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
-                "memoryPercent": raw.get("MemPerc").and_then(|v| v.as_str()).unwrap_or("0%"),
-                "networkIo": raw.get("NetIO").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
-                "blockIo": raw.get("BlockIO").and_then(|v| v.as_str()).unwrap_or("0B / 0B"),
-                "pids": raw.get("PIDs").and_then(|v| v.as_str()).unwrap_or("0")
-            }),
-        )
-        .await;
+    if running != Some("true") {
+        let exit_code = exit_code.unwrap_or("unknown");
+        bail!("container is not running; last exit code {exit_code}");
     }
+    Ok(())
 }
 
 pub(crate) async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
@@ -795,6 +774,77 @@ pub(crate) fn valid_container_name(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn failed_deployment_status_event_keeps_runtime_metrics() {
+        let deployment_id = Uuid::from_u128(42);
+        let event = deployment_status_event(
+            deployment_id,
+            "failed",
+            StatusDetails {
+                failure: Some("Health check failed"),
+                image: Some("hostlet/demo:latest"),
+                container: Some("hostlet-demo"),
+                published_port: Some(32001),
+                compose_project: Some("hostlet_app_0000000000000000000000000000002a"),
+                runtime_metadata: Some(json!({
+                    "containerStartDurationMs": 125,
+                    "healthCheckDurationMs": 4_000,
+                    "bootDurationMs": 4_125,
+                })),
+                ..StatusDetails::default()
+            },
+        );
+
+        assert_eq!(event["type"], "deployment_status");
+        assert_eq!(event["deployment_id"], deployment_id.to_string());
+        assert_eq!(event["status"], "failed");
+        assert_eq!(event["failure"], "Health check failed");
+        assert_eq!(event["image_tag"], "hostlet/demo:latest");
+        assert_eq!(event["container_name"], "hostlet-demo");
+        assert_eq!(event["published_port"], 32001);
+        assert_eq!(
+            event["compose_project"],
+            "hostlet_app_0000000000000000000000000000002a"
+        );
+        assert_eq!(event["runtime_metadata"]["containerStartDurationMs"], 125);
+        assert_eq!(event["runtime_metadata"]["healthCheckDurationMs"], 4_000);
+        assert_eq!(event["runtime_metadata"]["bootDurationMs"], 4_125);
+    }
+
+    #[test]
+    fn inspect_container_state_accepts_running_container() {
+        inspect_container_state("true false false 0").unwrap();
+    }
+
+    #[test]
+    fn inspect_container_state_reports_restart_loop() {
+        let err = inspect_container_state("true true false 1").unwrap_err();
+
+        assert_eq!(err.to_string(), "container is restarting after exit code 1");
+    }
+
+    #[test]
+    fn inspect_container_state_reports_oom_kill() {
+        let err = inspect_container_state("false false true 137").unwrap_err();
+
+        assert_eq!(err.to_string(), "container was OOM-killed");
+    }
+
+    #[test]
+    fn inspect_container_state_reports_stopped_exit_code() {
+        let err = inspect_container_state("false false false 2").unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "container is not running; last exit code 2"
+        );
+    }
 }
 
 #[cfg(test)]

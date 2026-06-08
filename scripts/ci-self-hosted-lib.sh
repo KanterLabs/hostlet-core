@@ -10,6 +10,48 @@
 # Keeping these here removes a large byte-for-byte copy-paste surface that
 # previously lived in both scripts.
 
+ensure_rust_toolchain_path() {
+  local cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin"
+  case ":${PATH}:" in
+    *":${cargo_bin}:"*) ;;
+    *) export PATH="${cargo_bin}:${PATH}" ;;
+  esac
+
+  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+}
+
+ensure_rust_toolchain_path
+
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+
+ci_cargo() {
+  local cargo_bin
+  cargo_bin="$(command -v cargo 2>/dev/null || true)"
+  if [ -z "${cargo_bin}" ]; then
+    cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin/cargo"
+  fi
+  "${cargo_bin}" "$@"
+}
+
+ci_binary_path() {
+  local binary="$1"
+  printf '%s/debug/%s' "${CARGO_TARGET_DIR:-target}" "${binary}"
+}
+
+ci_build_binary() {
+  local package="$1"
+  local binary="$2"
+  ci_cargo build -p "${package}" --bin "${binary}"
+}
+
+ci_tmp_dir() {
+  local name="$1"
+  local run_id="$2"
+  local parent="${RUNNER_TEMP:-/tmp}"
+  mkdir -p "${parent}"
+  mktemp -d "${parent}/${name}-${run_id}.XXXXXX"
+}
+
 # json_get <dotted.path>: read JSON from stdin and print the value at the path,
 # exiting non-zero if any segment is missing/null.
 json_get() {
@@ -43,6 +85,15 @@ expect_status() {
     cat "${TMP_DIR}/response.txt" >&2 || true
     exit 1
   fi
+}
+
+pick_local_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
 }
 
 # start_postgres_container <image>: launch a throwaway Postgres bound to a random

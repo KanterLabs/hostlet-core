@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   linux-cli:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
@@ -80,6 +80,9 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-screenshotter:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}" \
             .
+          HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}" \
+          HOSTLET_SCREENSHOTTER_SKIP_BUILD=1 \
+            scripts/ci-screenshotter-smoke.sh
           for image in hostlet-api hostlet-web hostlet-agent hostlet-screenshotter; do
             docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"
             docker push "${IMAGE_REGISTRY}/${image}:${SHA_TAG}"

@@ -16,7 +16,7 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-const ACTIVE_DEPLOYMENT_STATUSES: &[&str] = &[
+pub(crate) const ACTIVE_DEPLOYMENT_STATUSES: &[&str] = &[
     "queued",
     "running",
     "building",

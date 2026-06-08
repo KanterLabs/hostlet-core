@@ -45,9 +45,13 @@ import {
   appVisitLabel,
   cpuDisplay,
   displayDomain,
+  diskDisplay,
   healthEventSummary,
   healthMetricDetail,
   isActiveDeploy,
+  memoryDisplay,
+  networkDisplay,
+  pidsDisplay,
   rollbackDisabledReason,
   shortSha,
   webhookSummary,
@@ -165,6 +169,9 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const deploymentStatus = app?.latestDeployment?.status || (app?.currentDeploymentId ? "success" : "not deployed");
   const active = isActiveDeploy(app?.latestDeployment?.status);
   const cpu = cpuDisplay(resources?.cpuPercent || "0.00%");
+  const memory = memoryDisplay(resources);
+  const network = networkDisplay(resources);
+  const disk = diskDisplay(resources);
   const webhook = webhookReadiness();
   const rollbackReason = rollbackDisabledReason(app, active);
   const visitHref = appVisitHref(app);
@@ -317,10 +324,10 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 {resources ? (
                   <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
                     <Metric label="CPU" value={cpu.value} detail={cpu.detail} icon={Cpu} />
-                    <Metric label="Memory" value={resources.memoryUsage} detail={resources.memoryPercent} />
-                    <Metric label="Processes" value={resources.pids} />
-                    <Metric label="Network I/O" value={resources.networkIo} />
-                    <Metric label="Disk I/O" value={resources.blockIo} />
+                    <Metric label="Memory" value={memory.value} detail={memory.detail} />
+                    <Metric label="Processes" value={pidsDisplay(resources)} />
+                    <Metric label="Network I/O" value={network.value} detail={network.detail} />
+                    <Metric label="Disk I/O" value={disk.value} detail={disk.detail} />
                     <Metric label="Container" value={app?.currentDeploymentId ? "running" : "not deployed"} />
                   </MetricsGrid>
                 ) : (

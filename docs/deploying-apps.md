@@ -19,6 +19,11 @@ If no Dockerfile exists, Hostlet can generate a Railpack deployment for common a
 
 Generated apps run as a non-root user and receive `/data` for persistent app data when applicable.
 
+Railpack builds use a BuildKit container. Set `HOSTLET_RAILPACK_BUILDKIT_KEEPALIVE=true`
+to keep it warm between builds; with keepalive enabled, Hostlet stops it after
+`HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS` of no Railpack builds (default `1800`). Set
+`HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB` to cap the BuildKit container memory.
+
 ## Compose Apps
 
 Self-hosted Compose app support is intentionally constrained.

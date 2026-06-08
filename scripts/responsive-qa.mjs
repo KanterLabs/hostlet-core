@@ -2,12 +2,18 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import net from "node:net";
 
 const root = new URL("..", import.meta.url).pathname;
 const requireFromWeb = createRequire(new URL("../apps/web/package.json", import.meta.url));
 const { chromium } = requireFromWeb("@playwright/test");
-const port = process.env.HOSTLET_RESPONSIVE_QA_PORT || "13001";
+const port = process.env.HOSTLET_RESPONSIVE_QA_PORT || String(await pickPort());
 const baseUrl = `http://127.0.0.1:${port}`;
+const screenshotDir =
+  process.env.HOSTLET_RESPONSIVE_QA_DIR ||
+  join(tmpdir(), `hostlet-responsive-qa-${process.env.GITHUB_RUN_ID || "local"}-${process.pid}`);
 const widths = [320, 375, 768, 1024, 1440];
 const routes = [
   ["/", "nav"],
@@ -17,7 +23,7 @@ const routes = [
   ["/deployments/smoke-deployment", "deployment logs"],
 ];
 
-await mkdir("/tmp/hostlet-responsive-qa", { recursive: true });
+await mkdir(screenshotDir, { recursive: true });
 
 const server = spawn(
   "pnpm",
@@ -59,7 +65,7 @@ try {
         for (const [route, label] of routes) {
           await page.goto(`${baseUrl}${route}`, { waitUntil: "networkidle" });
           await page.screenshot({
-            path: `/tmp/hostlet-responsive-qa/${width}-${safeName(label)}.png`,
+            path: `${screenshotDir}/${width}-${safeName(label)}.png`,
             fullPage: true,
           });
           const result = await page.evaluate(() => {
@@ -120,6 +126,20 @@ async function waitForServer(url) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   throw new Error(`Timed out waiting for ${url}`);
+}
+
+async function pickPort() {
+  return await new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close(() => {
+        if (address && typeof address === "object") resolve(address.port);
+        else reject(new Error("Could not allocate a local port"));
+      });
+    });
+    server.on("error", reject);
+  });
 }
 
 function safeName(value) {

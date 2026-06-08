@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
 # Export once so every cargo step below shares the same target dir.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hostlet-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/hostlet-target-local-$$}"
 
 # Print a labeled banner before each gate so a failure is easy to attribute
 # without scrolling back through cargo/pnpm output.

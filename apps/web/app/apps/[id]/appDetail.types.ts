@@ -1,10 +1,19 @@
 export type ResourceStats = {
   cpuPercent: string;
+  cpuPercentValue?: number | null;
   memoryUsage: string;
+  memoryUsageBytes?: number | null;
+  memoryLimitBytes?: number | null;
   memoryPercent: string;
+  memoryPercentValue?: number | null;
   networkIo: string;
+  networkRxBytes?: number | null;
+  networkTxBytes?: number | null;
   blockIo: string;
+  blockReadBytes?: number | null;
+  blockWriteBytes?: number | null;
   pids: string;
+  pidsCurrent?: number | null;
   sampledAt: string;
 };
 
@@ -47,13 +56,23 @@ export type AppScreenshot = {
 };
 
 export type RuntimeMetadata = {
+  runtime?: string | null;
   packagingStrategy?: string | null;
+  buildBackend?: string | null;
   generatedDockerfile?: boolean | null;
   detectedFramework?: string | null;
+  webService?: string | null;
   runtimeKind?: string | null;
   packageManager?: string | null;
+  gitSyncDurationMs?: number | null;
+  buildPlanDurationMs?: number | null;
   buildDurationMs?: number | null;
   imageSizeBytes?: number | null;
+  composeUpDurationMs?: number | null;
+  containerStartDurationMs?: number | null;
+  healthCheckDurationMs?: number | null;
+  bootDurationMs?: number | null;
+  routingDurationMs?: number | null;
 };
 
 export type App = {

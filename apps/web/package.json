@@ -1,11 +1,11 @@
 {
   "name": "@hostlet/web",
   "private": true,
-  "packageManager": "pnpm@10.33.2",
+  "packageManager": "pnpm@10.33.2+sha512.a90faf6feeab71ad6c6e57f94e0fe1a12f5dcc22cd754db40ae9593eb6a3e0b6b12e3540218bb37ae083404b1f2ce6db2a4121e979829b4aff94b99f49da1cf8",
   "scripts": {
     "dev": "next dev -H 0.0.0.0 --webpack",
     "build": "next build",
-    "lint": "tsc --noEmit",
+    "lint": "next typegen && tsc --noEmit --incremental false",
     "test:web": "playwright test",
     "responsive:qa": "node ../../scripts/responsive-qa.mjs"
   },

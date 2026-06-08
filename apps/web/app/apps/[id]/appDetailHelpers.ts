@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
+import { formatBytes } from "@/lib/format";
 import { formatTimestamp } from "@/lib/time";
-import type { AgentJob, App, RuntimeHealth, RuntimeHealthEvent } from "./appDetail.types";
+import type { AgentJob, App, ResourceStats, RuntimeHealth, RuntimeHealthEvent } from "./appDetail.types";
 
 export function webhookSummary(webhook?: App["latestWebhook"] | null) {
   if (!webhook) return "No push seen";
@@ -34,6 +35,40 @@ export function cpuDisplay(raw: string) {
     return { value: "<0.01%", detail: `${raw} CPU` };
   }
   return { value: raw, detail: "Docker live sample" };
+}
+
+function metricBytes(bytes?: number | null) {
+  return typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0 ? formatBytes(bytes) : null;
+}
+
+export function memoryDisplay(resources?: ResourceStats | null) {
+  if (!resources) return { value: "waiting", detail: "no sample" };
+  const used = metricBytes(resources.memoryUsageBytes);
+  const limit = metricBytes(resources.memoryLimitBytes);
+  if (used && limit) return { value: used, detail: `${limit} limit · ${resources.memoryPercent}` };
+  if (used) return { value: used, detail: resources.memoryPercent };
+  return { value: resources.memoryUsage, detail: resources.memoryPercent };
+}
+
+export function networkDisplay(resources?: ResourceStats | null) {
+  if (!resources) return { value: "waiting", detail: "no sample" };
+  const rx = metricBytes(resources.networkRxBytes);
+  const tx = metricBytes(resources.networkTxBytes);
+  if (rx && tx) return { value: `${rx} RX`, detail: `${tx} TX` };
+  return { value: resources.networkIo, detail: "Docker live sample" };
+}
+
+export function diskDisplay(resources?: ResourceStats | null) {
+  if (!resources) return { value: "waiting", detail: "no sample" };
+  const read = metricBytes(resources.blockReadBytes);
+  const written = metricBytes(resources.blockWriteBytes);
+  if (read && written) return { value: `${read} read`, detail: `${written} written` };
+  return { value: resources.blockIo, detail: "Docker live sample" };
+}
+
+export function pidsDisplay(resources?: ResourceStats | null) {
+  if (!resources) return "waiting";
+  return typeof resources.pidsCurrent === "number" ? String(resources.pidsCurrent) : resources.pids;
 }
 
 export function healthMetricDetail(health?: RuntimeHealth | null) {

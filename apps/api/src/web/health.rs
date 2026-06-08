@@ -44,7 +44,11 @@ pub async fn app_resources(
         r#"
         SELECT d.container_name, s.kind,
                rs.cpu_percent, rs.memory_usage, rs.memory_percent,
-               rs.network_io, rs.block_io, rs.pids, rs.sampled_at
+               rs.network_io, rs.block_io, rs.pids,
+               rs.cpu_percent_value, rs.memory_usage_bytes, rs.memory_limit_bytes,
+               rs.memory_percent_value, rs.network_rx_bytes, rs.network_tx_bytes,
+               rs.block_read_bytes, rs.block_write_bytes, rs.pids_current,
+               rs.sampled_at
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN deployments d ON d.id = a.current_deployment_id
@@ -59,48 +63,83 @@ pub async fn app_resources(
     let Ok(Some(row)) = row else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let container = match resource_container(&row) {
+        Ok(container) => container,
+        Err(response) => return response,
+    };
+    let sampled_at = match fresh_sample_time(&row) {
+        Ok(sampled_at) => sampled_at,
+        Err(response) => return response,
+    };
+    Json(resource_snapshot_json(&row, &container, sampled_at)).into_response()
+}
+
+#[allow(clippy::result_large_err)]
+fn resource_container(row: &sqlx::postgres::PgRow) -> Result<String, Response> {
     if row.get::<String, _>("kind") != "local" {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             "resource usage is currently available for local apps only",
         )
-            .into_response();
+            .into_response());
     }
-    let Some(container) = row.get::<Option<String>, _>("container_name") else {
-        return (
-            StatusCode::NOT_FOUND,
-            "app does not have a running container yet",
-        )
-            .into_response();
-    };
+    row.get::<Option<String>, _>("container_name")
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "app does not have a running container yet",
+            )
+                .into_response()
+        })
+}
 
+#[allow(clippy::result_large_err)]
+fn fresh_sample_time(
+    row: &sqlx::postgres::PgRow,
+) -> Result<chrono::DateTime<chrono::Utc>, Response> {
     let sampled_at = row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("sampled_at");
     let Some(sampled_at) = sampled_at else {
-        return (
+        return Err((
             StatusCode::ACCEPTED,
             "resource usage is waiting for the local agent",
         )
-            .into_response();
+            .into_response());
     };
     if chrono::Utc::now().signed_duration_since(sampled_at) > chrono::Duration::seconds(45) {
-        return (
+        return Err((
             StatusCode::ACCEPTED,
             "resource usage is waiting for a fresh local agent sample",
         )
-            .into_response();
+            .into_response());
     }
-    Json(serde_json::json!({
+    Ok(sampled_at)
+}
+
+fn resource_snapshot_json(
+    row: &sqlx::postgres::PgRow,
+    container: &str,
+    sampled_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    serde_json::json!({
         "container": container,
         "name": container,
         "cpuPercent": row.get::<Option<String>, _>("cpu_percent").unwrap_or_else(|| "0%".into()),
         "memoryUsage": row.get::<Option<String>, _>("memory_usage").unwrap_or_else(|| "0B / 0B".into()),
+        "memoryUsageBytes": row.get::<Option<i64>, _>("memory_usage_bytes"),
+        "memoryLimitBytes": row.get::<Option<i64>, _>("memory_limit_bytes"),
         "memoryPercent": row.get::<Option<String>, _>("memory_percent").unwrap_or_else(|| "0%".into()),
+        "memoryPercentValue": row.get::<Option<f64>, _>("memory_percent_value"),
         "networkIo": row.get::<Option<String>, _>("network_io").unwrap_or_else(|| "0B / 0B".into()),
+        "networkRxBytes": row.get::<Option<i64>, _>("network_rx_bytes"),
+        "networkTxBytes": row.get::<Option<i64>, _>("network_tx_bytes"),
         "blockIo": row.get::<Option<String>, _>("block_io").unwrap_or_else(|| "0B / 0B".into()),
+        "blockReadBytes": row.get::<Option<i64>, _>("block_read_bytes"),
+        "blockWriteBytes": row.get::<Option<i64>, _>("block_write_bytes"),
         "pids": row.get::<Option<String>, _>("pids").unwrap_or_else(|| "0".into()),
+        "pidsCurrent": row.get::<Option<i64>, _>("pids_current"),
+        "cpuPercentValue": row.get::<Option<f64>, _>("cpu_percent_value"),
         "sampledAt": sampled_at
-    }))
-    .into_response()
+    })
 }
 
 pub async fn app_health(

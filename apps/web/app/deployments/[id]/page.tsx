@@ -15,13 +15,23 @@ import {
 } from "./deploymentStatus";
 
 type RuntimeMetadata = {
+  runtime?: string | null;
   packagingStrategy?: string | null;
+  buildBackend?: string | null;
   generatedDockerfile?: boolean | null;
   detectedFramework?: string | null;
+  webService?: string | null;
   runtimeKind?: string | null;
   packageManager?: string | null;
+  gitSyncDurationMs?: number | null;
+  buildPlanDurationMs?: number | null;
   buildDurationMs?: number | null;
   imageSizeBytes?: number | null;
+  composeUpDurationMs?: number | null;
+  containerStartDurationMs?: number | null;
+  healthCheckDurationMs?: number | null;
+  bootDurationMs?: number | null;
+  routingDurationMs?: number | null;
 };
 
 type Deployment = {
@@ -39,6 +49,10 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
 
   const status = deployment?.status || "loading";
   const activeIndex = DEPLOYMENT_STEPS.indexOf(status as (typeof DEPLOYMENT_STEPS)[number]);
+  const metadata = deployment?.runtimeMetadata;
+  const isCompose = metadata?.runtime === "compose";
+  const packaging = isCompose ? "Docker Compose" : metadata?.packagingStrategy || "auto";
+  const framework = isCompose ? metadata?.webService ? `service ${metadata.webService}` : "Compose service" : metadata?.detectedFramework || "Repository Dockerfile";
 
   return (
     <AppShell>
@@ -83,15 +97,23 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                 />
               )}
               {deployment?.failure && <Notice tone="danger" description={deployment.failure} />}
-              {deployment?.runtimeMetadata && Object.keys(deployment.runtimeMetadata).length > 0 && (
+              {metadata && Object.keys(metadata).length > 0 && (
                 <Panel>
-                  <SectionHeader title="Build metrics" />
+                  <SectionHeader title="Deployment metrics" />
                   <DataList className="mt-4">
-                    <SummaryItem label="Packaging" value={deployment.runtimeMetadata.packagingStrategy || "auto"} />
-                    <SummaryItem label="Framework" value={deployment.runtimeMetadata.detectedFramework || "Repository Dockerfile"} />
-                    <SummaryItem label="Package manager" value={deployment.runtimeMetadata.packageManager || "n/a"} />
-                    <SummaryItem label="Build time" value={formatDuration(deployment.runtimeMetadata.buildDurationMs)} />
-                    <SummaryItem label="Image size" value={formatBytes(deployment.runtimeMetadata.imageSizeBytes)} />
+                    <SummaryItem label="Packaging" value={packaging} />
+                    <SummaryItem label="Framework" value={framework} />
+                    <SummaryItem label="Build backend" value={metadata.buildBackend || (isCompose ? "compose" : "docker")} />
+                    <SummaryItem label="Package manager" value={metadata.packageManager || "n/a"} />
+                    <SummaryItem label="Git sync" value={formatDuration(metadata.gitSyncDurationMs)} />
+                    <SummaryItem label="Build plan" value={formatDuration(metadata.buildPlanDurationMs)} />
+                    <SummaryItem label="Build time" value={formatDuration(metadata.buildDurationMs)} />
+                    <SummaryItem label="Image size" value={formatBytes(metadata.imageSizeBytes)} />
+                    {isCompose && <SummaryItem label="Compose up" value={formatDuration(metadata.composeUpDurationMs)} />}
+                    <SummaryItem label={isCompose ? "Startup" : "Container start"} value={formatDuration(metadata.containerStartDurationMs)} />
+                    <SummaryItem label="Health wait" value={formatDuration(metadata.healthCheckDurationMs)} />
+                    <SummaryItem label="Boot time" value={formatDuration(metadata.bootDurationMs)} />
+                    <SummaryItem label="Routing" value={formatDuration(metadata.routingDurationMs)} />
                   </DataList>
                 </Panel>
               )}

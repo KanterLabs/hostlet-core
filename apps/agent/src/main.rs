@@ -34,7 +34,7 @@ pub(crate) use build::*;
 pub(crate) use compose::*;
 pub(crate) use ops::*;
 pub(crate) use railpack::*;
-pub(crate) use runtime::{Config, LocalRouter};
+pub(crate) use runtime::{reported_deployment_failure, Config, LocalRouter};
 pub(crate) use validation::*;
 
 #[tokio::main]
