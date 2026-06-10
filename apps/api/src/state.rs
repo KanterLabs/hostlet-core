@@ -1,4 +1,5 @@
 use crate::crypto::{hash_token, nonempty_env, Crypto};
+use crate::env::{bool_env, http_client, screenshot_dir, secret_from_env};
 use crate::rate_limit::RateLimiter;
 use crate::screenshots::{NoopScreenshotHooks, ScreenshotHooks};
 use anyhow::{bail, Context};
@@ -7,10 +8,13 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
+
+// Re-export so that callers using `crate::state::normalize_origin` —
+// including cloud's `lib.rs` overlay — resolve without change.
+pub use crate::env::normalize_origin;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostletMode {
@@ -214,13 +218,6 @@ fn public_web_url() -> String {
     std::env::var("PUBLIC_WEB_URL").unwrap_or_else(|_| "http://localhost:3000".into())
 }
 
-fn screenshot_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("HOSTLET_SCREENSHOT_DIR")
-            .unwrap_or_else(|_| "/var/lib/hostlet/screenshots".into()),
-    )
-}
-
 fn base_domain() -> Option<String> {
     nonempty_env("HOSTLET_BASE_DOMAIN")
         .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase())
@@ -288,36 +285,6 @@ pub(crate) fn local_server_id_from_env() -> anyhow::Result<Uuid> {
 fn parse_local_server_id(value: Option<String>) -> anyhow::Result<Uuid> {
     let value = value.unwrap_or_else(|| "00000000-0000-0000-0000-000000000001".into());
     Uuid::parse_str(&value).context("LOCAL_SERVER_ID must be a UUID")
-}
-
-fn secret_from_env(key: &str, allow_insecure_dev_defaults: bool) -> anyhow::Result<String> {
-    let Some(value) = nonempty_env(key) else {
-        bail!("{key} is required");
-    };
-    if !allow_insecure_dev_defaults && value.len() < 32 {
-        bail!("{key} must be at least 32 characters");
-    }
-    Ok(value)
-}
-
-fn http_client() -> anyhow::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(20))
-        .user_agent("Hostlet")
-        .build()
-        .context("failed to build HTTP client")
-}
-
-fn bool_env(key: &str) -> bool {
-    std::env::var(key)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -396,35 +363,9 @@ fn push_origin(origins: &mut Vec<String>, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn normalize_origin(value: &str) -> Option<String> {
-    let url = url::Url::parse(value).ok()?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return None;
-    }
-    let host = url.host_str()?;
-    let mut origin = format!("{}://{}", url.scheme(), host);
-    if let Some(port) = url.port() {
-        origin.push_str(&format!(":{port}"));
-    }
-    Some(origin)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalizes_origin_without_path() {
-        assert_eq!(
-            normalize_origin("http://10.0.0.194:3000/settings").as_deref(),
-            Some("http://10.0.0.194:3000")
-        );
-    }
-
-    #[test]
-    fn rejects_non_http_origins() {
-        assert!(normalize_origin("file:///tmp/index.html").is_none());
-    }
 
     #[test]
     fn local_server_id_uses_stable_default_when_env_is_missing() {
