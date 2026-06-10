@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+pub mod crypto;
 mod inference;
 
 pub use inference::{
@@ -166,6 +167,16 @@ pub fn valid_env_value(value: &str) -> bool {
     value.len() <= 65_536
 }
 
+/// Validates a Hostlet-managed Docker container name: the `hostlet-` prefix, at
+/// most 128 chars, and restricted to alphanumerics plus `- _ .`.
+pub fn valid_container_name(value: &str) -> bool {
+    value.starts_with("hostlet-")
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 pub fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
@@ -296,6 +307,15 @@ mod contract_helper_tests {
         );
         assert_eq!(parse_github_repo("owner/repo"), Some("owner/repo".into()));
         assert_eq!(parse_github_repo("https://example.com/owner/repo"), None);
+    }
+
+    #[test]
+    fn container_names_are_limited_to_managed_hostlet_names() {
+        assert!(valid_container_name("hostlet-app-123"));
+        assert!(valid_container_name("hostlet-app_123.local"));
+        assert!(!valid_container_name("other-app-123"));
+        assert!(!valid_container_name("hostlet-app/../../bad"));
+        assert!(!valid_container_name(&format!("hostlet-{}", "a".repeat(140))));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::crypto::{hash_token, Crypto};
+use crate::crypto::{hash_token, nonempty_env, Crypto};
 use crate::rate_limit::RateLimiter;
 use crate::screenshots::{NoopScreenshotHooks, ScreenshotHooks};
 use anyhow::{bail, Context};
@@ -307,13 +307,6 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
         .user_agent("Hostlet")
         .build()
         .context("failed to build HTTP client")
-}
-
-fn nonempty_env(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn bool_env(key: &str) -> bool {

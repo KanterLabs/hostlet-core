@@ -863,14 +863,12 @@ dependencies = [
  "anyhow",
  "base64",
  "futures-util",
- "hmac",
  "hostlet-contracts",
  "http",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -893,7 +891,6 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hex",
- "hmac",
  "hostlet-contracts",
  "jsonwebtoken",
  "rand 0.8.6",
@@ -916,8 +913,10 @@ dependencies = [
 name = "hostlet-contracts"
 version = "0.2.0"
 dependencies = [
+ "hmac",
  "serde",
  "serde_json",
+ "sha2",
  "url",
  "uuid",
 ]
