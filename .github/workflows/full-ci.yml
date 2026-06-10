@@ -79,6 +79,9 @@ jobs:
   full-compose-and-release:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     env:
+      # Cap cargo parallelism (release build is the most expensive cargo
+      # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
+      CARGO_BUILD_JOBS: "2"
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
       PUBLIC_WEB_URL: http://localhost:3000

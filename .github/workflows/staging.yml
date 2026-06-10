@@ -31,6 +31,11 @@ jobs:
 
   rust:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
+    env:
+      # Cap cargo parallelism: several workflows from both repos land on one
+      # 4-vCPU/23Gi homelab VM; uncapped workspace builds stacking up OOM'd the
+      # hypervisor and hard-reset the box (2026-06-10 crash-loop incident).
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
