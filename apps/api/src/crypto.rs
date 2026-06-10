@@ -127,5 +127,4 @@ mod tests {
         assert!(verify_token("server-token", &hash));
         assert!(!verify_token("wrong", &hash));
     }
-
 }

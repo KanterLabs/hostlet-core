@@ -373,7 +373,10 @@ mod contract_helper_tests {
         assert!(valid_container_name("hostlet-app_123.local"));
         assert!(!valid_container_name("other-app-123"));
         assert!(!valid_container_name("hostlet-app/../../bad"));
-        assert!(!valid_container_name(&format!("hostlet-{}", "a".repeat(140))));
+        assert!(!valid_container_name(&format!(
+            "hostlet-{}",
+            "a".repeat(140)
+        )));
     }
 
     #[test]

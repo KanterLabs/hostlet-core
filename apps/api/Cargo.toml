@@ -12,6 +12,9 @@ base64.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 futures-util.workspace = true
+# Not used by core's api directly (HMAC moved to crates/contracts), but the
+# cloud api overlay (apps/api/src/web/) shares this manifest and uses hmac directly.
+hmac.workspace = true
 hostlet-contracts = { path = "../../crates/contracts" }
 jsonwebtoken.workspace = true
 reqwest.workspace = true
