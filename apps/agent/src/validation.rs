@@ -103,9 +103,39 @@ fn yaml_contains_key(mapping: &serde_yaml::Mapping, key: &str) -> bool {
     mapping.contains_key(serde_yaml::Value::String(key.to_string()))
 }
 
+fn validate_compose_top_level_volumes(value: &serde_yaml::Value) -> anyhow::Result<()> {
+    let volumes = value
+        .as_mapping()
+        .context("compose top-level volumes must be a mapping")?;
+    for (name, volume) in volumes {
+        let Some(volume_name) = name.as_str() else {
+            bail!("compose volume names must be strings");
+        };
+        match volume {
+            serde_yaml::Value::Null => {}
+            serde_yaml::Value::Mapping(mapping) => {
+                for key in ["driver", "driver_opts", "external"] {
+                    if yaml_contains_key(mapping, key) {
+                        bail!("compose volume {volume_name} uses unsupported field {key}");
+                    }
+                }
+            }
+            _ => bail!("compose volume {volume_name} must be an object"),
+        }
+    }
+    Ok(())
+}
+
+fn is_docker_socket_path(value: &str) -> bool {
+    value == "/var/run/docker.sock"
+}
+
 pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
     let value: serde_yaml::Value =
         serde_yaml::from_str(contents).context("compose file is not valid YAML")?;
+    if let Some(volumes) = value.get("volumes") {
+        validate_compose_top_level_volumes(volumes)?;
+    }
     let services = value
         .get("services")
         .and_then(|v| v.as_mapping())
@@ -141,6 +171,9 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
                     if value.starts_with('/') || value.contains("../") {
                         bail!("compose service {service_name} uses an unsupported host bind mount");
                     }
+                    if value.split(':').nth(1).is_some_and(is_docker_socket_path) {
+                        bail!("compose service {service_name} mounts the Docker socket");
+                    }
                     continue;
                 }
                 if let Some(mapping) = volume.as_mapping() {
@@ -153,6 +186,14 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
                         .unwrap_or("");
                     if volume_type == "bind" || source.starts_with('/') || source.contains("../") {
                         bail!("compose service {service_name} uses an unsupported host bind mount");
+                    }
+                    let target = yaml_get(mapping, "target")
+                        .or_else(|| yaml_get(mapping, "dst"))
+                        .or_else(|| yaml_get(mapping, "destination"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if is_docker_socket_path(target) {
+                        bail!("compose service {service_name} mounts the Docker socket");
                     }
                 }
             }
@@ -509,5 +550,48 @@ services:
       - hostlet
 "#;
         assert!(validate_compose_subset(service_network, "web").is_err());
+    }
+
+    #[test]
+    fn compose_validation_rejects_host_backed_named_volumes_and_socket_targets() {
+        let driver_opts = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - host-root:/mnt/host
+volumes:
+  host-root:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /
+"#;
+        assert!(validate_compose_subset(driver_opts, "web").is_err());
+
+        let socket_target = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - docker-sock:/var/run/docker.sock
+volumes:
+  docker-sock:
+"#;
+        assert!(validate_compose_subset(socket_target, "web").is_err());
+
+        let long_socket_target = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - type: volume
+        source: docker-sock
+        target: /var/run/docker.sock
+volumes:
+  docker-sock:
+"#;
+        assert!(validate_compose_subset(long_socket_target, "web").is_err());
     }
 }

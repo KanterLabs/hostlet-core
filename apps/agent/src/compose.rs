@@ -235,53 +235,56 @@ pub(crate) async fn deploy_compose(
         "gitSyncDurationMs": git_sync_duration_ms,
     });
     let health_check_started = Instant::now();
-    let health_check_duration = match wait_health(
-        &cfg,
-        deployment_id,
-        &container,
-        internal_port,
-        health_path,
-    )
-    .await
-    {
-        Ok(duration) => duration,
-        Err(err) => {
-            let _ = run_log_in_dir(
-                &cfg,
-                deployment_id,
-                project_dir,
-                "docker",
-                &compose_invocation(
-                    &project,
-                    compose_file,
-                    &override_file,
-                    &["logs", "--tail", "120"],
-                )?,
-            )
-            .await;
-            let failure = format!("Compose health check failed: {err}. The previous working route was preserved; inspect Compose service logs for details.");
-            let runtime_metadata = add_startup_runtime_metadata(
-                runtime_metadata,
-                container_start_duration_ms,
-                health_check_started.elapsed().as_millis(),
-            );
-            status_extra(
-                &cfg,
-                deployment_id,
-                "failed",
-                StatusDetails {
-                    failure: Some(&failure),
-                    container: Some(&container),
-                    published_port: Some(internal_port),
-                    compose_project: Some(&project),
-                    runtime_metadata: Some(runtime_metadata),
-                    ..StatusDetails::default()
-                },
-            )
-            .await;
-            return Ok(());
-        }
-    };
+    let health_check_duration =
+        match wait_health(&cfg, deployment_id, &container, internal_port, health_path).await {
+            Ok(duration) => duration,
+            Err(err) => {
+                let _ = run_log_in_dir(
+                    &cfg,
+                    deployment_id,
+                    project_dir,
+                    "docker",
+                    &compose_invocation(
+                        &project,
+                        compose_file,
+                        &override_file,
+                        &["logs", "--tail", "120"],
+                    )?,
+                )
+                .await;
+                let cleanup_failed = match remove_compose_project_resources(&project).await {
+                    Ok(()) => None,
+                    Err(cleanup_err) => {
+                        let cleanup_log = format!(
+                            "Failed to remove unhealthy Compose project {project}: {cleanup_err}"
+                        );
+                        log(&cfg, deployment_id, "stderr", &cleanup_log).await;
+                        Some(cleanup_err)
+                    }
+                };
+                let failure = compose_health_failure_message(&err, cleanup_failed.as_ref());
+                let runtime_metadata = add_startup_runtime_metadata(
+                    runtime_metadata,
+                    container_start_duration_ms,
+                    health_check_started.elapsed().as_millis(),
+                );
+                status_extra(
+                    &cfg,
+                    deployment_id,
+                    "failed",
+                    StatusDetails {
+                        failure: Some(&failure),
+                        container: Some(&container),
+                        published_port: Some(internal_port),
+                        compose_project: Some(&project),
+                        runtime_metadata: Some(runtime_metadata),
+                        ..StatusDetails::default()
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
     let runtime_metadata = add_startup_runtime_metadata(
         runtime_metadata,
         container_start_duration_ms,
@@ -610,6 +613,20 @@ async fn run_log_streamed(
     Ok(())
 }
 
+fn compose_health_failure_message(
+    health_err: &anyhow::Error,
+    cleanup_failed: Option<&anyhow::Error>,
+) -> String {
+    match cleanup_failed {
+        Some(cleanup_err) => format!(
+            "Compose health check failed: {health_err}. Failed to remove the unhealthy Compose project: {cleanup_err}. The previous working route was preserved; inspect Compose service logs for details."
+        ),
+        None => format!(
+            "Compose health check failed: {health_err}. Removed the unhealthy Compose project and preserved the previous working route."
+        ),
+    }
+}
+
 fn command_start_failure_log_line(bin: &str, err: &std::io::Error) -> String {
     redact(&format!("Failed to start {bin}: {err}"))
 }
@@ -736,6 +753,20 @@ mod tests {
         let line = command_start_failure_log_line("railpack", &err);
 
         assert_eq!(line, "[redacted]");
+    }
+
+    #[test]
+    fn compose_health_failure_message_reports_cleanup_result() {
+        let health_err = anyhow::anyhow!("timeout");
+        let cleanup_err = anyhow::anyhow!("docker failed");
+
+        let cleaned = compose_health_failure_message(&health_err, None);
+        assert!(cleaned.contains("Removed the unhealthy Compose project"));
+        assert!(cleaned.contains("preserved the previous working route"));
+
+        let failed = compose_health_failure_message(&health_err, Some(&cleanup_err));
+        assert!(failed.contains("Failed to remove the unhealthy Compose project"));
+        assert!(failed.contains("docker failed"));
     }
 
     #[test]

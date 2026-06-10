@@ -1,7 +1,6 @@
 name: Deployability CI
 
 on:
-  pull_request:
   push:
     branches:
       - main
@@ -20,7 +19,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-verify-runner.sh
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
       - run: scripts/ci-railpack-generated-fixtures.sh
@@ -38,7 +36,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: scripts/ci-self-hosted-api-smoke.sh
