@@ -12,7 +12,6 @@ base64.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 futures-util.workspace = true
-hmac.workspace = true
 hostlet-contracts = { path = "../../crates/contracts" }
 jsonwebtoken.workspace = true
 reqwest.workspace = true

@@ -363,11 +363,11 @@ async fn sync_checkout(
 pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
     let app_id = Uuid::parse_str(p["app_id"].as_str().context("app_id")?)?;
-    let app_name = safe_name(&format!("app-{app_id}"));
+    let app_name = app_slug(&format!("app-{app_id}"));
     let route_key = p
         .get("route_key")
         .and_then(|v| v.as_str())
-        .map(safe_name)
+        .map(app_slug)
         .unwrap_or_else(|| app_name.clone());
     let repo = p["repo"].as_str().context("repo")?;
     let branch = p["branch"].as_str().context("branch")?;

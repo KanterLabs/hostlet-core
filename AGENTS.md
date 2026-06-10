@@ -20,6 +20,60 @@ production‑only deployment detail **out of this repo** — it is public. See `
   tracks core `staging`; its `main` pins a core `vX.Y.Z` tag. Don't rewrite public history;
   don't force‑push shared branches.
 
+## Overlay architecture and placement rules
+
+**Core is a submodule consumed by hostlet-cloud (`vendor/hostlet-core`).** Cloud's
+build overlays core files at file granularity — a same-named cloud file replaces the
+core file wholesale; a file that has no cloud counterpart is inherited unchanged.
+
+### API overlay (files cloud currently overrides — regenerate before trusting)
+
+Cloud overrides mean the whole file is forked; shared helpers placed there will drift
+independently in each repo.  **Shared helpers must NOT live in any of these files:**
+
+```
+apps/api/src/state.rs            apps/api/src/lib.rs
+apps/api/src/main.rs             apps/api/src/github.rs
+apps/api/src/github/inference.rs
+apps/api/src/web/app_delete.rs   apps/api/src/web/app_env.rs
+apps/api/src/web/apps.rs         apps/api/src/web/audit.rs
+apps/api/src/web/cleanup.rs      apps/api/src/web/dns/cloudflare.rs
+apps/api/src/web/dns/mod.rs      apps/api/src/web/health.rs
+apps/api/src/web/jobs.rs         apps/api/src/web/mod.rs
+apps/api/src/web/servers.rs      apps/api/src/web/system.rs
+apps/api/src/web/validation.rs
+```
+
+Cloud-only files (additions, no core counterpart) are **not** overrides: `auth/`,
+`cloud/`, `github_app.rs`, `github/{hooks,repos,status,webhook}.rs`,
+`web/{billing,dto,portfolio_*,update_checks,version}*`.
+
+**Where to put new shared Rust helpers:** `apps/api/src/env.rs` (env/config
+utilities) or any other file not listed above. Cloud inherits these without forking.
+
+### Web overlay
+
+Cloud's web build (see `scripts/lib/cloud-web-ci.sh::cloud_web_prepare_overlay`):
+1. Copies all of core's `apps/web` as the base.
+2. **Deletes core's `app/` wholesale** (except `globals.css`), then copies cloud's `app/` in.
+3. **Merges** cloud's `components/` over core's (cloud wins on conflicts).
+4. **Merges** cloud's `public/` over core's (cloud wins on conflicts).
+5. Inherits core's `lib/` untouched.
+
+Placement rules:
+- Core web shared helpers belong in `apps/web/lib/` — cloud inherits `lib/` untouched.
+- A `lib/` module must **never** import from `@/app/...`; that path is replaced by
+  cloud's `app/` and the import will break the cloud build.
+- A `lib/` module must be self-contained or import only other `lib/` files and
+  `components/` files cloud does not override (currently `GitHubStatus.tsx` and
+  `Nav.tsx` are overridden — do not depend on them from `lib/`).
+
+### Drift check (cloud CI)
+
+`scripts/check-core-drift.sh` (in cloud) reports when any overridden file in core
+changed since the pinned submodule SHA.  It is non-blocking (warning output, exit 0)
+but should be reviewed before every submodule advance.
+
 ## Validate before you push
 
 ```bash

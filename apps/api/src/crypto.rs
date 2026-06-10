@@ -4,11 +4,15 @@ use aes_gcm::{
 };
 use anyhow::{bail, Context};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use hmac::{Hmac, Mac};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use sha2::{Digest, Sha256};
 
-type HmacSha256 = Hmac<Sha256>;
+// HMAC signing + constant-time comparison live in `hostlet_contracts::crypto`
+// (the crate both binaries share) so the agent and api use one implementation.
+// Re-exported here so existing `crate::crypto::*` paths — including cloud's
+// overlay, which does not override this file — resolve unchanged.
+pub use hostlet_contracts::crypto::{constant_time_eq, sign, verify_signature};
+
 #[derive(Clone)]
 pub struct Crypto {
     cipher: Aes256Gcm,
@@ -83,25 +87,6 @@ pub fn verify_token(token: &str, expected_hash: &str) -> bool {
     constant_time_eq(actual.as_bytes(), expected_hash.as_bytes())
 }
 
-pub fn sign(secret: &str, payload: &[u8]) -> String {
-    // Safe: HMAC accepts a key of any length, so construction never fails.
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(payload);
-    format!("sha256={}", hex_bytes(&mac.finalize().into_bytes()))
-}
-
-pub fn verify_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
-    let expected = sign(secret, payload);
-    constant_time_eq(expected.as_bytes(), signature.as_bytes())
-}
-
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
 pub fn random_token(len: usize) -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -110,15 +95,17 @@ pub fn random_token(len: usize) -> String {
         .collect()
 }
 
-fn nonempty_env(key: &str) -> Option<String> {
+/// Reads an environment variable, trims it, and returns `None` when it is
+/// missing or empty after trimming.
+///
+/// Defined here (a file cloud does not override) so cloud's overlay inherits a
+/// single binary-local definition; env access is binary-local policy, so this
+/// stays out of `contracts`.
+pub(crate) fn nonempty_env(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -141,11 +128,4 @@ mod tests {
         assert!(!verify_token("wrong", &hash));
     }
 
-    #[test]
-    fn verifies_hmac_signature() {
-        let payload = br#"{"ref":"refs/heads/main"}"#;
-        let sig = sign("secret", payload);
-        assert!(verify_signature("secret", payload, &sig));
-        assert!(!verify_signature("secret", b"{}", &sig));
-    }
 }

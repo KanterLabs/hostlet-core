@@ -2,6 +2,11 @@
 # Shared helpers for the self-hosted CI smoke / E2E scripts
 # (ci-self-hosted-api-smoke.sh and ci-self-hosted-deploy-e2e.sh).
 #
+# CROSS-REPO CONTRACT: this file is also sourced by hostlet-cloud scripts via
+# vendor/hostlet-core/scripts/. Any change to function signatures or semantics
+# (pick_local_port, ci_cargo, ci_build_binary, etc.) is a breaking change for
+# cloud CI. Update callers in both repos together when modifying these APIs.
+#
 # This file is meant to be *sourced*, not executed. The functions below rely on
 # variables the caller exports/sets at runtime:
 #   - signed_cookie:  ${SESSION_SECRET}

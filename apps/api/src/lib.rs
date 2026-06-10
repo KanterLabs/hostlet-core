@@ -3,6 +3,7 @@ pub mod apps;
 pub mod auth;
 pub mod crypto;
 pub mod deploy;
+pub mod env;
 pub mod github;
 pub mod policies;
 pub mod rate_limit;

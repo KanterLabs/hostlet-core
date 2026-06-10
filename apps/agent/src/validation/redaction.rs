@@ -1,28 +1,10 @@
 //! Security helpers: HMAC job-signature verification, constant-time comparison,
 //! and redaction of secrets from log lines and logged command arguments.
 
-use super::super::*;
-
-pub(crate) fn verify_signature(secret: &str, payload: &[u8], signature: &str) -> bool {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(payload);
-    let expected = format!(
-        "sha256={}",
-        mac.finalize()
-            .into_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    );
-    constant_time_eq(expected.as_bytes(), signature.as_bytes())
-}
-
-pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
+// HMAC job-signature verification lives in `hostlet_contracts::crypto` (shared
+// with the api). Re-exported so the crate-wide `verify_signature` path used by
+// `runtime.rs` resolves unchanged.
+pub(crate) use hostlet_contracts::crypto::verify_signature;
 
 pub(crate) fn redact(line: &str) -> String {
     if let Some(redacted) = redact_url_credentials(line) {

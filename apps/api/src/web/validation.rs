@@ -7,8 +7,8 @@ pub(in crate::web) use serialization::{app_json, health_json};
 // Re-export the contract-level validators directly so callers in `crate::web`
 // can use them by name without a hand-written passthrough wrapper per function.
 pub(in crate::web) use hostlet_contracts::{
-    clean_command, clean_optional, clean_packaging_strategy, clean_runtime_kind, valid_branch,
-    valid_domain, valid_env_key, valid_env_value, valid_health_path, valid_hostname,
+    app_slug, clean_command, clean_optional, clean_packaging_strategy, clean_runtime_kind,
+    valid_branch, valid_domain, valid_env_key, valid_env_value, valid_health_path, valid_hostname,
     valid_repo_full_name, valid_root_directory,
 };
 
@@ -20,27 +20,6 @@ pub(in crate::web) fn clean_runtime_config(value: &serde_json::Value) -> Result<
         return Err("runtime config is too large");
     }
     Ok(())
-}
-
-pub(in crate::web) fn app_slug(value: &str) -> String {
-    let slug = value
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-    if slug.is_empty() {
-        "app".into()
-    } else {
-        slug
-    }
 }
 
 pub(in crate::web) fn valid_app_name(value: &str) -> bool {
