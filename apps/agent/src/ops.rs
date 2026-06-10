@@ -319,32 +319,7 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     let output_dir = cfg.workdir.join("screenshots").join(job_id.to_string());
     tokio::fs::create_dir_all(&output_dir).await?;
     let output_file = output_dir.join("screenshot.jpg");
-    let output_dir_string = output_dir.to_string_lossy().to_string();
     let size_env = format!("HOSTLET_SCREENSHOT_SIZE={width}x{height}");
-    let volume_arg = format!("{output_dir_string}:/out");
-    let args = [
-        "run",
-        "--rm",
-        "--network",
-        "host",
-        "--security-opt",
-        "no-new-privileges:true",
-        "--cap-drop",
-        "ALL",
-        "--memory",
-        "512m",
-        "--cpus",
-        "1",
-        "--tmpfs",
-        "/tmp:rw,nosuid,size=256m",
-        "-e",
-        &size_env,
-        "-v",
-        &volume_arg,
-        screenshotter_image(payload),
-        capture_url,
-        "/out/screenshot.jpg",
-    ];
     log(
         cfg,
         deployment_id,
@@ -352,19 +327,14 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
         "Capturing deployment screenshot.",
     )
     .await;
-    let output = command_output("docker", &args, Duration::from_secs(45)).await?;
-    if !output.status.success() {
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        bail!(
-            "screenshotter exited with {}: {}",
-            output.status,
-            combined.trim()
-        );
-    }
+    run_screenshotter_container(
+        job_id,
+        screenshotter_image(payload),
+        capture_url,
+        &size_env,
+        &output_file,
+    )
+    .await?;
     let bytes = tokio::fs::read(&output_file)
         .await
         .context("screenshotter did not produce an image")?;
@@ -390,6 +360,120 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     )
     .await;
     Ok(())
+}
+
+const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/tmp/hostlet-screenshot.jpg";
+
+async fn run_screenshotter_container(
+    job_id: Uuid,
+    image: &str,
+    capture_url: &str,
+    size_env: &str,
+    output_file: &Path,
+) -> anyhow::Result<()> {
+    let container_name = screenshot_container_name(job_id);
+    remove_screenshot_container(&container_name).await;
+    let create_args = screenshot_create_args(&container_name, size_env, image, capture_url);
+    let create_refs = create_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let create_output = command_output("docker", &create_refs, Duration::from_secs(30)).await?;
+    if !create_output.status.success() {
+        bail!(
+            "screenshotter container create failed with {}: {}",
+            create_output.status,
+            command_combined_output(&create_output).trim()
+        );
+    }
+
+    let result = async {
+        let start_output = command_output(
+            "docker",
+            &["start", "--attach", &container_name],
+            Duration::from_secs(45),
+        )
+        .await?;
+        if !start_output.status.success() {
+            bail!(
+                "screenshotter exited with {}: {}",
+                start_output.status,
+                command_combined_output(&start_output).trim()
+            );
+        }
+
+        let copy_source = format!("{container_name}:{SCREENSHOT_CONTAINER_OUTPUT_PATH}");
+        let output_path = output_file.to_string_lossy().to_string();
+        let copy_output = command_output(
+            "docker",
+            &["cp", &copy_source, &output_path],
+            Duration::from_secs(15),
+        )
+        .await?;
+        if !copy_output.status.success() {
+            bail!(
+                "screenshotter copy failed with {}: {}",
+                copy_output.status,
+                command_combined_output(&copy_output).trim()
+            );
+        }
+        Ok(())
+    }
+    .await;
+
+    remove_screenshot_container(&container_name).await;
+    result
+}
+
+fn screenshot_create_args(
+    container_name: &str,
+    size_env: &str,
+    image: &str,
+    capture_url: &str,
+) -> Vec<String> {
+    [
+        "create",
+        "--name",
+        container_name,
+        "--network",
+        "host",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--cap-drop",
+        "ALL",
+        "--memory",
+        "512m",
+        "--cpus",
+        "1",
+        "--tmpfs",
+        "/tmp:rw,nosuid,size=256m",
+        "-e",
+        size_env,
+        image,
+        capture_url,
+        SCREENSHOT_CONTAINER_OUTPUT_PATH,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn screenshot_container_name(job_id: Uuid) -> String {
+    format!("hostlet-screenshot-{job_id}")
+}
+
+async fn remove_screenshot_container(container_name: &str) {
+    let _ = command_output(
+        "docker",
+        &["rm", "-f", container_name],
+        Duration::from_secs(15),
+    )
+    .await;
+}
+
+fn command_combined_output(output: &Output) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 struct ScreenshotUpload {
@@ -676,11 +760,7 @@ pub(crate) async fn docker_compose_managed_container(container: &str) -> anyhow:
     )
     .await?;
     if !output.status.success() {
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let combined = command_combined_output(&output);
         if combined.contains("No such object") {
             return Ok(true);
         }
@@ -748,11 +828,7 @@ pub(crate) async fn ensure_docker_compose() -> anyhow::Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let combined = command_combined_output(&output);
     bail!(
         "Docker Compose v2 is required for Compose apps; install or mount the docker-compose CLI plugin. {}",
         combined.trim()
@@ -860,5 +936,34 @@ mod screenshot_tests {
     #[test]
     fn validate_capture_url_rejects_non_http_schemes() {
         assert!(validate_capture_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn screenshot_create_args_use_container_copy_path_without_host_bind() {
+        let args = screenshot_create_args(
+            "hostlet-screenshot-job",
+            "HOSTLET_SCREENSHOT_SIZE=1280x720",
+            "local/hostlet-screenshotter:test",
+            "https://demo.example.com/",
+        );
+
+        assert_eq!(args.first().map(String::as_str), Some("create"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--name", "hostlet-screenshot-job"]));
+        assert!(!args.iter().any(|arg| arg == "-v"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == SCREENSHOT_CONTAINER_OUTPUT_PATH));
+    }
+
+    #[test]
+    fn screenshot_container_name_is_job_scoped() {
+        let job_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+
+        assert_eq!(
+            screenshot_container_name(job_id),
+            "hostlet-screenshot-11111111-2222-3333-4444-555555555555"
+        );
     }
 }
