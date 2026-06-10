@@ -362,7 +362,7 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     Ok(())
 }
 
-const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/tmp/hostlet-screenshot.jpg";
+const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/app/hostlet-screenshot.jpg";
 
 async fn run_screenshotter_container(
     job_id: Uuid,
@@ -955,6 +955,7 @@ mod screenshot_tests {
         assert!(args
             .iter()
             .any(|arg| arg == SCREENSHOT_CONTAINER_OUTPUT_PATH));
+        assert!(!SCREENSHOT_CONTAINER_OUTPUT_PATH.starts_with("/tmp/"));
     }
 
     #[test]
