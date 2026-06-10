@@ -5,6 +5,21 @@
 import { formatTimestamp } from "@/lib/time";
 import type { App, RuntimeHealth, RuntimeHealthEvent } from "@/app/apps/[id]/appDetail.types";
 
+export type Deployment = {
+  id: string;
+  status?: string | null;
+  commitSha?: string | null;
+  failure?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+};
+
+export function deploymentSummary(deployment?: Deployment | null) {
+  if (!deployment) return "No deployments";
+  const when = deployment.finishedAt || deployment.startedAt;
+  return when ? `${deployment.status || "unknown"} · ${formatTimestamp(when)}` : deployment.status || "unknown";
+}
+
 export function webhookSummary(webhook?: App["latestWebhook"] | null) {
   if (!webhook) return "No push seen";
   const sha = webhook.commitSha ? ` ${webhook.commitSha.slice(0, 7)}` : "";
