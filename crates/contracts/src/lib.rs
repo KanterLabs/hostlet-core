@@ -177,6 +177,32 @@ pub fn valid_container_name(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Derives a URL-safe slug from an app name: lowercases alphanumeric characters,
+/// replaces all other characters with `-`, trims leading/trailing `-`, and
+/// returns `"app"` when the result would be empty. Used for default domain labels
+/// and other places where a user-visible identifier is derived from a free-text
+/// app name.
+pub fn app_slug(value: &str) -> String {
+    let slug = value
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if slug.is_empty() {
+        "app".into()
+    } else {
+        slug
+    }
+}
+
 pub fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
@@ -294,6 +320,38 @@ string_status_enum! {
 #[cfg(test)]
 mod contract_helper_tests {
     use super::*;
+
+    #[test]
+    fn app_slug_lowercases_and_replaces_non_alphanumeric() {
+        assert_eq!(app_slug("My App"), "my-app");
+        assert_eq!(app_slug("hello world"), "hello-world");
+        assert_eq!(app_slug("UPPER"), "upper");
+    }
+
+    #[test]
+    fn app_slug_trims_edge_hyphens() {
+        assert_eq!(app_slug("-foo-"), "foo");
+        assert_eq!(app_slug("--bar--"), "bar");
+        assert_eq!(app_slug("  -baz-  "), "baz");
+    }
+
+    #[test]
+    fn app_slug_falls_back_for_empty_and_all_junk_inputs() {
+        assert_eq!(app_slug(""), "app");
+        assert_eq!(app_slug("!!!"), "app");
+        assert_eq!(app_slug("---"), "app");
+        assert_eq!(app_slug("   "), "app");
+    }
+
+    #[test]
+    fn app_slug_is_identity_for_uuid_derived_route_keys() {
+        // Agent call sites always receive "app-{uuid}" — verify no edge-case
+        // transformation occurs, keeping derived identities stable.
+        assert_eq!(
+            app_slug("app-550e8400-e29b-41d4-a716-446655440000"),
+            "app-550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
 
     #[test]
     fn github_repo_inputs_parse_to_owner_repo() {

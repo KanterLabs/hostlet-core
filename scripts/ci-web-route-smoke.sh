@@ -2,19 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/ci-self-hosted-lib.sh
+source "${ROOT}/scripts/ci-self-hosted-lib.sh"
 WEB_PID=""
 TMP_DIR="$(mktemp -d "/tmp/hostlet-web-route-smoke-${GITHUB_RUN_ID:-local}-$$.XXXXXX")"
 
-pick_port() {
-  python3 - <<'PY'
-import socket
-with socket.socket() as s:
-    s.bind(("127.0.0.1", 0))
-    print(s.getsockname()[1])
-PY
-}
-
-PORT="${HOSTLET_WEB_SMOKE_PORT:-$(pick_port)}"
+PORT="${HOSTLET_WEB_SMOKE_PORT:-$(pick_local_port)}"
 
 cleanup() {
   if [ -n "${WEB_PID}" ] && kill -0 "${WEB_PID}" >/dev/null 2>&1; then

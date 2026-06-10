@@ -311,7 +311,12 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
 
 fn bool_env(key: &str) -> bool {
     std::env::var(key)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 

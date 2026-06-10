@@ -361,8 +361,8 @@ pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     let route_key = p
         .get("route_key")
         .and_then(|v| v.as_str())
-        .map(safe_name)
-        .unwrap_or_else(|| safe_name(p["app_id"].as_str().unwrap_or("app")));
+        .map(app_slug)
+        .unwrap_or_else(|| app_slug(p["app_id"].as_str().unwrap_or("app")));
     let port_value = p["published_port"]
         .as_i64()
         .context("target deployment is missing a published port; redeploy before rolling back")?;
@@ -426,8 +426,8 @@ pub(crate) async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
     let route_key = p
         .get("route_key")
         .and_then(|v| v.as_str())
-        .map(safe_name)
-        .unwrap_or_else(|| safe_name(p["app_id"].as_str().unwrap_or("app")));
+        .map(app_slug)
+        .unwrap_or_else(|| app_slug(p["app_id"].as_str().unwrap_or("app")));
     if let Some(project) = p.get("compose_project").and_then(|v| v.as_str()) {
         remove_compose_project_resources(project).await?;
     }

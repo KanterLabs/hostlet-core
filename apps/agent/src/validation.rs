@@ -4,6 +4,7 @@ mod docker_resources;
 mod redaction;
 
 pub(crate) use docker_resources::*;
+pub(crate) use hostlet_contracts::app_slug;
 pub(crate) use redaction::*;
 
 pub(crate) fn valid_hostlet_image(value: &str) -> bool {
@@ -38,18 +39,6 @@ pub(crate) fn local_router_config() -> anyhow::Result<Option<LocalRouter>> {
         snippets_dir,
         reload_command,
     }))
-}
-
-pub(crate) fn safe_name(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 pub(crate) fn compose_project_name(app_id: Uuid) -> String {
