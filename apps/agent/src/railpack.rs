@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 const RAILPACK_BUILDKIT_CONTAINER: &str = "hostlet-railpack-buildkit";
 const DEFAULT_RAILPACK_BUILDKIT_IMAGE: &str = "moby/buildkit:buildx-stable-1";
 const DEFAULT_RAILPACK_BUILDKIT_IDLE_SECONDS: u64 = 1_800;
+const DEFAULT_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS: u64 = 30;
+const RAILPACK_BUILDKIT_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) struct RailpackBuildResult {
     pub(crate) runtime_metadata: Value,
@@ -233,6 +235,11 @@ async fn ensure_railpack_buildkit(
             }
         }
     }
+    // BuildKit's daemon starts asynchronously after `docker run`/`docker start`;
+    // probe readiness on every path (a concurrent deploy may have just created
+    // the container) before acquiring the refcount, so a failed probe never
+    // leaks a count.
+    wait_for_railpack_buildkit_ready(&container).await?;
     // Acquire the refcount *before* returning the session so stop_after_build
     // has an accurate count even if the caller drops the session early.
     {
@@ -244,6 +251,34 @@ async fn ensure_railpack_buildkit(
         host: format!("docker-container://{container}"),
         container: Some(container),
     })
+}
+
+/// Waits for buildkitd inside `container` to accept connections.
+///
+/// `docker run`/`docker start` return before buildkitd is listening, so the
+/// first build after a cold start would otherwise fail to connect. Probed
+/// even when the container was already running: a concurrent deploy may have
+/// created it moments ago.
+async fn wait_for_railpack_buildkit_ready(container: &str) -> anyhow::Result<()> {
+    let timeout_secs = railpack_buildkit_ready_timeout_secs();
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let probe = command_output(
+            "docker",
+            &["exec", container, "buildctl", "debug", "workers"],
+            Duration::from_secs(10),
+        )
+        .await;
+        if matches!(&probe, Ok(output) if output.status.success()) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "buildkitd in container {container} did not become ready within {timeout_secs} seconds; `docker exec {container} buildctl debug workers` kept failing"
+            );
+        }
+        tokio::time::sleep(RAILPACK_BUILDKIT_READY_POLL_INTERVAL).await;
+    }
 }
 
 fn railpack_buildkit_container() -> String {
@@ -276,6 +311,22 @@ fn railpack_buildkit_idle_seconds() -> u64 {
 }
 
 fn railpack_buildkit_idle_seconds_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok().filter(|seconds| *seconds > 0)
+}
+
+fn railpack_buildkit_ready_timeout_secs() -> u64 {
+    std::env::var("HOSTLET_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS")
+        .ok()
+        .as_deref()
+        .and_then(railpack_buildkit_ready_timeout_secs_value)
+        .unwrap_or(DEFAULT_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS)
+}
+
+fn railpack_buildkit_ready_timeout_secs_value(value: &str) -> Option<u64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -422,6 +473,15 @@ mod tests {
         assert_eq!(railpack_buildkit_idle_seconds_value("0"), None);
         assert_eq!(railpack_buildkit_idle_seconds_value(""), None);
         assert_eq!(railpack_buildkit_idle_seconds_value("soon"), None);
+    }
+
+    #[test]
+    fn railpack_buildkit_ready_timeout_defaults_and_rejects_invalid_values() {
+        assert_eq!(railpack_buildkit_ready_timeout_secs_value("30"), Some(30));
+        assert_eq!(railpack_buildkit_ready_timeout_secs_value(" 45 "), Some(45));
+        assert_eq!(railpack_buildkit_ready_timeout_secs_value("0"), None);
+        assert_eq!(railpack_buildkit_ready_timeout_secs_value(""), None);
+        assert_eq!(railpack_buildkit_ready_timeout_secs_value("soon"), None);
     }
 
     #[test]
