@@ -83,8 +83,8 @@ pub struct CleanupDatabaseDeleted {
 
 /// Outcome of a full manual cleanup (database purge + Docker job enqueue).
 pub struct CleanupOutcome {
-    pub(crate) database_deleted: CleanupDatabaseDeleted,
-    pub(crate) docker_cleanup_job_id: Option<Uuid>,
+    pub database_deleted: CleanupDatabaseDeleted,
+    pub docker_cleanup_job_id: Option<Uuid>,
 }
 
 // ---------------------------------------------------------------------------
