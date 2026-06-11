@@ -9,6 +9,11 @@
 //! Placement rule (mandatory): shared helpers must live here (or in another
 //! file not listed in the cloud override set). `web/cleanup.rs` is overridden;
 //! this file is inherited. See `AGENTS.md` for the full override inventory.
+//!
+//! The manual-cleanup surface (`cleanup_plan`, `run_cleanup`, and their types)
+//! is `pub`, not `pub(crate)`: the only core caller is `web/cleanup.rs`, which
+//! cloud's overlay replaces wholesale — under `pub(crate)` the overlay build
+//! flags this surface as dead code (`-D warnings`) until cloud's fork adopts it.
 
 use crate::{deploy, state::AppState};
 use anyhow::Context;
@@ -21,7 +26,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-pub(crate) struct CleanupPlan {
+pub struct CleanupPlan {
     pub(crate) retention: CleanupRetention,
     pub(crate) database: CleanupDatabasePreview,
     pub(crate) docker: CleanupDockerPreview,
@@ -34,7 +39,7 @@ pub(crate) struct CleanupPlan {
 }
 
 #[derive(Serialize)]
-pub(crate) struct CleanupRetention {
+pub struct CleanupRetention {
     pub(crate) deployment_log_days: i64,
     pub(crate) deployments_per_app: i64,
     pub(crate) health_event_days: i64,
@@ -47,7 +52,7 @@ pub(crate) struct CleanupRetention {
 }
 
 #[derive(Serialize)]
-pub(crate) struct CleanupDatabasePreview {
+pub struct CleanupDatabasePreview {
     pub(crate) deployment_logs: i64,
     pub(crate) health_events: i64,
     pub(crate) resource_snapshots: i64,
@@ -58,7 +63,7 @@ pub(crate) struct CleanupDatabasePreview {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CleanupDockerPreview {
+pub struct CleanupDockerPreview {
     pub(crate) keep_containers: usize,
     pub(crate) keep_images: usize,
     pub(crate) stale_deployment_containers: i64,
@@ -67,7 +72,7 @@ pub(crate) struct CleanupDockerPreview {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CleanupDatabaseDeleted {
+pub struct CleanupDatabaseDeleted {
     pub(crate) deployment_logs: u64,
     pub(crate) health_events: u64,
     pub(crate) resource_snapshots: u64,
@@ -77,7 +82,7 @@ pub(crate) struct CleanupDatabaseDeleted {
 }
 
 /// Outcome of a full manual cleanup (database purge + Docker job enqueue).
-pub(crate) struct CleanupOutcome {
+pub struct CleanupOutcome {
     pub(crate) database_deleted: CleanupDatabaseDeleted,
     pub(crate) docker_cleanup_job_id: Option<Uuid>,
 }
@@ -86,7 +91,7 @@ pub(crate) struct CleanupOutcome {
 // Constants
 // ---------------------------------------------------------------------------
 
-pub(crate) const RETENTION: CleanupRetention = CleanupRetention {
+pub const RETENTION: CleanupRetention = CleanupRetention {
     deployment_log_days: 30,
     deployments_per_app: 20,
     health_event_days: 7,
@@ -267,7 +272,7 @@ async fn stale_container_count(state: &AppState, keep_previous: i64) -> anyhow::
 
 /// Build a full cleanup plan: database row counts + Docker keep lists + stale
 /// container count.  Used by both the HTTP preview endpoint and [`run_cleanup`].
-pub(crate) async fn cleanup_plan(state: &AppState) -> anyhow::Result<CleanupPlan> {
+pub async fn cleanup_plan(state: &AppState) -> anyhow::Result<CleanupPlan> {
     let database = CleanupDatabasePreview {
         deployment_logs: cleanup_count(state, &cleanup_deployment_logs_sql()).await?,
         health_events: cleanup_count(state, &HEALTH_EVENTS_RULE.count_sql()).await?,
@@ -301,7 +306,7 @@ pub(crate) async fn cleanup_plan(state: &AppState) -> anyhow::Result<CleanupPlan
 /// Run a full cleanup: build the plan, purge database rows, and enqueue a
 /// Docker cleanup job (best-effort — a job-enqueue failure does NOT fail the
 /// call).  Records no audit event; the caller (`web/cleanup.rs`) does that.
-pub(crate) async fn run_cleanup(state: &AppState) -> anyhow::Result<CleanupOutcome> {
+pub async fn run_cleanup(state: &AppState) -> anyhow::Result<CleanupOutcome> {
     let plan = cleanup_plan(state)
         .await
         .context("failed to build cleanup plan")?;
@@ -349,7 +354,7 @@ pub(crate) async fn run_cleanup(state: &AppState) -> anyhow::Result<CleanupOutco
 ///
 /// Before enqueueing, cancels any existing queued `docker_cleanup` jobs for
 /// this server whose keep lists may be stale.
-pub(crate) async fn auto_cleanup_for_server(
+pub async fn auto_cleanup_for_server(
     state: &AppState,
     server_id: Uuid,
 ) -> anyhow::Result<Option<Uuid>> {
@@ -396,7 +401,7 @@ pub(crate) async fn auto_cleanup_for_server(
 /// Best-effort sweep: enqueue automatic Docker cleanup for every server that
 /// has deployments.  Individual failures are logged and skipped; this function
 /// never returns `Err` and never panics.
-pub(crate) async fn auto_cleanup_sweep(state: &AppState) {
+pub async fn auto_cleanup_sweep(state: &AppState) {
     if !auto_cleanup_enabled() {
         return;
     }
