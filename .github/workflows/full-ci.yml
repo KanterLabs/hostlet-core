@@ -27,7 +27,6 @@ jobs:
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - run: scripts/check-line-cap.sh
       - run: scripts/ci-self-hosted-api-smoke.sh
 
@@ -73,7 +72,6 @@ jobs:
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - run: scripts/ci-self-hosted-deploy-e2e.sh
 
   full-compose-and-release:
@@ -101,7 +99,6 @@ jobs:
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - run: docker compose -f infra/docker-compose.yml config >/dev/null
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
       - run: HOSTLET_CADDYFILE=./Caddyfile.direct docker compose -f infra/docker-compose.prod.yml config >/dev/null
