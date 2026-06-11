@@ -104,6 +104,9 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
     // Update the deployment in place: COALESCE keeps existing columns when the
     // agent omits a field, runtime_metadata is replaced only when supplied, and
     // finished_at is stamped once the deployment reaches a terminal status.
+    // The AND status = ANY($10) guard ensures that once a deployment reaches a
+    // terminal state (success/failed/rolled_back/canceled) no late or duplicate
+    // agent event can overwrite it — active→active retries still go through.
     let updated = sqlx::query(
         "UPDATE deployments SET \
          status=$1, \
@@ -114,7 +117,7 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
          compose_project=COALESCE($6,compose_project), \
          runtime_metadata=CASE WHEN $7::jsonb IS NULL THEN runtime_metadata ELSE $7::jsonb END, \
          finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END \
-         WHERE id=$8 AND server_id=$9",
+         WHERE id=$8 AND server_id=$9 AND status = ANY($10)",
     )
     .bind(status)
     .bind(msg.get("image_tag").and_then(|v| v.as_str()))
@@ -125,6 +128,7 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
     .bind(msg.get("runtime_metadata").cloned())
     .bind(id)
     .bind(server_id)
+    .bind(crate::deploy::ACTIVE_DEPLOYMENT_STATUSES)
     .execute(&state.db)
     .await
     .map(|done| done.rows_affected())

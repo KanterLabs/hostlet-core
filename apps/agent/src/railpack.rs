@@ -18,13 +18,56 @@ struct RailpackBuildkitSession {
 impl RailpackBuildkitSession {
     async fn stop_after_build(&self, cfg: &Config, deployment_id: Uuid) {
         let Some(container) = self.container.clone() else {
+            // External BUILDKIT_HOST — we don't manage its lifecycle.
             return;
         };
+        let idle = {
+            let refcounts = buildkit_refcounts();
+            let mut counts = refcounts.lock().expect("buildkit refcounts mutex poisoned");
+            buildkit_release(&mut counts, &container)
+        };
+        if !idle {
+            // Another build is still using this container; leave it running.
+            return;
+        }
         if railpack_buildkit_keepalive() {
             schedule_railpack_buildkit_idle_stop(cfg.clone(), deployment_id, container);
             return;
         }
         let _ = run_log(cfg, deployment_id, "docker", &["stop", &container]).await;
+    }
+}
+
+// --- per-container in-use reference counts ---
+
+type BuildkitRefcountMap = Arc<Mutex<HashMap<String, usize>>>;
+
+fn buildkit_refcounts() -> BuildkitRefcountMap {
+    static COUNTS: OnceLock<BuildkitRefcountMap> = OnceLock::new();
+    COUNTS
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
+/// Increment the in-use count for `container`. Pure: operates on an owned map.
+fn buildkit_acquire(counts: &mut HashMap<String, usize>, container: &str) {
+    *counts.entry(container.to_string()).or_insert(0) += 1;
+}
+
+/// Decrement the in-use count for `container`. Returns `true` when the count
+/// reaches zero (container is idle). Unknown containers are considered idle.
+/// Pure: operates on an owned map.
+fn buildkit_release(counts: &mut HashMap<String, usize>, container: &str) -> bool {
+    match counts.get_mut(container) {
+        Some(n) if *n > 1 => {
+            *n -= 1;
+            false
+        }
+        Some(_) => {
+            counts.remove(container);
+            true
+        }
+        None => true,
     }
 }
 
@@ -141,6 +184,7 @@ async fn ensure_railpack_buildkit(
 ) -> anyhow::Result<RailpackBuildkitSession> {
     if let Ok(host) = std::env::var("BUILDKIT_HOST") {
         if !host.trim().is_empty() {
+            // External BuildKit host — caller manages its lifecycle; no refcount.
             return Ok(RailpackBuildkitSession {
                 host,
                 container: None,
@@ -165,8 +209,36 @@ async fn ensure_railpack_buildkit(
                 .unwrap_or_else(|_| DEFAULT_RAILPACK_BUILDKIT_IMAGE.into());
             let args = railpack_buildkit_run_args(&image, &container);
             let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-            run_log(cfg, deployment_id, "docker", &arg_refs).await?;
+            if let Err(run_err) = run_log(cfg, deployment_id, "docker", &arg_refs).await {
+                // `docker run` failed — re-inspect to see if a concurrent deploy already
+                // created the container (race on missing container → both try to run).
+                let probe = command_output(
+                    "docker",
+                    &["inspect", "-f", "{{.State.Running}}", container.as_str()],
+                    Duration::from_secs(30),
+                )
+                .await;
+                match probe {
+                    Ok(p) if p.status.success() => {
+                        // Container exists; check whether it is running.
+                        if String::from_utf8_lossy(&p.stdout).trim() != "true" {
+                            // Exists but stopped (e.g. exited after a previous session).
+                            run_log(cfg, deployment_id, "docker", &["start", container.as_str()])
+                                .await?;
+                        }
+                        // else: already running — proceed.
+                    }
+                    _ => return Err(run_err),
+                }
+            }
         }
+    }
+    // Acquire the refcount *before* returning the session so stop_after_build
+    // has an accurate count even if the caller drops the session early.
+    {
+        let refcounts = buildkit_refcounts();
+        let mut counts = refcounts.lock().expect("buildkit refcounts mutex poisoned");
+        buildkit_acquire(&mut counts, &container);
     }
     Ok(RailpackBuildkitSession {
         host: format!("docker-container://{container}"),
@@ -261,9 +333,14 @@ fn schedule_railpack_buildkit_idle_stop(cfg: Config, deployment_id: Uuid, contai
     let idle = Duration::from_secs(railpack_buildkit_idle_seconds());
     tokio::spawn(async move {
         tokio::time::sleep(idle).await;
+        // Stop only if no newer build has touched the container AND no build is
+        // currently using it (refcount guard prevents stopping mid-build).
         let should_stop = {
             let map = last_used.lock().expect("buildkit last-used mutex poisoned");
+            let refcounts = buildkit_refcounts();
+            let counts = refcounts.lock().expect("buildkit refcounts mutex poisoned");
             map.get(&container).is_some_and(|latest| *latest == used_at)
+                && counts.get(&container).is_none_or(|n| *n == 0)
         };
         if should_stop {
             let _ = run_log(&cfg, deployment_id, "docker", &["stop", &container]).await;
@@ -375,5 +452,33 @@ mod tests {
         assert_eq!(metadata["buildBackend"], "railpack");
         assert_eq!(metadata["buildDurationMs"], 1_500);
         assert!(metadata["imageSizeBytes"].is_null());
+    }
+
+    #[test]
+    fn buildkit_refcount_two_acquires_then_one_release_is_not_idle() {
+        let mut counts = HashMap::new();
+        buildkit_acquire(&mut counts, "hostlet-railpack-buildkit");
+        buildkit_acquire(&mut counts, "hostlet-railpack-buildkit");
+        let idle = buildkit_release(&mut counts, "hostlet-railpack-buildkit");
+        assert!(!idle, "second acquire is still held");
+        assert_eq!(counts.get("hostlet-railpack-buildkit"), Some(&1));
+    }
+
+    #[test]
+    fn buildkit_refcount_second_release_makes_container_idle() {
+        let mut counts = HashMap::new();
+        buildkit_acquire(&mut counts, "hostlet-railpack-buildkit");
+        buildkit_acquire(&mut counts, "hostlet-railpack-buildkit");
+        buildkit_release(&mut counts, "hostlet-railpack-buildkit");
+        let idle = buildkit_release(&mut counts, "hostlet-railpack-buildkit");
+        assert!(idle, "both acquires released → idle");
+        assert!(!counts.contains_key("hostlet-railpack-buildkit"));
+    }
+
+    #[test]
+    fn buildkit_refcount_release_of_unknown_container_is_idle_and_does_not_panic() {
+        let mut counts = HashMap::new();
+        let idle = buildkit_release(&mut counts, "hostlet-railpack-buildkit");
+        assert!(idle, "unknown container treated as idle");
     }
 }

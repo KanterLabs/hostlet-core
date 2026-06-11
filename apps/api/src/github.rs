@@ -188,12 +188,53 @@ pub async fn repo_inspect(
         Ok(value) => Json(value).into_response(),
         Err(err) => {
             tracing::warn!(error = %err, repo, "GitHub repository inspection failed");
-            (
-                StatusCode::BAD_GATEWAY,
-                "GitHub repository could not be inspected",
-            )
-                .into_response()
+            let (status, body) = repo_inspect_failure(github_error_http_status(&err));
+            (status, body).into_response()
         }
+    }
+}
+
+/// Walks the error chain to find the first `reqwest::Error` that carries an HTTP
+/// status code, returning it as a raw `u16`.  Self-contained inside `github.rs`
+/// so that cloud's fork of this file can adopt it independently.
+fn github_error_http_status(err: &anyhow::Error) -> Option<u16> {
+    for cause in err.chain() {
+        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(status) = reqwest_err.status() {
+                return Some(status.as_u16());
+            }
+        }
+    }
+    None
+}
+
+/// Maps an optional HTTP status from a failed `inspect_repo` call to an
+/// actionable response status + user-facing message.  Pure function; unit-tested.
+fn repo_inspect_failure(status: Option<u16>) -> (StatusCode, String) {
+    match status {
+        Some(404) => (
+            StatusCode::NOT_FOUND,
+            "GitHub repository was not found, or your GitHub connection cannot access it. \
+             Check the owner/repo name or reconnect GitHub."
+                .into(),
+        ),
+        Some(s @ 401) | Some(s @ 403) => (
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "GitHub rejected the repository inspection (HTTP {s}). \
+                 Reconnect GitHub, or wait and retry if you are rate limited."
+            ),
+        ),
+        Some(429) => (
+            StatusCode::BAD_GATEWAY,
+            "GitHub rate-limited the repository inspection. \
+             Wait a minute and retry, or connect GitHub to raise the limit."
+                .into(),
+        ),
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            "GitHub repository could not be inspected".into(),
+        ),
     }
 }
 
@@ -622,6 +663,7 @@ async fn insert_webhook_app_event(
 
 #[cfg(test)]
 mod tests {
+    use super::{repo_inspect_failure, StatusCode};
     use hostlet_contracts::{parse_github_repo, valid_commit_sha};
 
     #[test]
@@ -648,5 +690,59 @@ mod tests {
         );
         assert_eq!(parse_github_repo("owner/repo"), Some("owner/repo".into()));
         assert_eq!(parse_github_repo("https://example.com/owner/repo"), None);
+    }
+
+    #[test]
+    fn repo_inspect_failure_404_gives_not_found_with_check_name_hint() {
+        let (status, body) = repo_inspect_failure(Some(404));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            body.contains("not found"),
+            "body should mention 'not found': {body}"
+        );
+        assert!(
+            body.contains("owner/repo") || body.contains("reconnect"),
+            "body should hint at fix: {body}"
+        );
+    }
+
+    #[test]
+    fn repo_inspect_failure_401_gives_bad_gateway_with_reconnect_hint() {
+        let (status, body) = repo_inspect_failure(Some(401));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.contains("401"), "body should include status: {body}");
+        assert!(
+            body.contains("Reconnect"),
+            "body should suggest reconnect: {body}"
+        );
+    }
+
+    #[test]
+    fn repo_inspect_failure_403_gives_bad_gateway() {
+        let (status, body) = repo_inspect_failure(Some(403));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.contains("403"), "body should include status: {body}");
+    }
+
+    #[test]
+    fn repo_inspect_failure_429_gives_rate_limit_message() {
+        let (status, body) = repo_inspect_failure(Some(429));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            body.contains("rate-limited"),
+            "body should mention rate limit: {body}"
+        );
+    }
+
+    #[test]
+    fn repo_inspect_failure_other_and_none_give_generic_bad_gateway() {
+        for input in [None, Some(500u16), Some(503)] {
+            let (status, body) = repo_inspect_failure(input);
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                body, "GitHub repository could not be inspected",
+                "unexpected body for {input:?}"
+            );
+        }
     }
 }

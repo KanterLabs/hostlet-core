@@ -317,7 +317,7 @@ pub async fn update_app(
             tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
             return (
                 StatusCode::BAD_GATEWAY,
-                "GitHub webhook could not be configured",
+                format!("GitHub webhook could not be configured: {err}"),
             )
                 .into_response();
         }

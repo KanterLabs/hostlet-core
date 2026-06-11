@@ -688,50 +688,6 @@ pub(crate) async fn run_capture_trim(
         .context("command output was not valid UTF-8")
 }
 
-pub(crate) async fn ensure_checkout_remote(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    expected_remote: &str,
-) -> anyhow::Result<()> {
-    let remote = run_capture_trim(
-        cfg,
-        deployment_id,
-        "git",
-        &[
-            "-C",
-            checkout.to_str().unwrap(),
-            "config",
-            "--get",
-            "remote.origin.url",
-        ],
-    )
-    .await?;
-    if normalize_git_remote(&remote) != normalize_git_remote(expected_remote) {
-        bail!("existing checkout remote does not match the requested repository");
-    }
-    Ok(())
-}
-
-pub(crate) async fn verify_git_head(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    expected_commit: &str,
-) -> anyhow::Result<()> {
-    let head = run_capture_trim(
-        cfg,
-        deployment_id,
-        "git",
-        &["-C", checkout.to_str().unwrap(), "rev-parse", "HEAD"],
-    )
-    .await?;
-    if !head.eq_ignore_ascii_case(expected_commit) {
-        bail!("checked-out commit did not match the signed deployment commit");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

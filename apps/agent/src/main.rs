@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 mod build;
 mod compose;
+mod git;
 mod ops;
 mod railpack;
 mod runtime;
@@ -28,6 +29,7 @@ mod validation;
 
 pub(crate) use build::*;
 pub(crate) use compose::*;
+pub(crate) use git::*;
 pub(crate) use ops::*;
 pub(crate) use railpack::*;
 pub(crate) use runtime::{reported_deployment_failure, Config, LocalRouter};
