@@ -891,6 +891,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hex",
+ "hmac",
  "hostlet-contracts",
  "jsonwebtoken",
  "rand 0.8.6",
