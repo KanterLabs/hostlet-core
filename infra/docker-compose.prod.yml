@@ -24,6 +24,12 @@ services:
       HOSTLET_BASE_DOMAIN: ${HOSTLET_BASE_DOMAIN:-}
       HOSTLET_DOMAIN_PREFIX: ${HOSTLET_DOMAIN_PREFIX:-hostlet-}
       HOSTLET_PRIVATE_APP_HOST: ${HOSTLET_PRIVATE_APP_HOST:-127.0.0.1}
+      # Optional cleanup tuning (see apps/api/src/cleanup.rs): auto cleanup is
+      # on by default; keep-previous protects rollback targets; keep-failed
+      # retains recently-failed deployments for debugging.
+      HOSTLET_AUTO_CLEANUP: ${HOSTLET_AUTO_CLEANUP:-true}
+      HOSTLET_CLEANUP_KEEP_PREVIOUS: ${HOSTLET_CLEANUP_KEEP_PREVIOUS:-1}
+      HOSTLET_CLEANUP_KEEP_FAILED_HOURS: ${HOSTLET_CLEANUP_KEEP_FAILED_HOURS:-0}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
       CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID:-}
       CLOUDFLARE_TUNNEL_TARGET: ${CLOUDFLARE_TUNNEL_TARGET:-}
