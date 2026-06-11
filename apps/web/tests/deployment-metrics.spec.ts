@@ -30,7 +30,7 @@ test("deployment detail shows startup and boot metrics", async ({ page }) => {
   await expect(page.getByText("Health wait")).toBeVisible();
   await expect(page.getByText("Boot time")).toBeVisible();
   await expect(page.locator(".data-label").filter({ hasText: "Routing" })).toBeVisible();
-  await expect(page.getByText("2.0 s")).toHaveCount(2);
+  await expect(page.getByText("2s", { exact: true })).toHaveCount(2);
 });
 
 test("deployment detail tolerates malformed runtime metrics", async ({ page }) => {

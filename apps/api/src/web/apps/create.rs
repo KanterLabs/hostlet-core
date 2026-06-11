@@ -159,7 +159,7 @@ pub async fn create_app(
             tracing::warn!(error = %err, repo = %repo_full_name, "failed to ensure GitHub webhook");
             return (
                 StatusCode::BAD_GATEWAY,
-                "GitHub webhook could not be configured",
+                format!("GitHub webhook could not be configured: {err}"),
             )
                 .into_response();
         }
@@ -258,7 +258,16 @@ pub async fn create_app(
     let deployment_id = if body.deploy_after_create.unwrap_or(false) {
         match deploy::create_and_send_deploy(&state, user_id, app_id, "HEAD").await {
             Ok(id) => Some(id),
-            Err(err) => return (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+            Err(err) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "App was created (id {app_id}), but its first deployment could not be \
+                         started: {err}. Open the app and start a deployment to retry."
+                    ),
+                )
+                    .into_response()
+            }
         }
     } else {
         None

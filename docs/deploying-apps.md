@@ -23,6 +23,8 @@ Railpack builds use a BuildKit container. Set `HOSTLET_RAILPACK_BUILDKIT_KEEPALI
 to keep it warm between builds; with keepalive enabled, Hostlet stops it after
 `HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS` of no Railpack builds (default `1800`). Set
 `HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB` to cap the BuildKit container memory.
+After a cold start, Hostlet waits up to `HOSTLET_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS`
+(default `30`) for the BuildKit daemon to become ready before building.
 
 ## Compose Apps
 

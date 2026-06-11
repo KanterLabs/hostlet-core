@@ -1,8 +1,10 @@
 pub mod agent;
 pub mod apps;
 pub mod auth;
+pub mod cleanup;
 pub mod crypto;
 pub mod deploy;
+pub mod env;
 pub mod github;
 pub mod policies;
 pub mod rate_limit;
@@ -61,7 +63,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
 }
 
 pub async fn recover_startup_state(state: &AppState) -> anyhow::Result<()> {
-    let recovered = deploy::recover_stale_deployments(state).await?;
+    let recovered = deploy::recover_stale_deployments_and_cleanup(state).await?;
     if recovered > 0 {
         tracing::warn!(recovered, "marked stale deployments as failed");
     }

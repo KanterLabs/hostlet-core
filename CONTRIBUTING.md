@@ -14,6 +14,11 @@ Run the relevant checks before opening a pull request:
 scripts/validate-local.sh
 ```
 
+The final `docker compose config` gate requires several env vars that have no defaults (compose fails with `${VAR:?Run hostlet init first}` when they are unset). Provide them by one of:
+
+- **Shell-sourced `.env`** — `hostlet init` writes a repo-root `.env` (see `.env.example` for the full list); source it into your shell before running the script (`set -a; . ./.env; set +a`). Compose v2 auto-loads `.env` only from the directory of the first `-f` file (`infra/`), not from the cwd, so the repo-root file is **not** picked up automatically.
+- **CI-parity dummy values** — export the same env block used by the `compose` job in `.github/workflows/ci.yml`: `POSTGRES_PASSWORD`, `SESSION_SECRET`, `HOSTLET_SETUP_TOKEN`, `HOSTLET_ALLOWED_GITHUB_LOGINS`, `ENCRYPTION_KEY`, `JOB_SIGNING_SECRET`, `LOCAL_AGENT_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `PUBLIC_API_URL`, `PUBLIC_WEB_URL`, `HOSTLET_IMAGE_TAG`, and `DOCKER_GID` (prod compose only).
+
 For narrower local runs, use the matching commands directly:
 
 ```bash

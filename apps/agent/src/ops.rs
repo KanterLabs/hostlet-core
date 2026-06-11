@@ -652,15 +652,16 @@ pub(crate) fn health_error_for_status(status: StatusCode) -> Option<String> {
     }
 }
 
+/// Docker inspect format string that returns four space-separated state fields:
+/// Running, Restarting, OOMKilled, ExitCode.  Shared by `container_running`
+/// (ops) and `fatal_container_failure` (build) so both parse the same format.
+pub(crate) const CONTAINER_STATE_INSPECT_FORMAT: &str =
+    "{{.State.Running}} {{.State.Restarting}} {{.State.OOMKilled}} {{.State.ExitCode}}";
+
 pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
     let output = command_output(
         "docker",
-        &[
-            "inspect",
-            "-f",
-            "{{.State.Running}} {{.State.Restarting}} {{.State.OOMKilled}} {{.State.ExitCode}}",
-            container,
-        ],
+        &["inspect", "-f", CONTAINER_STATE_INSPECT_FORMAT, container],
         Duration::from_secs(10),
     )
     .await?;
@@ -844,13 +845,7 @@ pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
         .context("failed to build HTTP client")
 }
 
-pub(crate) fn valid_container_name(value: &str) -> bool {
-    value.starts_with("hostlet-")
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
+pub(crate) use hostlet_contracts::valid_container_name;
 
 #[cfg(test)]
 mod status_tests {

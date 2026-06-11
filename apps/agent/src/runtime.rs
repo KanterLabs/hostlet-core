@@ -285,89 +285,14 @@ pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()
     }
 }
 
-/// Runs `git` against the checkout directory, streaming output as deployment logs.
-async fn run_git(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    args: &[&str],
-) -> anyhow::Result<()> {
-    let mut full = vec!["-C", checkout.to_str().unwrap()];
-    full.extend_from_slice(args);
-    run_log(cfg, deployment_id, "git", &full).await
-}
-
-/// Checks out the requested ref: the branch tip (`commit_sha == "HEAD"`) is reset
-/// to `FETCH_HEAD`, otherwise the exact commit is checked out detached. Shared by
-/// the existing-checkout and fresh-clone paths so the ref logic lives in one place.
-async fn checkout_fetched_ref(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    branch: &str,
-    commit_sha: &str,
-) -> anyhow::Result<()> {
-    if commit_sha == "HEAD" {
-        run_git(
-            cfg,
-            deployment_id,
-            checkout,
-            &["checkout", "-B", branch, "FETCH_HEAD"],
-        )
-        .await
-    } else {
-        run_git(
-            cfg,
-            deployment_id,
-            checkout,
-            &["checkout", "--detach", commit_sha],
-        )
-        .await
-    }
-}
-
-/// Ensures `checkout` contains the requested branch/commit, reusing an existing
-/// clone when present or initializing a fresh one otherwise.
-async fn sync_checkout(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    expected_remote: &str,
-    fetch_remote: &str,
-    branch: &str,
-    commit_sha: &str,
-) -> anyhow::Result<()> {
-    if checkout.exists() {
-        ensure_checkout_remote(cfg, deployment_id, checkout, expected_remote).await?;
-    } else {
-        tokio::fs::create_dir_all(checkout).await?;
-        run_git(cfg, deployment_id, checkout, &["init"]).await?;
-        run_git(
-            cfg,
-            deployment_id,
-            checkout,
-            &["remote", "add", "origin", expected_remote],
-        )
-        .await?;
-    }
-    run_git(
-        cfg,
-        deployment_id,
-        checkout,
-        &["fetch", fetch_remote, branch],
-    )
-    .await?;
-    checkout_fetched_ref(cfg, deployment_id, checkout, branch, commit_sha).await
-}
-
 pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
     let app_id = Uuid::parse_str(p["app_id"].as_str().context("app_id")?)?;
-    let app_name = safe_name(&format!("app-{app_id}"));
+    let app_name = app_slug(&format!("app-{app_id}"));
     let route_key = p
         .get("route_key")
         .and_then(|v| v.as_str())
-        .map(safe_name)
+        .map(app_slug)
         .unwrap_or_else(|| app_name.clone());
     let repo = p["repo"].as_str().context("repo")?;
     let branch = p["branch"].as_str().context("branch")?;

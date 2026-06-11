@@ -189,29 +189,45 @@ pub async fn create_and_send_deploy(
         }
         Err(err) => return Err(err.into()),
     };
-    let env_rows = sqlx::query("SELECT key,value_ciphertext FROM app_env_vars WHERE app_id=$1")
-        .bind(app_id)
-        .fetch_all(&state.db)
-        .await?;
-    let mut env = serde_json::Map::new();
-    for row in env_rows {
-        env.insert(
-            row.get::<String, _>("key"),
-            json!(state
-                .crypto
-                .decrypt(row.get::<String, _>("value_ciphertext").as_str())?),
+    // Everything from here to just before the audit event is wrapped so that any
+    // error marks the newly-created row 'failed' before propagating — preventing
+    // it from sitting in 'queued' and blocking the next deploy for 30 minutes.
+    let result: anyhow::Result<()> = async {
+        let env_rows = sqlx::query("SELECT key,value_ciphertext FROM app_env_vars WHERE app_id=$1")
+            .bind(app_id)
+            .fetch_all(&state.db)
+            .await?;
+        let mut env = serde_json::Map::new();
+        for row in env_rows {
+            env.insert(
+                row.get::<String, _>("key"),
+                json!(state
+                    .crypto
+                    .decrypt(row.get::<String, _>("value_ciphertext").as_str())?),
+            );
+        }
+        let github_token = github_access_token(state, user_id).await.ok().flatten();
+        let payload = app.deploy_payload(
+            deployment_id,
+            app_id,
+            route_key(app_id),
+            commit_sha,
+            env,
+            github_token,
         );
+        send_job(state, server_id, deployment_id, payload).await?;
+        Ok(())
     }
-    let github_token = github_access_token(state, user_id).await.ok().flatten();
-    let payload = app.deploy_payload(
-        deployment_id,
-        app_id,
-        route_key(app_id),
-        commit_sha,
-        env,
-        github_token,
-    );
-    send_job(state, server_id, deployment_id, payload).await?;
+    .await;
+    if let Err(err) = result {
+        fail_deployment_row(
+            state,
+            deployment_id,
+            &format!("Deployment could not be started: {err}"),
+        )
+        .await;
+        return Err(err);
+    }
     record_audit_event(
         state,
         "deployment_requested",
@@ -271,27 +287,42 @@ async fn create_and_send_rollback(
         }
         Err(err) => return Err(err.into()),
     };
-    sqlx::query(
-        "INSERT INTO rollback_events (app_id,from_deployment_id,to_deployment_id,status) \
-         VALUES ($1,$2,$3,'queued')",
-    )
-    .bind(app_id)
-    .bind(current)
-    .bind(prev.get::<Uuid, _>("id"))
-    .execute(&state.db)
-    .await?;
-    let payload = json!({
-        "type": "rollback",
-        "deployment_id": rollback_id,
-        "app_id": app_id,
-        "route_key": route_key(app_id),
-        "target_deployment_id": prev.get::<Uuid,_>("id"),
-        "target_container": prev.get::<Option<String>,_>("container_name"),
-        "domain": app.get::<String,_>("domain"),
-        "container_port": app.get::<i32,_>("container_port"),
-        "published_port": published_port,
-    });
-    send_job(state, server_id, rollback_id, payload).await?;
+    // Same guard as create_and_send_deploy: wrap the section after the INSERT so
+    // any error marks the row 'failed' rather than leaving it 'queued' forever.
+    let result: anyhow::Result<()> = async {
+        sqlx::query(
+            "INSERT INTO rollback_events (app_id,from_deployment_id,to_deployment_id,status) \
+             VALUES ($1,$2,$3,'queued')",
+        )
+        .bind(app_id)
+        .bind(current)
+        .bind(prev.get::<Uuid, _>("id"))
+        .execute(&state.db)
+        .await?;
+        let payload = json!({
+            "type": "rollback",
+            "deployment_id": rollback_id,
+            "app_id": app_id,
+            "route_key": route_key(app_id),
+            "target_deployment_id": prev.get::<Uuid,_>("id"),
+            "target_container": prev.get::<Option<String>,_>("container_name"),
+            "domain": app.get::<String,_>("domain"),
+            "container_port": app.get::<i32,_>("container_port"),
+            "published_port": published_port,
+        });
+        send_job(state, server_id, rollback_id, payload).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(err) = result {
+        fail_deployment_row(
+            state,
+            rollback_id,
+            &format!("Deployment could not be started: {err}"),
+        )
+        .await;
+        return Err(err);
+    }
     record_audit_event(
         state,
         "rollback_requested",
@@ -340,10 +371,10 @@ async fn send_job(
         )
         .await;
     }
-    sqlx::query("UPDATE deployments SET status='running' WHERE id=$1")
-        .bind(deployment_id)
-        .execute(&state.db)
-        .await?;
+    // Best-effort: advance 'queued' → 'running' now that the job is enqueued.
+    // If this update fails, the agent's own status report will correct the state;
+    // we must NOT fail the call after the job row already exists.
+    mark_deployment_running(state, deployment_id).await;
     Ok(())
 }
 
@@ -412,6 +443,17 @@ pub async fn job_signing_secret_for_server(
     }
 }
 
+/// Startup housekeeping: recover stale deployments, then run the best-effort
+/// automatic Docker cleanup sweep so superseded deployment containers are reaped.
+///
+/// Only the stale-deployment recovery can fail this call; a cleanup sweep
+/// failure is logged and swallowed so it never prevents startup.
+pub async fn recover_stale_deployments_and_cleanup(state: &AppState) -> anyhow::Result<u64> {
+    let recovered = recover_stale_deployments(state).await?;
+    crate::cleanup::auto_cleanup_sweep(state).await;
+    Ok(recovered)
+}
+
 pub async fn recover_stale_deployments(state: &AppState) -> anyhow::Result<u64> {
     let result = sqlx::query(
         "UPDATE deployments
@@ -427,7 +469,53 @@ pub async fn recover_stale_deployments(state: &AppState) -> anyhow::Result<u64> 
     Ok(result.rows_affected())
 }
 
-async fn ensure_no_active_deployment(state: &AppState, app_id: Uuid) -> anyhow::Result<()> {
+/// Marks a deployment row 'failed' when startup fails after the INSERT.
+/// Prevents the row from sitting in 'queued'/'running' and blocking future deploys
+/// for the 30-minute stale-recovery window.  DB errors are swallowed with a warning
+/// because this is best-effort cleanup on an already-erroring path.
+pub(crate) async fn fail_deployment_row(state: &AppState, deployment_id: Uuid, summary: &str) {
+    if let Err(err) = sqlx::query(
+        "UPDATE deployments \
+         SET status='failed', failure_summary=$2, finished_at=now() \
+         WHERE id=$1 AND status = ANY($3)",
+    )
+    .bind(deployment_id)
+    .bind(summary)
+    .bind(ACTIVE_DEPLOYMENT_STATUSES)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(
+            error = %err,
+            %deployment_id,
+            "failed to mark deployment row as failed during cleanup"
+        );
+    }
+}
+
+/// Advances a deployment from 'queued' to 'running' (best-effort, idempotent).
+/// Uses a status guard so the agent's own first report cannot be backtracked.
+/// Any DB error is logged and swallowed; `send_job` must not fail after the job
+/// is already enqueued.
+pub(crate) async fn mark_deployment_running(state: &AppState, deployment_id: Uuid) {
+    if let Err(err) =
+        sqlx::query("UPDATE deployments SET status='running' WHERE id=$1 AND status='queued'")
+            .bind(deployment_id)
+            .execute(&state.db)
+            .await
+    {
+        tracing::warn!(
+            error = %err,
+            %deployment_id,
+            "failed to mark deployment running after enqueue"
+        );
+    }
+}
+
+pub(crate) async fn ensure_no_active_deployment(
+    state: &AppState,
+    app_id: Uuid,
+) -> anyhow::Result<()> {
     let active = sqlx::query(
         "SELECT id,status FROM deployments WHERE app_id=$1 AND status = ANY($2) LIMIT 1",
     )

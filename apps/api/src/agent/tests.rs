@@ -424,13 +424,23 @@ async fn complete_job_status(
 }
 
 async fn reset_agent_db(state: &AppState) {
+    // Truncate app-derived tables first.  Do NOT include `users` in the
+    // TRUNCATE: `servers.user_id REFERENCES users`, so `TRUNCATE users CASCADE`
+    // would cascade into `servers` and destroy the seeded TEST_SERVER_ID row
+    // that `seed_local_server` inserts with `user_id = NULL`.  A plain
+    // `DELETE FROM users` is safe because NULL FK values are never matched by
+    // the referential-integrity check.
     sqlx::query(
-        "TRUNCATE deployment_logs, app_health_events, app_health_snapshots, app_resource_snapshots, agent_jobs,
-             deployments, app_env_vars, apps, users CASCADE",
+        "TRUNCATE deployment_logs, app_health_events, app_health_snapshots, \
+             app_resource_snapshots, agent_jobs, deployments, app_env_vars, apps CASCADE",
     )
     .execute(&state.db)
     .await
     .unwrap();
+    sqlx::query("DELETE FROM users")
+        .execute(&state.db)
+        .await
+        .unwrap();
 }
 
 async fn insert_user(state: &AppState) -> Uuid {
@@ -565,9 +575,338 @@ async fn deployment_runtime_metadata(state: &AppState, deployment_id: Uuid) -> s
         .unwrap()
 }
 
+/// Inserts a deployment with explicit `finished_at` and `container_name`/`image_tag`
+/// so the keep-list query can distinguish it from other fixtures.
+async fn insert_deployment_with_meta(
+    state: &AppState,
+    app_id: Uuid,
+    status: &str,
+    container_name: &str,
+    image_tag: &str,
+    minutes_ago: i32,
+) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO deployments
+           (app_id,server_id,status,commit_sha,container_name,image_tag,\
+            started_at,finished_at,runtime_kind)
+         VALUES ($1,$2,$3,'HEAD',$4,$5,now(),\
+           now() - ($6 * interval '1 minute'),'single')
+         RETURNING id",
+    )
+    .bind(app_id)
+    .bind(TEST_SERVER_ID)
+    .bind(status)
+    .bind(container_name)
+    .bind(image_tag)
+    .bind(minutes_ago)
+    .fetch_one(&state.db)
+    .await
+    .unwrap()
+}
+
 fn rand_id() -> i64 {
     let bytes = *Uuid::new_v4().as_bytes();
     // Mask off the sign bit so the result is always non-negative without the
     // `i64::MIN` overflow that `.abs()` would panic on.
     (u64::from_be_bytes(bytes[..8].try_into().unwrap()) >> 1) as i64
+}
+
+// --- FIX 1-3 DB-gated tests ---
+
+/// Inserts a second app owned by `user_id` with a distinct domain so it can
+/// coexist with the first `insert_app` row in the same transaction.
+async fn insert_app_2(state: &AppState, user_id: Uuid) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO apps
+           (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,root_directory,public_exposure,auto_deploy)
+         VALUES ($1,$2,'agent-app-2','hostlet-ci/node-hello','main',3001,'/health','agent2.example.test','single','.',true,false)
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(TEST_SERVER_ID)
+    .fetch_one(&state.db)
+    .await
+    .unwrap()
+}
+
+async fn deployment_status_by_id(state: &AppState, deployment_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT status FROM deployments WHERE id=$1")
+        .bind(deployment_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap()
+}
+
+async fn deployment_failure_summary(state: &AppState, deployment_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT failure_summary FROM deployments WHERE id=$1")
+        .bind(deployment_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap()
+        .flatten()
+}
+
+async fn deployment_finished_at_is_set(state: &AppState, deployment_id: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT finished_at IS NOT NULL FROM deployments WHERE id=$1")
+        .bind(deployment_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap()
+        .unwrap_or(false)
+}
+
+/// FIX 1: `fail_deployment_row` transitions a 'queued' row to 'failed' and
+/// unblocks `ensure_no_active_deployment` for the same app.
+#[tokio::test]
+async fn db_fail_deployment_row_unblocks_ensure_no_active_deployment() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+
+    // insert_deployment creates a 'running' row; back it down to 'queued' so
+    // we test the exact pre-fail_deployment_row state.
+    let deployment_id = insert_deployment(&state, app_id).await;
+    sqlx::query("UPDATE deployments SET status='queued' WHERE id=$1")
+        .bind(deployment_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    crate::deploy::fail_deployment_row(&state, deployment_id, "test startup failure").await;
+
+    assert_eq!(
+        deployment_status_by_id(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("failed"),
+        "deployment should be 'failed'"
+    );
+    assert_eq!(
+        deployment_failure_summary(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("test startup failure"),
+        "failure_summary should be set"
+    );
+    assert!(
+        deployment_finished_at_is_set(&state, deployment_id).await,
+        "finished_at should be stamped"
+    );
+    // The row is now terminal; ensure_no_active_deployment must succeed.
+    crate::deploy::ensure_no_active_deployment(&state, app_id)
+        .await
+        .expect("ensure_no_active_deployment should succeed after fail_deployment_row");
+}
+
+/// FIX 2: `mark_deployment_running` is monotonic — it advances 'queued' to
+/// 'running' but does NOT downgrade a row that is already further along.
+#[tokio::test]
+async fn db_mark_deployment_running_is_monotonic() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app1 = insert_app(&state, user_id).await;
+    let app2 = insert_app_2(&state, user_id).await;
+
+    // 'building' should be left unchanged.
+    let d_building = insert_deployment(&state, app1).await;
+    sqlx::query("UPDATE deployments SET status='building' WHERE id=$1")
+        .bind(d_building)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    // 'queued' should be promoted to 'running'.
+    let d_queued = insert_deployment(&state, app2).await;
+    sqlx::query("UPDATE deployments SET status='queued' WHERE id=$1")
+        .bind(d_queued)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    crate::deploy::mark_deployment_running(&state, d_building).await;
+    crate::deploy::mark_deployment_running(&state, d_queued).await;
+
+    assert_eq!(
+        deployment_status_by_id(&state, d_building).await.as_deref(),
+        Some("building"),
+        "mark_deployment_running must not downgrade 'building'"
+    );
+    assert_eq!(
+        deployment_status_by_id(&state, d_queued).await.as_deref(),
+        Some("running"),
+        "mark_deployment_running should promote 'queued' to 'running'"
+    );
+}
+
+/// FIX 3: once a deployment reaches a terminal status, later agent events
+/// (success, building, etc.) must not change it.
+#[tokio::test]
+async fn db_terminal_deployment_ignores_late_agent_events() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+    let deployment_id = insert_deployment(&state, app_id).await;
+
+    // Post 'failed' — row starts at 'running' which is active, so this fires.
+    handle_agent_message(
+        &state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "deployment_status",
+            "deployment_id": deployment_id,
+            "status": "failed",
+            "failure": "health check timed out"
+        }),
+    )
+    .await;
+    assert_eq!(
+        deployment_status_by_id(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("failed"),
+        "deployment should be 'failed'"
+    );
+
+    // A late 'success' event must be rejected because the row is now terminal.
+    handle_agent_message(
+        &state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "deployment_status",
+            "deployment_id": deployment_id,
+            "status": "success",
+            "container_name": format!("hostlet-app-{app_id}"),
+            "published_port": 32100
+        }),
+    )
+    .await;
+    assert_eq!(
+        deployment_status_by_id(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("failed"),
+        "terminal status must not be overwritten by late 'success'"
+    );
+
+    // Likewise a late 'building' event.
+    handle_agent_message(
+        &state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "deployment_status",
+            "deployment_id": deployment_id,
+            "status": "building"
+        }),
+    )
+    .await;
+    assert_eq!(
+        deployment_status_by_id(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("failed"),
+        "terminal status must not be overwritten by late 'building'"
+    );
+
+    // current_deployment_id must remain NULL — success was never applied.
+    assert_eq!(
+        current_deployment(&state, app_id).await,
+        None,
+        "current_deployment_id must not be set when success was blocked"
+    );
+}
+
+/// A deployment_status 'success' event enqueues a docker_cleanup job whose
+/// keep_containers includes both the new current container and the prior
+/// success deployment's container (the rollback target).
+#[tokio::test]
+async fn db_deployment_success_enqueues_docker_cleanup_with_rollback_target_kept() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+
+    // Previous successful deployment — the rollback target.
+    let prev_id = insert_deployment_with_meta(
+        &state,
+        app_id,
+        "success",
+        "hostlet-app-prev",
+        "hostlet/app-prev:v1",
+        10,
+    )
+    .await;
+    sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+        .bind(prev_id)
+        .bind(app_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    // Active (running) deployment that will transition to success.
+    let active_id = insert_deployment_with_meta(
+        &state,
+        app_id,
+        "running",
+        "hostlet-app-cur",
+        "hostlet/app-cur:v2",
+        1,
+    )
+    .await;
+
+    // Send the success status event.
+    handle_agent_message(
+        &state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "deployment_status",
+            "deployment_id": active_id,
+            "status": "success",
+            "container_name": "hostlet-app-cur",
+            "image_tag": "hostlet/app-cur:v2",
+            "published_port": 32099
+        }),
+    )
+    .await;
+
+    // A docker_cleanup job must have been enqueued for TEST_SERVER_ID.
+    let job_row = sqlx::query(
+        "SELECT payload_json FROM agent_jobs \
+         WHERE server_id=$1 AND job_type='docker_cleanup' AND status='queued' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(TEST_SERVER_ID)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap();
+
+    let row = job_row.expect("docker_cleanup job must have been enqueued");
+    let payload: serde_json::Value = row.get("payload_json");
+    let keep = payload["keep_containers"]
+        .as_array()
+        .expect("keep_containers must be an array");
+    let keep_names: Vec<&str> = keep.iter().filter_map(|v| v.as_str()).collect();
+
+    assert!(
+        keep_names.contains(&"hostlet-app-cur"),
+        "new current container must be in keep list; got {keep_names:?}"
+    );
+    assert!(
+        keep_names.contains(&"hostlet-app-prev"),
+        "prior success container (rollback target) must be in keep list; got {keep_names:?}"
+    );
+    assert_eq!(
+        payload["dry_run"], false,
+        "docker_cleanup payload must have dry_run=false"
+    );
 }

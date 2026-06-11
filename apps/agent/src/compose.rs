@@ -361,8 +361,8 @@ pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     let route_key = p
         .get("route_key")
         .and_then(|v| v.as_str())
-        .map(safe_name)
-        .unwrap_or_else(|| safe_name(p["app_id"].as_str().unwrap_or("app")));
+        .map(app_slug)
+        .unwrap_or_else(|| app_slug(p["app_id"].as_str().unwrap_or("app")));
     let port_value = p["published_port"]
         .as_i64()
         .context("target deployment is missing a published port; redeploy before rolling back")?;
@@ -426,8 +426,8 @@ pub(crate) async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
     let route_key = p
         .get("route_key")
         .and_then(|v| v.as_str())
-        .map(safe_name)
-        .unwrap_or_else(|| safe_name(p["app_id"].as_str().unwrap_or("app")));
+        .map(app_slug)
+        .unwrap_or_else(|| app_slug(p["app_id"].as_str().unwrap_or("app")));
     if let Some(project) = p.get("compose_project").and_then(|v| v.as_str()) {
         remove_compose_project_resources(project).await?;
     }
@@ -489,11 +489,8 @@ pub(crate) async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
 
     let images = hostlet_images().await?;
     for image in images {
-        if keep_images.contains(&image) {
+        if !cleanup_should_remove_image(&image, &keep_images)? {
             continue;
-        }
-        if !valid_hostlet_image(&image) {
-            bail!("refusing to clean invalid managed image name");
         }
         if !dry_run {
             run_quiet_absent_ok("docker", &["image", "rm", "-f", &image], &["No such image"])
@@ -503,16 +500,45 @@ pub(crate) async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Container name prefix that marks a deployment container — the ONLY kind of
+/// container cleanup may remove.  Other `hostlet-`-prefixed containers (the
+/// managed BuildKit daemon, `hostlet-ci-*` CI fixtures, the local caddy router)
+/// share the docker daemon, may belong to concurrent work, and must never be
+/// touched: cleanup runs automatically after every successful deploy, and on a
+/// shared host (e.g. a CI runner) reaping by the broad `hostlet-` prefix kills
+/// other jobs' BuildKit containers mid-build.
+const CLEANUP_CONTAINER_PREFIX: &str = "hostlet-app-";
+
+/// Image repository prefix that marks a deployment image — the only kind of
+/// image cleanup may remove.  Protects e.g. `hostlet/railpack-fixture-*`.
+const CLEANUP_IMAGE_PREFIX: &str = "hostlet/app-";
+
 fn cleanup_should_remove_container(
     container: &str,
     keep_containers: &HashSet<String>,
     compose_managed: bool,
 ) -> anyhow::Result<bool> {
+    if !container.starts_with(CLEANUP_CONTAINER_PREFIX) {
+        return Ok(false);
+    }
     if keep_containers.contains(container) || compose_managed {
         return Ok(false);
     }
     if !valid_container_name(container) {
         bail!("refusing to clean invalid managed container name");
+    }
+    Ok(true)
+}
+
+fn cleanup_should_remove_image(image: &str, keep_images: &HashSet<String>) -> anyhow::Result<bool> {
+    if !image.starts_with(CLEANUP_IMAGE_PREFIX) {
+        return Ok(false);
+    }
+    if keep_images.contains(image) {
+        return Ok(false);
+    }
+    if !valid_hostlet_image(image) {
+        bail!("refusing to clean invalid managed image name");
     }
     Ok(true)
 }
@@ -688,50 +714,6 @@ pub(crate) async fn run_capture_trim(
         .context("command output was not valid UTF-8")
 }
 
-pub(crate) async fn ensure_checkout_remote(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    expected_remote: &str,
-) -> anyhow::Result<()> {
-    let remote = run_capture_trim(
-        cfg,
-        deployment_id,
-        "git",
-        &[
-            "-C",
-            checkout.to_str().unwrap(),
-            "config",
-            "--get",
-            "remote.origin.url",
-        ],
-    )
-    .await?;
-    if normalize_git_remote(&remote) != normalize_git_remote(expected_remote) {
-        bail!("existing checkout remote does not match the requested repository");
-    }
-    Ok(())
-}
-
-pub(crate) async fn verify_git_head(
-    cfg: &Config,
-    deployment_id: Uuid,
-    checkout: &Path,
-    expected_commit: &str,
-) -> anyhow::Result<()> {
-    let head = run_capture_trim(
-        cfg,
-        deployment_id,
-        "git",
-        &["-C", checkout.to_str().unwrap(), "rev-parse", "HEAD"],
-    )
-    .await?;
-    if !head.eq_ignore_ascii_case(expected_commit) {
-        bail!("checked-out commit did not match the signed deployment commit");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,11 +781,47 @@ mod tests {
 
     #[test]
     fn docker_cleanup_rejects_invalid_unkept_container_names() {
-        let err =
-            cleanup_should_remove_container("not-hostlet-app", &HashSet::new(), false).unwrap_err();
+        let err = cleanup_should_remove_container("hostlet-app-bad name", &HashSet::new(), false)
+            .unwrap_err();
 
         assert!(err
             .to_string()
             .contains("refusing to clean invalid managed container name"));
+    }
+
+    #[test]
+    fn docker_cleanup_never_touches_non_deployment_containers() {
+        // Cleanup runs automatically after every successful deploy; on a shared
+        // docker daemon (CI runner) these belong to other concurrent work.
+        for name in [
+            "hostlet-railpack-buildkit",
+            "hostlet-railpack-buildkit-ci-27372703297-602616",
+            "hostlet-ci-self-api-postgres-27372659875-576983",
+            "hostlet-caddy",
+            "not-hostlet-app",
+        ] {
+            assert!(
+                !cleanup_should_remove_container(name, &HashSet::new(), false).unwrap(),
+                "{name} must never be reaped"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_cleanup_image_predicate_only_targets_deployment_images() {
+        let keep = HashSet::from(["hostlet/app-keep:current".to_string()]);
+
+        assert!(cleanup_should_remove_image("hostlet/app-stale:old", &keep).unwrap());
+        assert!(!cleanup_should_remove_image("hostlet/app-keep:current", &keep).unwrap());
+        for image in [
+            "hostlet/railpack-fixture-go:27372703297-602616",
+            "hostlet/builder-base:latest",
+            "ghcr.io/shanekanterman04/hostlet-api:v0.2.7",
+        ] {
+            assert!(
+                !cleanup_should_remove_image(image, &keep).unwrap(),
+                "{image} must never be reaped"
+            );
+        }
     }
 }

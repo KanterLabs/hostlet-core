@@ -1,9 +1,86 @@
 use super::*;
 
 pub(crate) const NO_NATIVE_BUILD_PLAN: &str = "No repository Dockerfile selected";
-const HEALTH_CHECK_ATTEMPTS: u8 = 30;
+/// Default attempt count.  Do NOT change — e2e test timing depends on this value.
+const HEALTH_CHECK_ATTEMPTS_DEFAULT: u16 = 30;
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const HEALTH_CHECK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Returns the number of health-check attempts, reading `HOSTLET_HEALTH_CHECK_ATTEMPTS`
+/// via the pure [`health_check_attempts_value`] parser.  Defaults to 30.
+pub(crate) fn health_check_attempts() -> u16 {
+    std::env::var("HOSTLET_HEALTH_CHECK_ATTEMPTS")
+        .ok()
+        .as_deref()
+        .and_then(health_check_attempts_value)
+        .unwrap_or(HEALTH_CHECK_ATTEMPTS_DEFAULT)
+}
+
+/// Parses a raw `HOSTLET_HEALTH_CHECK_ATTEMPTS` string: trims whitespace,
+/// parses as u16, accepts 1..=900.  Returns `None` for empty/invalid input.
+pub(crate) fn health_check_attempts_value(value: &str) -> Option<u16> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed
+        .parse::<u16>()
+        .ok()
+        .filter(|&n| (1..=900).contains(&n))
+}
+
+/// Classifies four-token Docker inspect output as a fatal container failure.
+/// Format: "Running Restarting OOMKilled ExitCode" (output of
+/// [`CONTAINER_STATE_INSPECT_FORMAT`]).
+///
+/// Returns `Some(message)` when the container will not recover on its own and
+/// further health probing is pointless.  Returns `None` for running, restarting
+/// (crash-loop that may self-recover), or malformed output (keep probing).
+pub(crate) fn container_fatal_state(inspect_stdout: &str) -> Option<String> {
+    let mut parts = inspect_stdout.split_whitespace();
+    let running = parts.next()?;
+    let restarting = parts.next()?;
+    let oom_killed = parts.next()?;
+    let exit_code = parts.next().unwrap_or("unknown");
+    if oom_killed == "true" {
+        return Some(
+            "container was OOM-killed during startup; raise the app memory limit and redeploy"
+                .into(),
+        );
+    }
+    if running == "false" && restarting == "false" {
+        return Some(format!(
+            "container exited with code {exit_code} before passing the health check"
+        ));
+    }
+    None
+}
+
+/// Runs `docker inspect` on `container` and checks whether it has entered a
+/// fatal non-recoverable state.
+///
+/// Returns `None` when the daemon is unavailable/slow (transient hiccup — keep
+/// probing) or when the container is running/restarting and may still pass.
+/// Returns `Some(message)` only for OOM-kill, clean exit, or gone-missing.
+pub(crate) async fn fatal_container_failure(container: &str) -> Option<String> {
+    let output = command_output(
+        "docker",
+        &["inspect", "-f", CONTAINER_STATE_INSPECT_FORMAT, container],
+        Duration::from_secs(10),
+    )
+    .await;
+    match output {
+        Err(_) => None, // daemon hiccup — treat as keep-probing
+        Ok(out) if !out.status.success() => {
+            // inspect failed: the container is gone (removed externally).
+            Some("container no longer exists; it may have been removed externally".into())
+        }
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            container_fatal_state(stdout.trim())
+        }
+    }
+}
 
 pub(crate) fn normalize_git_remote(value: &str) -> String {
     value
@@ -338,6 +415,7 @@ pub(crate) async fn wait_health(
     let url = format!("http://{}:{port}{path}", cfg.health_host);
     let started = Instant::now();
     let health_client = &cfg.http;
+    let max_attempts = health_check_attempts();
     log(
         cfg,
         deployment_id,
@@ -345,7 +423,7 @@ pub(crate) async fn wait_health(
         &format!("Waiting for health check: {url}"),
     )
     .await;
-    for attempt in 1..=HEALTH_CHECK_ATTEMPTS {
+    for attempt in 1..=max_attempts {
         match health_check_request(health_client, &url, HEALTH_CHECK_REQUEST_TIMEOUT).await {
             Ok(resp) if resp.status().is_success() => {
                 log(cfg, deployment_id, "stdout", "Health check passed.").await;
@@ -357,20 +435,28 @@ pub(crate) async fn wait_health(
                     deployment_id,
                     "stdout",
                     &format!(
-                        "Health check attempt {attempt}/{HEALTH_CHECK_ATTEMPTS} returned HTTP {}.",
+                        "Health check attempt {attempt}/{max_attempts} returned HTTP {}.",
                         resp.status()
                     ),
                 )
                 .await;
+                if let Some(msg) = fatal_container_failure(container).await {
+                    bail!("{msg}");
+                }
             }
             Err(err) => {
                 log(
                     cfg,
                     deployment_id,
                     "stdout",
-                    &format!("Health check attempt {attempt}/{HEALTH_CHECK_ATTEMPTS} did not connect: {err}"),
+                    &format!(
+                        "Health check attempt {attempt}/{max_attempts} did not connect: {err}"
+                    ),
                 )
                 .await;
+                if let Some(msg) = fatal_container_failure(container).await {
+                    bail!("{msg}");
+                }
             }
         }
         if attempt == 5 || attempt == 15 {
@@ -382,15 +468,15 @@ pub(crate) async fn wait_health(
             )
             .await;
         }
-        if should_wait_before_next_health_attempt(attempt) {
+        if should_wait_before_next_health_attempt(attempt, max_attempts) {
             tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
         }
     }
     bail!("no successful response from {url}");
 }
 
-fn should_wait_before_next_health_attempt(attempt: u8) -> bool {
-    attempt < HEALTH_CHECK_ATTEMPTS
+fn should_wait_before_next_health_attempt(attempt: u16, max_attempts: u16) -> bool {
+    attempt < max_attempts
 }
 
 async fn health_check_request(
@@ -559,11 +645,56 @@ mod tests {
 
     #[test]
     fn health_check_retry_schedule_skips_delay_after_final_attempt() {
-        assert!(should_wait_before_next_health_attempt(
-            HEALTH_CHECK_ATTEMPTS - 1
-        ));
-        assert!(!should_wait_before_next_health_attempt(
-            HEALTH_CHECK_ATTEMPTS
-        ));
+        assert!(should_wait_before_next_health_attempt(29, 30));
+        assert!(!should_wait_before_next_health_attempt(30, 30));
+    }
+
+    #[test]
+    fn health_check_attempts_value_accepts_valid_range() {
+        assert_eq!(health_check_attempts_value("1"), Some(1));
+        assert_eq!(health_check_attempts_value("30"), Some(30));
+        assert_eq!(health_check_attempts_value("900"), Some(900));
+        assert_eq!(health_check_attempts_value(" 60 "), Some(60));
+    }
+
+    #[test]
+    fn health_check_attempts_value_rejects_out_of_range_and_invalid() {
+        assert_eq!(health_check_attempts_value("0"), None);
+        assert_eq!(health_check_attempts_value("901"), None);
+        assert_eq!(health_check_attempts_value(""), None);
+        assert_eq!(health_check_attempts_value("  "), None);
+        assert_eq!(health_check_attempts_value("fast"), None);
+    }
+
+    #[test]
+    fn container_fatal_state_running_container_is_not_fatal() {
+        assert_eq!(container_fatal_state("true false false 0"), None);
+    }
+
+    #[test]
+    fn container_fatal_state_restarting_container_keeps_probing() {
+        assert_eq!(container_fatal_state("false true false 1"), None);
+    }
+
+    #[test]
+    fn container_fatal_state_stopped_container_reports_exit_code() {
+        let msg = container_fatal_state("false false false 2").unwrap();
+        assert!(
+            msg.contains("2"),
+            "exit code should appear in message: {msg}"
+        );
+        assert!(msg.contains("exited"), "message should mention exit: {msg}");
+    }
+
+    #[test]
+    fn container_fatal_state_oom_killed_container_reports_memory() {
+        let msg = container_fatal_state("false false true 137").unwrap();
+        assert!(msg.contains("OOM"), "OOM message should contain OOM: {msg}");
+    }
+
+    #[test]
+    fn container_fatal_state_malformed_input_is_not_fatal() {
+        assert_eq!(container_fatal_state(""), None);
+        assert_eq!(container_fatal_state("true"), None);
     }
 }

@@ -146,6 +146,11 @@ async fn claim_next_queued_job(
     server_id: Uuid,
     agent_id: &str,
 ) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
+    // The $3 parameter is ACTIVE_DEPLOYMENT_STATUSES.  The docker_cleanup job
+    // payload freezes the keep lists at enqueue time; claiming it while a
+    // deployment is in flight on this server could cause the agent to reap the
+    // brand-new live container.  Defer docker_cleanup jobs until no deployment
+    // is active.  All other job types are unaffected.
     sqlx::query(
         r#"
         UPDATE agent_jobs
@@ -162,6 +167,10 @@ async fn claim_next_queued_job(
             WHERE server_id=$1
               AND status='queued'
               AND COALESCE(payload_json, '{}'::jsonb) <> '{}'::jsonb
+              AND (job_type <> 'docker_cleanup' OR NOT EXISTS (
+                SELECT 1 FROM deployments d
+                WHERE d.server_id=$1 AND d.status = ANY($3)
+              ))
             ORDER BY priority ASC, created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -171,6 +180,7 @@ async fn claim_next_queued_job(
     )
     .bind(server_id)
     .bind(agent_id)
+    .bind(crate::deploy::ACTIVE_DEPLOYMENT_STATUSES)
     .fetch_optional(&state.db)
     .await
 }

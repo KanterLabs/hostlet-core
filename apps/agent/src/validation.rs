@@ -4,6 +4,7 @@ mod docker_resources;
 mod redaction;
 
 pub(crate) use docker_resources::*;
+pub(crate) use hostlet_contracts::app_slug;
 pub(crate) use redaction::*;
 
 pub(crate) fn valid_hostlet_image(value: &str) -> bool {
@@ -40,18 +41,6 @@ pub(crate) fn local_router_config() -> anyhow::Result<Option<LocalRouter>> {
     }))
 }
 
-pub(crate) fn safe_name(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
 pub(crate) fn compose_project_name(app_id: Uuid) -> String {
     format!("hostlet-app-{}", app_id.simple())
 }
@@ -68,7 +57,7 @@ fn compose_override_env_block(app_id: Uuid, deployment_id: Uuid, payload: &Value
     ];
     if let Some(map) = payload.get("env").and_then(|v| v.as_object()) {
         for (key, value) in map {
-            if valid_env_key(key) {
+            if hostlet_contracts::valid_env_key(key) {
                 let value = value.as_str().unwrap_or_default();
                 env.push(format!("{}={}", key, value.replace('\n', "\\n")));
             }
@@ -228,16 +217,6 @@ pub(crate) fn validate_service_name(value: &str) -> anyhow::Result<()> {
         bail!("compose service names must use lowercase letters, numbers, and hyphens");
     }
     Ok(())
-}
-
-pub(crate) fn valid_env_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 128
-        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && key
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 pub(crate) fn env_args(p: &Value) -> Vec<String> {
@@ -433,6 +412,21 @@ mod tests {
         assert!(override_yaml.contains("no-new-privileges:true"));
         assert!(override_yaml.contains("cap_drop:\n      - ALL"));
         assert!(override_yaml.contains("pids_limit: 256"));
+    }
+
+    #[test]
+    fn compose_override_env_block_enforces_strict_contract_env_keys() {
+        // The compose-override env block is the last gate before payload env
+        // keys are rendered into YAML, so it must apply the strict contracts
+        // rule (UPPERCASE | digit | _). A lowercase key the contract rejects
+        // must be dropped, while a canonical UPPERCASE key is kept.
+        let block = compose_override_env_block(
+            Uuid::nil(),
+            Uuid::nil(),
+            &serde_json::json!({"env": {"lowercase": "x", "VALID_KEY": "y"}}),
+        );
+        assert!(block.contains("VALID_KEY=y"));
+        assert!(!block.contains("lowercase=x"));
     }
 
     #[test]

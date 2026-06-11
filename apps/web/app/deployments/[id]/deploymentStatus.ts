@@ -4,6 +4,7 @@
 // across the progress UI and the help text.
 
 export { formatBytes } from "@/lib/format";
+export { formatDuration } from "@/lib/time";
 
 export const DEPLOYMENT_STEPS = [
   "queued",
@@ -31,12 +32,6 @@ export function statusHelp(status: string) {
     case "failed": return "Deployment failed. The previous working version was preserved.";
     default: return "Deployment is queued or running.";
   }
-}
-
-export function formatDuration(ms?: number | null) {
-  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "n/a";
-  if (ms < 1000) return `${ms} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
 }
 
 export type SocketState = "connecting" | "connected" | "reconnecting" | "closed";

@@ -12,13 +12,7 @@ pub(in crate::agent) fn valid_health_status(status: &str) -> bool {
     status.parse::<RuntimeHealthStatus>().is_ok()
 }
 
-pub(in crate::agent) fn valid_container_name(value: &str) -> bool {
-    value.starts_with("hostlet-")
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
+pub(in crate::agent) use hostlet_contracts::valid_container_name;
 
 pub(in crate::agent) fn truncate_log_line(line: &str, max_bytes: usize) -> String {
     if line.len() <= max_bytes {

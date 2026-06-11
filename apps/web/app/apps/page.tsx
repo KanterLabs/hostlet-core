@@ -8,6 +8,7 @@ import { formatTimestamp } from "@/lib/time";
 import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 import { AppShell, EmptyState, FilterTabs, KeyValueGrid, KeyValueItem, PageHeader, Panel, StatusPill } from "@/components/ui";
 import { appVisitHref, appVisitLabel, isActiveDeploy, shortSha } from "./app-links";
+import { deploymentSummary, webhookSummary } from "@/lib/app-status";
 
 type Deployment = {
   id: string;
@@ -156,18 +157,6 @@ export default function Apps() {
           )}
     </AppShell>
   );
-}
-
-function deploymentSummary(deployment?: Deployment | null) {
-  if (!deployment) return "No deployments";
-  const when = deployment.finishedAt || deployment.startedAt;
-  return when ? `${deployment.status || "unknown"} · ${formatTimestamp(when)}` : deployment.status || "unknown";
-}
-
-function webhookSummary(webhook?: App["latestWebhook"]) {
-  if (!webhook) return "No branch push seen";
-  const sha = webhook.commitSha ? ` ${webhook.commitSha.slice(0, 7)}` : "";
-  return webhook.ignoredReason ? `${webhook.status}${sha}: ${webhook.ignoredReason}` : `${webhook.status}${sha}`;
 }
 
 function healthSummary(health?: RuntimeHealth | null) {
