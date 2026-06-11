@@ -443,6 +443,17 @@ pub async fn job_signing_secret_for_server(
     }
 }
 
+/// Startup housekeeping: recover stale deployments, then run the best-effort
+/// automatic Docker cleanup sweep so superseded deployment containers are reaped.
+///
+/// Only the stale-deployment recovery can fail this call; a cleanup sweep
+/// failure is logged and swallowed so it never prevents startup.
+pub async fn recover_stale_deployments_and_cleanup(state: &AppState) -> anyhow::Result<u64> {
+    let recovered = recover_stale_deployments(state).await?;
+    crate::cleanup::auto_cleanup_sweep(state).await;
+    Ok(recovered)
+}
+
 pub async fn recover_stale_deployments(state: &AppState) -> anyhow::Result<u64> {
     let result = sqlx::query(
         "UPDATE deployments

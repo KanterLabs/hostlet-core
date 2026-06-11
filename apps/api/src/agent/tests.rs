@@ -575,6 +575,35 @@ async fn deployment_runtime_metadata(state: &AppState, deployment_id: Uuid) -> s
         .unwrap()
 }
 
+/// Inserts a deployment with explicit `finished_at` and `container_name`/`image_tag`
+/// so the keep-list query can distinguish it from other fixtures.
+async fn insert_deployment_with_meta(
+    state: &AppState,
+    app_id: Uuid,
+    status: &str,
+    container_name: &str,
+    image_tag: &str,
+    minutes_ago: i32,
+) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO deployments
+           (app_id,server_id,status,commit_sha,container_name,image_tag,\
+            started_at,finished_at,runtime_kind)
+         VALUES ($1,$2,$3,'HEAD',$4,$5,now(),\
+           now() - ($6 * interval '1 minute'),'single')
+         RETURNING id",
+    )
+    .bind(app_id)
+    .bind(TEST_SERVER_ID)
+    .bind(status)
+    .bind(container_name)
+    .bind(image_tag)
+    .bind(minutes_ago)
+    .fetch_one(&state.db)
+    .await
+    .unwrap()
+}
+
 fn rand_id() -> i64 {
     let bytes = *Uuid::new_v4().as_bytes();
     // Mask off the sign bit so the result is always non-negative without the
@@ -792,5 +821,92 @@ async fn db_terminal_deployment_ignores_late_agent_events() {
         current_deployment(&state, app_id).await,
         None,
         "current_deployment_id must not be set when success was blocked"
+    );
+}
+
+/// A deployment_status 'success' event enqueues a docker_cleanup job whose
+/// keep_containers includes both the new current container and the prior
+/// success deployment's container (the rollback target).
+#[tokio::test]
+async fn db_deployment_success_enqueues_docker_cleanup_with_rollback_target_kept() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+
+    // Previous successful deployment — the rollback target.
+    let prev_id = insert_deployment_with_meta(
+        &state,
+        app_id,
+        "success",
+        "hostlet-app-prev",
+        "hostlet/app-prev:v1",
+        10,
+    )
+    .await;
+    sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+        .bind(prev_id)
+        .bind(app_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    // Active (running) deployment that will transition to success.
+    let active_id = insert_deployment_with_meta(
+        &state,
+        app_id,
+        "running",
+        "hostlet-app-cur",
+        "hostlet/app-cur:v2",
+        1,
+    )
+    .await;
+
+    // Send the success status event.
+    handle_agent_message(
+        &state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "deployment_status",
+            "deployment_id": active_id,
+            "status": "success",
+            "container_name": "hostlet-app-cur",
+            "image_tag": "hostlet/app-cur:v2",
+            "published_port": 32099
+        }),
+    )
+    .await;
+
+    // A docker_cleanup job must have been enqueued for TEST_SERVER_ID.
+    let job_row = sqlx::query(
+        "SELECT payload_json FROM agent_jobs \
+         WHERE server_id=$1 AND job_type='docker_cleanup' AND status='queued' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(TEST_SERVER_ID)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap();
+
+    let row = job_row.expect("docker_cleanup job must have been enqueued");
+    let payload: serde_json::Value = row.get("payload_json");
+    let keep = payload["keep_containers"]
+        .as_array()
+        .expect("keep_containers must be an array");
+    let keep_names: Vec<&str> = keep.iter().filter_map(|v| v.as_str()).collect();
+
+    assert!(
+        keep_names.contains(&"hostlet-app-cur"),
+        "new current container must be in keep list; got {keep_names:?}"
+    );
+    assert!(
+        keep_names.contains(&"hostlet-app-prev"),
+        "prior success container (rollback target) must be in keep list; got {keep_names:?}"
+    );
+    assert_eq!(
+        payload["dry_run"], false,
+        "docker_cleanup payload must have dry_run=false"
     );
 }

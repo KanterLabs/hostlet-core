@@ -144,6 +144,13 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
         {
             tracing::warn!(error = %err, deployment_id = %id, "failed to enqueue automatic screenshot");
         }
+        // After the current_deployment_id update (so keep lists rank the new
+        // deployment as current), trigger best-effort automatic Docker cleanup.
+        if status == "success" {
+            if let Err(err) = crate::cleanup::auto_cleanup_for_server(state, server_id).await {
+                tracing::warn!(error = %err, %server_id, "failed to enqueue automatic Docker cleanup");
+            }
+        }
     }
 }
 
