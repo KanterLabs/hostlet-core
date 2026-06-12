@@ -108,21 +108,24 @@ const LIVE_DOCKER_DEPLOYMENT_STATUSES: &[&str] = &["success", "rolled_back"];
 /// SQL body of the `candidates` CTE shared by both the keep-list query and the
 /// stale-container count query.  Factored here so the two queries cannot diverge.
 ///
-/// Parameter `$1` is the set of statuses that qualify a deployment as a
-/// candidate (protected statuses: active + success + rolled_back).
+/// `$1` = protected statuses (active + success + rolled_back).  `$4` (`bigint`)
+/// = keep-failed-hours knob: when > 0, recently-finished
+/// `failed`/`expired`/`cancelled` deployments also enter the CTE.  `rn` is
+/// CASE-gated AND partition-gated on `d.status = ANY($1)` so those extra rows
+/// get `NULL` rn and cannot displace protected rows from `rn <= keep_previous + 1`
+/// slots (same mechanism as `success_rn`).
 ///
-/// The `success_rn` column ranks status='success' deployments that are not the
-/// current deployment per app, ordered by `finished_at DESC NULLS LAST,
-/// created_at DESC`.  This explicitly protects rollback targets: even when a
-/// `rolled_back` row occupies the `rn=2` slot and pushes the most-recent
-/// non-current success row to `rn=3`, `success_rn` keeps it protected.
-/// See `deploy.rs::create_and_send_rollback` for the target-selection query.
+/// `success_rn` ranks non-current success rows per app by `finished_at DESC`.
+/// It protects rollback targets even when a `rolled_back` row occupies rn=2 and
+/// pushes the most-recent success to rn=3.  See `deploy.rs::create_and_send_rollback`.
 const CANDIDATES_CTE_BODY: &str = r#"SELECT d.id, d.container_name, d.image_tag, d.status,
-     row_number() OVER (
-       PARTITION BY d.app_id
-       ORDER BY CASE WHEN a.current_deployment_id=d.id THEN 0 ELSE 1 END,
-                d.finished_at DESC NULLS LAST, d.created_at DESC
-     ) AS rn,
+     CASE WHEN d.status = ANY($1) THEN
+       row_number() OVER (
+         PARTITION BY d.app_id, (d.status = ANY($1))
+         ORDER BY CASE WHEN a.current_deployment_id=d.id THEN 0 ELSE 1 END,
+                  d.finished_at DESC NULLS LAST, d.created_at DESC
+       )
+     END AS rn,
      CASE WHEN d.status='success' AND d.id IS DISTINCT FROM a.current_deployment_id THEN
        row_number() OVER (
          PARTITION BY d.app_id,
@@ -131,19 +134,23 @@ const CANDIDATES_CTE_BODY: &str = r#"SELECT d.id, d.container_name, d.image_tag,
        )
      END AS success_rn
   FROM deployments d JOIN apps a ON a.id=d.app_id
-  WHERE d.status = ANY($1)"#;
+  WHERE d.status = ANY($1)
+     OR ($4::bigint > 0
+         AND d.status IN ('failed','expired','cancelled')
+         AND COALESCE(d.finished_at,d.updated_at,d.created_at)
+               >= now() - ($4::bigint * interval '1 hour'))"#;
 
 /// Keep predicate used in both the keep-list query and the stale-count's
 /// `protected` sub-select.  `$2` = active statuses, `$3` = keep_previous.
 ///
-/// A deployment is kept when any of:
-/// - `status = ANY($2)`: it is actively in progress (never reap live containers)
-/// - `rn <= $3 + 1`: it is the current deployment (rn=1) or among the most
-///   recent `keep_previous` non-active rows per app
-/// - `success_rn <= $3`: it is among the `keep_previous` most-recent
-///   rollback targets (success, not current) — protects them even when a
-///   `rolled_back` row pushes them past the `rn <= $3 + 1` threshold
-const KEEP_PREDICATE: &str = "status = ANY($2) OR rn <= $3 + 1 OR success_rn <= $3";
+/// Keeps a row when any of: (1) `status = ANY($2)` — in-progress, never reap;
+/// (2) `rn <= $3 + 1` — current or within the keep_previous window; (3)
+/// `success_rn <= $3` — rollback targets protected even when pushed past rn+1
+/// by a rolled_back row; (4) `status IN ('failed','expired','cancelled')` —
+/// recency enforced by the CTE WHERE, so this is a no-op when `$4 = 0`.
+/// Status list here must stay identical to the one in `CANDIDATES_CTE_BODY`.
+const KEEP_PREDICATE: &str =
+    "status = ANY($2) OR rn <= $3 + 1 OR success_rn <= $3 OR status IN ('failed','expired','cancelled')";
 
 // ---------------------------------------------------------------------------
 // Environment knobs
@@ -172,6 +179,34 @@ fn cleanup_keep_previous_value(value: &str) -> Option<i64> {
         return None;
     }
     v.parse::<i64>().ok().filter(|n| (1..=100).contains(n))
+}
+
+const DEFAULT_CLEANUP_KEEP_FAILED_HOURS: i64 = 0;
+
+/// Return the `HOSTLET_CLEANUP_KEEP_FAILED_HOURS` value, defaulting to
+/// [`DEFAULT_CLEANUP_KEEP_FAILED_HOURS`] (disabled) when unset or invalid.
+///
+/// When > 0, keeps containers/images of `failed`/`expired`/`cancelled`
+/// deployments whose `COALESCE(finished_at,updated_at,created_at)` is within
+/// that many hours, so failed tenants stay debuggable.  Honoured by all
+/// cleanup paths.  Valid range: `[0, 720]` (0 = disabled, 720 = 30 days).
+pub(crate) fn cleanup_keep_failed_hours() -> i64 {
+    std::env::var("HOSTLET_CLEANUP_KEEP_FAILED_HOURS")
+        .ok()
+        .and_then(|v| cleanup_keep_failed_hours_value(&v))
+        .unwrap_or(DEFAULT_CLEANUP_KEEP_FAILED_HOURS)
+}
+
+/// Pure validator for `HOSTLET_CLEANUP_KEEP_FAILED_HOURS`.
+///
+/// Returns `None` for empty, non-numeric, negative, or > 720 input.  Zero is
+/// VALID and means disabled.
+fn cleanup_keep_failed_hours_value(value: &str) -> Option<i64> {
+    let v = value.trim();
+    if v.is_empty() {
+        return None;
+    }
+    v.parse::<i64>().ok().filter(|n| (0..=720).contains(n))
 }
 
 /// Return `true` unless `HOSTLET_AUTO_CLEANUP` is set to a falsy value.
@@ -210,6 +245,7 @@ struct DockerKeepLists {
 async fn docker_keep_lists(
     state: &AppState,
     keep_previous: i64,
+    keep_failed_hours: i64,
 ) -> anyhow::Result<DockerKeepLists> {
     let active_statuses = deployment_status_strings(deploy::ACTIVE_DEPLOYMENT_STATUSES);
     let protected_statuses = docker_cleanup_keep_statuses();
@@ -222,6 +258,7 @@ async fn docker_keep_lists(
     .bind(&protected_statuses)
     .bind(&active_statuses)
     .bind(keep_previous)
+    .bind(keep_failed_hours)
     .fetch_all(&state.db)
     .await?;
     let mut keep_containers = keep_rows
@@ -244,7 +281,11 @@ async fn docker_keep_lists(
 
 /// Count deployments whose container would be reaped by a Docker cleanup with
 /// the given `keep_previous` setting.
-async fn stale_container_count(state: &AppState, keep_previous: i64) -> anyhow::Result<i64> {
+async fn stale_container_count(
+    state: &AppState,
+    keep_previous: i64,
+    keep_failed_hours: i64,
+) -> anyhow::Result<i64> {
     let active_statuses = deployment_status_strings(deploy::ACTIVE_DEPLOYMENT_STATUSES);
     let protected_statuses = docker_cleanup_keep_statuses();
     sqlx::query_scalar::<_, i64>(&format!(
@@ -261,6 +302,7 @@ async fn stale_container_count(state: &AppState, keep_previous: i64) -> anyhow::
     .bind(&protected_statuses)
     .bind(&active_statuses)
     .bind(keep_previous)
+    .bind(keep_failed_hours)
     .fetch_one(&state.db)
     .await
     .map_err(Into::into)
@@ -273,6 +315,15 @@ async fn stale_container_count(state: &AppState, keep_previous: i64) -> anyhow::
 /// Build a full cleanup plan: database row counts + Docker keep lists + stale
 /// container count.  Used by both the HTTP preview endpoint and [`run_cleanup`].
 pub async fn cleanup_plan(state: &AppState) -> anyhow::Result<CleanupPlan> {
+    cleanup_plan_with_keep_failed_hours(state, cleanup_keep_failed_hours()).await
+}
+
+/// [`cleanup_plan`] with an explicit keep-failed-hours value.  `pub` so cloud's
+/// overlay fork and DB-gated tests can inject the knob without env-var side effects.
+pub async fn cleanup_plan_with_keep_failed_hours(
+    state: &AppState,
+    keep_failed_hours: i64,
+) -> anyhow::Result<CleanupPlan> {
     let database = CleanupDatabasePreview {
         deployment_logs: cleanup_count(state, &cleanup_deployment_logs_sql()).await?,
         health_events: cleanup_count(state, &HEALTH_EVENTS_RULE.count_sql()).await?,
@@ -282,8 +333,9 @@ pub async fn cleanup_plan(state: &AppState) -> anyhow::Result<CleanupPlan> {
         failed_agent_jobs: cleanup_count(state, &FAILED_AGENT_JOBS_RULE.count_sql()).await?,
     };
     let keep_previous = cleanup_keep_previous();
-    let lists = docker_keep_lists(state, keep_previous).await?;
-    let stale_deployment_containers = stale_container_count(state, keep_previous).await?;
+    let lists = docker_keep_lists(state, keep_previous, keep_failed_hours).await?;
+    let stale_deployment_containers =
+        stale_container_count(state, keep_previous, keep_failed_hours).await?;
     let local_server_id =
         sqlx::query_scalar::<_, Uuid>("SELECT id FROM servers WHERE kind='local' LIMIT 1")
             .fetch_optional(&state.db)
@@ -362,7 +414,8 @@ pub async fn auto_cleanup_for_server(
         return Ok(None);
     }
     let keep_previous = cleanup_keep_previous();
-    let lists = docker_keep_lists(state, keep_previous).await?;
+    let keep_failed_hours = cleanup_keep_failed_hours();
+    let lists = docker_keep_lists(state, keep_previous, keep_failed_hours).await?;
     // Supersede any queued docker_cleanup jobs for this server whose keep lists
     // predate the current deployment state.  Only 'queued' jobs are targeted;
     // a job that is already 'claimed' or 'running' is left to complete.
@@ -598,6 +651,21 @@ mod tests {
         assert!(auto_cleanup_enabled_value("true"));
         assert!(auto_cleanup_enabled_value("yes"));
         assert!(auto_cleanup_enabled_value("anything"));
+    }
+
+    #[test]
+    fn cleanup_keep_failed_hours_value_accepts_zero_through_720() {
+        assert_eq!(cleanup_keep_failed_hours_value("0"), Some(0));
+        assert_eq!(cleanup_keep_failed_hours_value(" 24 "), Some(24));
+        assert_eq!(cleanup_keep_failed_hours_value("720"), Some(720));
+    }
+
+    #[test]
+    fn cleanup_keep_failed_hours_value_rejects_negative_empty_nonnumeric_over_720() {
+        assert_eq!(cleanup_keep_failed_hours_value("-1"), None);
+        assert_eq!(cleanup_keep_failed_hours_value("721"), None);
+        assert_eq!(cleanup_keep_failed_hours_value(""), None);
+        assert_eq!(cleanup_keep_failed_hours_value("soon"), None);
     }
 
     // DB-gated helpers -----------------------------------------------------------
@@ -837,5 +905,94 @@ mod tests {
             plan.docker.stale_deployment_containers, 1,
             "exactly one container should be stale (A)"
         );
+    }
+
+    /// Verifies the keep-failed-hours knob and non-displacement guarantee.
+    ///
+    /// Scenario: C(success/current,5m) > F(failed,60m) > R(rolled_back,120m) >
+    /// O(failed,1500m=25h).  F newer than R so R's rn=2 slot is the stress case.
+    /// knob=24: C/R/F kept, O not, stale=1.  knob=0: only C/R kept, stale=2.
+    #[tokio::test]
+    async fn db_cleanup_plan_protects_recent_failed_deployments_only() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cleanup_db(&state).await;
+        let user_id = insert_cleanup_user(&state).await;
+        let app_id = insert_cleanup_app(&state, user_id).await;
+
+        // C: current success (5 min ago)
+        let c = insert_cleanup_deployment_ago(
+            &state,
+            app_id,
+            "success",
+            "hostlet/app-c:v1",
+            "hostlet-app-c",
+            5,
+        )
+        .await;
+        sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+            .bind(c)
+            .bind(app_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // F: recent failed (60 min ago — newer than R, exercises non-displacement)
+        insert_cleanup_deployment_ago(
+            &state,
+            app_id,
+            "failed",
+            "hostlet/app-f:bad",
+            "hostlet-app-f",
+            60,
+        )
+        .await;
+        // R: rolled_back (120 min ago)
+        insert_cleanup_deployment_ago(
+            &state,
+            app_id,
+            "rolled_back",
+            "hostlet/app-r:v0",
+            "hostlet-app-r",
+            120,
+        )
+        .await;
+        // O: old failed (1500 min = 25 h ago)
+        insert_cleanup_deployment_ago(
+            &state,
+            app_id,
+            "failed",
+            "hostlet/app-o:bad",
+            "hostlet-app-o",
+            1500,
+        )
+        .await;
+
+        // --- knob = 24 h ---
+        let plan = cleanup_plan_with_keep_failed_hours(&state, 24)
+            .await
+            .unwrap();
+        let kc = &plan.keep_containers;
+        assert!(kc.contains(&"hostlet-app-c".into()), "C must be kept");
+        assert!(
+            kc.contains(&"hostlet-app-r".into()),
+            "rolled_back row (R) must not be displaced by the recent failed row (F)"
+        );
+        assert!(kc.contains(&"hostlet-app-f".into()), "F(60m) kept");
+        assert!(!kc.contains(&"hostlet-app-o".into()), "O(25h) not kept");
+        assert!(plan.keep_images.contains(&"hostlet/app-f:bad".into()));
+        assert!(!plan.keep_images.contains(&"hostlet/app-o:bad".into()));
+        assert_eq!(plan.docker.stale_deployment_containers, 1);
+
+        // --- knob = 0 (disabled) ---
+        let plan = cleanup_plan_with_keep_failed_hours(&state, 0)
+            .await
+            .unwrap();
+        let kc = &plan.keep_containers;
+        assert!(kc.contains(&"hostlet-app-c".into()));
+        assert!(kc.contains(&"hostlet-app-r".into()));
+        assert!(!kc.contains(&"hostlet-app-f".into()), "F not kept(0)");
+        assert!(!kc.contains(&"hostlet-app-o".into()), "O not kept(0)");
+        assert_eq!(plan.docker.stale_deployment_containers, 2);
     }
 }

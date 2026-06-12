@@ -42,6 +42,7 @@ pub async fn health_targets(
         r#"
         SELECT a.id AS app_id,
                a.health_path,
+               a.container_port,
                d.id AS deployment_id,
                d.container_name,
                d.published_port
@@ -66,6 +67,7 @@ pub async fn health_targets(
                         "appId": row.get::<Uuid, _>("app_id"),
                         "deploymentId": row.get::<Uuid, _>("deployment_id"),
                         "containerName": row.get::<String, _>("container_name"),
+                        "containerPort": row.get::<i32, _>("container_port"),
                         "publishedPort": row.get::<i32, _>("published_port"),
                         "healthPath": row.get::<String, _>("health_path"),
                     })

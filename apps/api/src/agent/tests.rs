@@ -351,6 +351,7 @@ async fn assert_health_status_is_recorded(state: &AppState, app_id: Uuid, deploy
             "deployment_id": deployment_id,
             "container_name": format!("hostlet-app-{app_id}"),
             "status": "healthy",
+            "published_port": 32055,
             "http_status": 200,
             "latency_ms": 12
         }),
@@ -359,6 +360,10 @@ async fn assert_health_status_is_recorded(state: &AppState, app_id: Uuid, deploy
     assert_eq!(
         health_status(state, app_id).await.as_deref(),
         Some("healthy")
+    );
+    assert_eq!(
+        deployment_published_port(state, deployment_id).await,
+        Some(32055)
     );
 }
 
@@ -635,6 +640,15 @@ async fn deployment_status_by_id(state: &AppState, deployment_id: Uuid) -> Optio
         .fetch_optional(&state.db)
         .await
         .unwrap()
+}
+
+async fn deployment_published_port(state: &AppState, deployment_id: Uuid) -> Option<i32> {
+    sqlx::query_scalar("SELECT published_port FROM deployments WHERE id=$1")
+        .bind(deployment_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap()
+        .flatten()
 }
 
 async fn deployment_failure_summary(state: &AppState, deployment_id: Uuid) -> Option<String> {

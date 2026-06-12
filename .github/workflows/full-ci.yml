@@ -41,12 +41,7 @@ jobs:
           # Scheduled runs validate staging, not the default branch.
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: ../../scripts/ci-verify-runner.sh
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: node --version && pnpm --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm exec playwright install chromium

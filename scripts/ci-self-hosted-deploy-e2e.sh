@@ -140,6 +140,60 @@ wait_job_status() {
   return 1
 }
 
+wait_container_running() {
+  local container="$1"
+  local running=""
+  for _ in $(seq 1 45); do
+    running="$(docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null || true)"
+    if [ "${running}" = "true" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for ${container} to be running again" >&2
+  docker inspect "${container}" >&2 || true
+  tail -160 "${AGENT_LOG}" >&2 || true
+  return 1
+}
+
+wait_published_health_ok() {
+  local port="$1"
+  local path="$2"
+  local container="${3:-}"
+  for _ in $(seq 1 45); do
+    if curl -fsS "http://127.0.0.1:${port}${path}" 2>/dev/null | grep -q '^ok$'; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for published health on 127.0.0.1:${port}${path}" >&2
+  if [ -n "${container}" ]; then
+    docker inspect --format 'state={{.State.Status}} running={{.State.Running}} exit={{.State.ExitCode}} ports={{json .NetworkSettings.Ports}}' "${container}" >&2 || true
+    docker logs --tail 80 "${container}" >&2 || true
+  fi
+  tail -160 "${AGENT_LOG}" >&2 || true
+  return 1
+}
+
+wait_app_health_checked_after() {
+  local target_app_id="$1"
+  local previous_checked_at="$2"
+  local payload="" status="" checked_at=""
+  for _ in $(seq 1 45); do
+    payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${target_app_id}/health")"
+    status="$(printf '%s' "${payload}" | json_get status)"
+    checked_at="$(printf '%s' "${payload}" | json_get lastCheckedAt || true)"
+    if [ "${status}" = "healthy" ] && [ -n "${checked_at}" ] && [ "${checked_at}" != "${previous_checked_at}" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for fresh healthy runtime status for app ${target_app_id}" >&2
+  printf '%s\n' "${payload}" >&2
+  tail -160 "${AGENT_LOG}" >&2 || true
+  return 1
+}
+
 ensure_railpack() {
   if [ -n "${HOSTLET_RAILPACK_BIN:-}" ] && [ -x "${HOSTLET_RAILPACK_BIN}" ]; then
     return 0
@@ -283,6 +337,7 @@ export HOSTLET_JOB_SIGNING_SECRET="${JOB_SIGNING_SECRET}"
 export HOSTLET_WORKDIR="${TMP_DIR}/agent-work"
 export HOSTLET_LOCAL_MODE=true
 export HOSTLET_HEALTH_HOST=127.0.0.1
+export HOSTLET_RUNTIME_HEALTH_INTERVAL_SECONDS=2
 export HOSTLET_RAILPACK_BUILDKIT_CONTAINER="${RAILPACK_BUILDKIT_CONTAINER}"
 export GIT_CONFIG_GLOBAL
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
@@ -481,7 +536,7 @@ wait_deployment_status "${deployment_id}"
 app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
 published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
 container_name="hostlet-app-${app_id}-${deployment_id}"
-curl -fsS "http://127.0.0.1:${published_port}/health" | grep -q '^ok$'
+wait_published_health_ok "${published_port}" "/health" "${container_name}"
 curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
 
 logs_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
@@ -505,6 +560,38 @@ fi
 docker ps --filter "name=hostlet-app-${app_id}" --format '{{.Ports}}' | grep -q '127.0.0.1'
 assert_container_readonly_rootfs "${container_name}" "false"
 record_deployment_metric "e2e-node-primary" "selfHostedDeployE2e" "${app_detail}"
+
+# ---------------------------------------------------------------------------
+# Runtime auto-start recovery: stop the current container on purpose and prove
+# the recurring health loop starts it again after repeated failures.
+# ---------------------------------------------------------------------------
+wait_app_health_checked_after "${app_id}" ""
+health_before_stop="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}/health")"
+checked_before_stop="$(printf '%s' "${health_before_stop}" | json_get lastCheckedAt)"
+started_before_stop="$(docker inspect --format '{{.State.StartedAt}}' "${container_name}")"
+docker stop "${container_name}" >/dev/null
+stopped_state="$(docker inspect --format '{{.State.Running}}' "${container_name}")"
+if [ "${stopped_state}" != "false" ]; then
+  echo "expected ${container_name} to be stopped, got Running=${stopped_state}" >&2
+  exit 1
+fi
+if curl -fsS "http://127.0.0.1:${published_port}/health" >/dev/null 2>&1; then
+  echo "expected stopped container health check to fail" >&2
+  exit 1
+fi
+wait_container_running "${container_name}"
+started_after_recovery="$(docker inspect --format '{{.State.StartedAt}}' "${container_name}")"
+if [ "${started_after_recovery}" = "${started_before_stop}" ]; then
+  echo "expected ${container_name} StartedAt to change after auto-start" >&2
+  exit 1
+fi
+wait_app_health_checked_after "${app_id}" "${checked_before_stop}"
+app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
+wait_published_health_ok "${published_port}" "/health" "${container_name}"
+recovery_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
+printf '%s' "${recovery_logs}" | grep -q "Health checks failed and container is stopped; starting ${container_name}."
+printf '%s' "${recovery_logs}" | grep -q "Auto-started container ${container_name}."
 
 # ---------------------------------------------------------------------------
 # Redeploy v2: bumping APP_VERSION and redeploying serves v2 (data volume keeps

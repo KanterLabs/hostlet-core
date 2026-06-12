@@ -16,6 +16,7 @@ pub async fn restart_app_container(
         r#"
         SELECT a.server_id,
                a.health_path,
+               a.container_port,
                d.id AS deployment_id,
                d.container_name,
                d.published_port
@@ -57,6 +58,7 @@ pub async fn restart_app_container(
         "app_id": id,
         "deployment_id": deployment_id,
         "container_name": container_name,
+        "container_port": row.get::<i32, _>("container_port"),
         "published_port": published_port,
         "health_path": row.get::<String, _>("health_path"),
     });
