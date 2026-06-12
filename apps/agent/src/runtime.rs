@@ -94,7 +94,7 @@ pub(crate) async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let mut job_claim = tokio::time::interval(Duration::from_secs(3));
     let mut resource_stats = tokio::time::interval(Duration::from_secs(5));
-    let mut runtime_health = tokio::time::interval(Duration::from_secs(60));
+    let mut runtime_health = tokio::time::interval(runtime_health_interval());
     let mut health_counts: HashMap<Uuid, HealthCounts> = HashMap::new();
     loop {
         tokio::select! {
@@ -113,6 +113,26 @@ pub(crate) async fn connect_loop(cfg: Config) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+fn runtime_health_interval() -> Duration {
+    let seconds = std::env::var("HOSTLET_RUNTIME_HEALTH_INTERVAL_SECONDS")
+        .ok()
+        .as_deref()
+        .and_then(runtime_health_interval_seconds)
+        .unwrap_or(60);
+    Duration::from_secs(seconds)
+}
+
+fn runtime_health_interval_seconds(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed
+        .parse::<u64>()
+        .ok()
+        .filter(|n| (1..=3600).contains(n))
 }
 
 pub(crate) async fn claim_and_run_job(cfg: &Config) {
@@ -882,5 +902,20 @@ mod tests {
         assert!(message.contains("Health check failed"));
         assert!(message.contains("failed container was stopped"));
         assert!(!message.contains("left running"));
+    }
+
+    #[test]
+    fn runtime_health_interval_seconds_accepts_valid_range() {
+        assert_eq!(runtime_health_interval_seconds("1"), Some(1));
+        assert_eq!(runtime_health_interval_seconds("60"), Some(60));
+        assert_eq!(runtime_health_interval_seconds(" 3600 "), Some(3600));
+    }
+
+    #[test]
+    fn runtime_health_interval_seconds_rejects_invalid_values() {
+        assert_eq!(runtime_health_interval_seconds("0"), None);
+        assert_eq!(runtime_health_interval_seconds("3601"), None);
+        assert_eq!(runtime_health_interval_seconds(""), None);
+        assert_eq!(runtime_health_interval_seconds("fast"), None);
     }
 }
