@@ -1,6 +1,10 @@
 use super::*;
 
 mod resource_stats;
+#[cfg(test)]
+mod screenshot_tests;
+#[cfg(test)]
+mod status_tests;
 
 pub(crate) use resource_stats::publish_resource_stats;
 
@@ -203,12 +207,15 @@ pub(crate) fn event_retry_delays() -> [Duration; 4] {
 pub(crate) struct HealthCounts {
     failures: u32,
     successes: u32,
+    auto_start_attempted: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct HealthTarget {
     app_id: Uuid,
     deployment_id: Uuid,
     container_name: String,
+    container_port: u16,
     pub(crate) published_port: u16,
     health_path: String,
 }
@@ -227,6 +234,7 @@ fn health_status_event(
         "app_id": target.app_id,
         "deployment_id": target.deployment_id,
         "container_name": target.container_name,
+        "published_port": target.published_port,
         "status": status,
         "checked_url": result.url,
         "http_status": result.http_status,
@@ -253,14 +261,12 @@ pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uu
     let Ok(targets) = health_targets(cfg).await else {
         return;
     };
-    for target in targets {
-        let result = probe_health_target(cfg, &target).await;
+    for mut target in targets {
+        let mut result = probe_health_target(cfg, &target).await;
         let entry = counts.entry(target.app_id).or_default();
-        if result.healthy {
-            entry.successes = entry.successes.saturating_add(1);
-            entry.failures = 0;
-        } else {
-            entry.failures = entry.failures.saturating_add(1);
+        record_health_probe(entry, &result);
+        if should_auto_start_container(entry, &result) {
+            result = auto_start_container(cfg, &mut target, entry).await;
         }
         let status = if result.healthy {
             "healthy"
@@ -274,6 +280,75 @@ pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uu
             health_status_event(&target, &result, status, entry.failures, entry.successes),
         )
         .await;
+    }
+}
+
+fn record_health_probe(entry: &mut HealthCounts, result: &HealthProbeResult) {
+    if result.healthy {
+        entry.successes = entry.successes.saturating_add(1);
+        entry.failures = 0;
+        entry.auto_start_attempted = false;
+    } else {
+        entry.failures = entry.failures.saturating_add(1);
+    }
+}
+
+fn should_auto_start_container(entry: &HealthCounts, result: &HealthProbeResult) -> bool {
+    entry.failures >= 3
+        && !entry.auto_start_attempted
+        && matches!(result.container_state, Some(ContainerState::Stopped(_)))
+}
+
+async fn auto_start_container(
+    cfg: &Config,
+    target: &mut HealthTarget,
+    entry: &mut HealthCounts,
+) -> HealthProbeResult {
+    entry.auto_start_attempted = true;
+    log(
+        cfg,
+        target.deployment_id,
+        "stdout",
+        &format!(
+            "Health checks failed and container is stopped; starting {}.",
+            target.container_name
+        ),
+    )
+    .await;
+    match run_quiet("docker", &["start", &target.container_name]).await {
+        Ok(()) => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if let Ok(port) =
+                docker_published_port(&target.container_name, target.container_port).await
+            {
+                target.published_port = port;
+            }
+            let result = probe_health_target(cfg, target).await;
+            if result.healthy {
+                entry.successes = entry.successes.saturating_add(1);
+                entry.failures = 0;
+                entry.auto_start_attempted = false;
+                log(
+                    cfg,
+                    target.deployment_id,
+                    "stdout",
+                    &format!("Auto-started container {}.", target.container_name),
+                )
+                .await;
+            }
+            result
+        }
+        Err(err) => {
+            let result = failed_health_probe(cfg, target, format!("auto-start failed: {err}"));
+            log(
+                cfg,
+                target.deployment_id,
+                "stderr",
+                result.error.as_deref().unwrap_or("auto-start failed"),
+            )
+            .await;
+            result
+        }
     }
 }
 
@@ -291,6 +366,10 @@ pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyh
     };
     run_quiet("docker", &["restart", &target.container_name]).await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut target = target;
+    if let Ok(port) = docker_published_port(&target.container_name, target.container_port).await {
+        target.published_port = port;
+    }
     let result = probe_health_target(cfg, &target).await;
     post(cfg, single_probe_health_event(&target, &result)).await;
     Ok(())
@@ -576,6 +655,12 @@ pub(crate) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
         .or_else(|| value.get("published_port"))
         .and_then(|v| v.as_i64())
         .and_then(|v| (1..=65_535).contains(&v).then_some(v as u16))?;
+    let container_port = value
+        .get("containerPort")
+        .or_else(|| value.get("container_port"))
+        .and_then(|v| v.as_i64())
+        .and_then(|v| (1..=65_535).contains(&v).then_some(v as u16))
+        .unwrap_or(published_port);
     let health_path = value
         .get("healthPath")
         .or_else(|| value.get("health_path"))
@@ -588,6 +673,7 @@ pub(crate) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
         app_id,
         deployment_id,
         container_name,
+        container_port,
         published_port,
         health_path: health_path.to_string(),
     })
@@ -599,6 +685,7 @@ pub(crate) struct HealthProbeResult {
     http_status: Option<u16>,
     latency_ms: u128,
     error: Option<String>,
+    container_state: Option<ContainerState>,
 }
 
 pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> HealthProbeResult {
@@ -607,14 +694,27 @@ pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> 
         cfg.health_host, target.published_port, target.health_path
     );
     let started = std::time::Instant::now();
-    let running = container_running(&target.container_name).await;
-    if let Err(err) = running {
+    let container_state = match container_state(&target.container_name).await {
+        Ok(state) => state,
+        Err(err) => {
+            return HealthProbeResult {
+                healthy: false,
+                url,
+                http_status: None,
+                latency_ms: started.elapsed().as_millis(),
+                error: Some(err.to_string()),
+                container_state: None,
+            };
+        }
+    };
+    if container_state != ContainerState::Running {
         return HealthProbeResult {
             healthy: false,
             url,
             http_status: None,
             latency_ms: started.elapsed().as_millis(),
-            error: Some(err.to_string()),
+            error: Some(container_state.error_message()),
+            container_state: Some(container_state),
         };
     }
     match cfg
@@ -632,6 +732,7 @@ pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> 
                 http_status: Some(status.as_u16()),
                 latency_ms: started.elapsed().as_millis(),
                 error: health_error_for_status(status),
+                container_state: Some(container_state),
             }
         }
         Err(err) => HealthProbeResult {
@@ -640,7 +741,22 @@ pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> 
             http_status: None,
             latency_ms: started.elapsed().as_millis(),
             error: Some(err.to_string()),
+            container_state: Some(container_state),
         },
+    }
+}
+
+fn failed_health_probe(cfg: &Config, target: &HealthTarget, error: String) -> HealthProbeResult {
+    HealthProbeResult {
+        healthy: false,
+        url: format!(
+            "http://{}:{}{}",
+            cfg.health_host, target.published_port, target.health_path
+        ),
+        http_status: None,
+        latency_ms: 0,
+        error: Some(error),
+        container_state: None,
     }
 }
 
@@ -653,12 +769,37 @@ pub(crate) fn health_error_for_status(status: StatusCode) -> Option<String> {
 }
 
 /// Docker inspect format string that returns four space-separated state fields:
-/// Running, Restarting, OOMKilled, ExitCode.  Shared by `container_running`
-/// (ops) and `fatal_container_failure` (build) so both parse the same format.
+/// Running, Restarting, OOMKilled, ExitCode. Shared by ops health probes and
+/// `fatal_container_failure` (build) so both parse the same format.
 pub(crate) const CONTAINER_STATE_INSPECT_FORMAT: &str =
     "{{.State.Running}} {{.State.Restarting}} {{.State.OOMKilled}} {{.State.ExitCode}}";
 
-pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ContainerState {
+    Running,
+    Restarting(String),
+    Stopped(String),
+    OomKilled,
+    Missing,
+}
+
+impl ContainerState {
+    fn error_message(&self) -> String {
+        match self {
+            Self::Running => String::new(),
+            Self::Restarting(exit_code) => {
+                format!("container is restarting after exit code {exit_code}")
+            }
+            Self::Stopped(exit_code) => {
+                format!("container is not running; last exit code {exit_code}")
+            }
+            Self::OomKilled => "container was OOM-killed".into(),
+            Self::Missing => "container does not exist".into(),
+        }
+    }
+}
+
+async fn container_state(container: &str) -> anyhow::Result<ContainerState> {
     let output = command_output(
         "docker",
         &["inspect", "-f", CONTAINER_STATE_INSPECT_FORMAT, container],
@@ -666,30 +807,29 @@ pub(crate) async fn container_running(container: &str) -> anyhow::Result<()> {
     )
     .await?;
     if !output.status.success() {
-        bail!("container does not exist");
+        return Ok(ContainerState::Missing);
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    inspect_container_state(stdout.trim())
+    inspect_container_state(stdout.trim()).context("docker inspect returned malformed state")
 }
 
-fn inspect_container_state(value: &str) -> anyhow::Result<()> {
+fn inspect_container_state(value: &str) -> Option<ContainerState> {
     let mut parts = value.split_whitespace();
-    let running = parts.next();
-    let restarting = parts.next();
-    let oom_killed = parts.next();
-    let exit_code = parts.next();
-    if restarting == Some("true") {
-        let exit_code = exit_code.unwrap_or("unknown");
-        bail!("container is restarting after exit code {exit_code}");
+    let running = parts.next()?;
+    let restarting = parts.next()?;
+    let oom_killed = parts.next()?;
+    let exit_code = parts.next().unwrap_or("unknown");
+    if restarting == "true" {
+        return Some(ContainerState::Restarting(exit_code.to_string()));
     }
-    if oom_killed == Some("true") {
-        bail!("container was OOM-killed");
+    if oom_killed == "true" {
+        return Some(ContainerState::OomKilled);
     }
-    if running != Some("true") {
-        let exit_code = exit_code.unwrap_or("unknown");
-        bail!("container is not running; last exit code {exit_code}");
+    if running == "true" {
+        Some(ContainerState::Running)
+    } else {
+        Some(ContainerState::Stopped(exit_code.to_string()))
     }
-    Ok(())
 }
 
 pub(crate) async fn hostlet_containers() -> anyhow::Result<Vec<String>> {
@@ -846,120 +986,3 @@ pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
 }
 
 pub(crate) use hostlet_contracts::valid_container_name;
-
-#[cfg(test)]
-mod status_tests {
-    use super::*;
-
-    #[test]
-    fn failed_deployment_status_event_keeps_runtime_metrics() {
-        let deployment_id = Uuid::from_u128(42);
-        let event = deployment_status_event(
-            deployment_id,
-            "failed",
-            StatusDetails {
-                failure: Some("Health check failed"),
-                image: Some("hostlet/demo:latest"),
-                container: Some("hostlet-demo"),
-                published_port: Some(32001),
-                compose_project: Some("hostlet_app_0000000000000000000000000000002a"),
-                runtime_metadata: Some(json!({
-                    "containerStartDurationMs": 125,
-                    "healthCheckDurationMs": 4_000,
-                    "bootDurationMs": 4_125,
-                })),
-                ..StatusDetails::default()
-            },
-        );
-
-        assert_eq!(event["type"], "deployment_status");
-        assert_eq!(event["deployment_id"], deployment_id.to_string());
-        assert_eq!(event["status"], "failed");
-        assert_eq!(event["failure"], "Health check failed");
-        assert_eq!(event["image_tag"], "hostlet/demo:latest");
-        assert_eq!(event["container_name"], "hostlet-demo");
-        assert_eq!(event["published_port"], 32001);
-        assert_eq!(
-            event["compose_project"],
-            "hostlet_app_0000000000000000000000000000002a"
-        );
-        assert_eq!(event["runtime_metadata"]["containerStartDurationMs"], 125);
-        assert_eq!(event["runtime_metadata"]["healthCheckDurationMs"], 4_000);
-        assert_eq!(event["runtime_metadata"]["bootDurationMs"], 4_125);
-    }
-
-    #[test]
-    fn inspect_container_state_accepts_running_container() {
-        inspect_container_state("true false false 0").unwrap();
-    }
-
-    #[test]
-    fn inspect_container_state_reports_restart_loop() {
-        let err = inspect_container_state("true true false 1").unwrap_err();
-
-        assert_eq!(err.to_string(), "container is restarting after exit code 1");
-    }
-
-    #[test]
-    fn inspect_container_state_reports_oom_kill() {
-        let err = inspect_container_state("false false true 137").unwrap_err();
-
-        assert_eq!(err.to_string(), "container was OOM-killed");
-    }
-
-    #[test]
-    fn inspect_container_state_reports_stopped_exit_code() {
-        let err = inspect_container_state("false false false 2").unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            "container is not running; last exit code 2"
-        );
-    }
-}
-
-#[cfg(test)]
-mod screenshot_tests {
-    use super::*;
-
-    #[test]
-    fn validate_capture_url_accepts_http_and_https() {
-        assert!(validate_capture_url("http://localhost:3000/").is_ok());
-        assert!(validate_capture_url("https://demo.example.com/").is_ok());
-    }
-
-    #[test]
-    fn validate_capture_url_rejects_non_http_schemes() {
-        assert!(validate_capture_url("file:///etc/passwd").is_err());
-    }
-
-    #[test]
-    fn screenshot_create_args_use_container_copy_path_without_host_bind() {
-        let args = screenshot_create_args(
-            "hostlet-screenshot-job",
-            "HOSTLET_SCREENSHOT_SIZE=1280x720",
-            "local/hostlet-screenshotter:test",
-            "https://demo.example.com/",
-        );
-
-        assert_eq!(args.first().map(String::as_str), Some("create"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--name", "hostlet-screenshot-job"]));
-        assert!(!args.iter().any(|arg| arg == "-v"));
-        assert!(args
-            .iter()
-            .any(|arg| arg == SCREENSHOT_CONTAINER_OUTPUT_PATH));
-        assert!(!SCREENSHOT_CONTAINER_OUTPUT_PATH.starts_with("/tmp/"));
-    }
-
-    #[test]
-    fn screenshot_container_name_is_job_scoped() {
-        let job_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
-
-        assert_eq!(
-            screenshot_container_name(job_id),
-            "hostlet-screenshot-11111111-2222-3333-4444-555555555555"
-        );
-    }
-}

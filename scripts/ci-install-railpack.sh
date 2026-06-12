@@ -2,7 +2,7 @@
 set -euo pipefail
 
 version="${HOSTLET_RAILPACK_VERSION:-0.25.0}"
-install_dir="${HOSTLET_RAILPACK_INSTALL_DIR:-${RUNNER_TEMP:-/tmp}/hostlet-railpack-bin}"
+install_dir="${HOSTLET_RAILPACK_INSTALL_DIR:-${HOME}/.hostlet-core/railpack/${version}}"
 
 case "$(uname -m)" in
   x86_64) arch="x86_64"; sha="1a3e471b8b5a2f214164fe2217a3e834ef921ee1a277fd70108a51c8cb42b6cf" ;;
@@ -17,10 +17,12 @@ mkdir -p "${install_dir}"
 archive="${install_dir}/railpack.tgz"
 url="https://github.com/railwayapp/railpack/releases/download/v${version}/railpack-v${version}-${arch}-unknown-linux-musl.tar.gz"
 
-curl -fsSL "${url}" -o "${archive}"
-echo "${sha}  ${archive}" | sha256sum -c -
-tar -xzf "${archive}" -C "${install_dir}"
-chmod +x "${install_dir}/railpack"
+if [ ! -x "${install_dir}/railpack" ] || ! "${install_dir}/railpack" --version | grep -Fq "${version}"; then
+  curl -fsSL "${url}" -o "${archive}"
+  echo "${sha}  ${archive}" | sha256sum -c -
+  tar -xzf "${archive}" -C "${install_dir}"
+  chmod +x "${install_dir}/railpack"
+fi
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "HOSTLET_RAILPACK_BIN=${install_dir}/railpack" >> "${GITHUB_ENV}"
 fi

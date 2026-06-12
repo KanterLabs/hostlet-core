@@ -33,7 +33,11 @@ assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-core-workflow-contracts.sh'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
-assert_contains "${CI_WORKFLOW}" 'runs-on: ubuntu-latest'
+assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3'
+assert_contains "${CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${CI_WORKFLOW}" 'github.event_name != '\''pull_request'\'' || github.event.pull_request.head.repo.full_name == github.repository'
+assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner.sh'
+assert_contains "${CI_WORKFLOW}" 'node --version && pnpm --version'
 assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
 assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"'
@@ -51,6 +55,8 @@ assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ci_build_binary 
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" '"$(ci_binary_path hostlet-agent)"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ensure_railpack()'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'scripts/ci-install-railpack.sh'
+assert_contains "${ROOT}/scripts/ci-install-railpack.sh" '${HOME}/.hostlet-core/railpack/${version}'
+assert_contains "${ROOT}/scripts/ci-install-railpack.sh" '--version | grep -Fq "${version}"'
 assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'docker info'
 assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'mountpoint -q /var/lib/docker'
 assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'HOSTLET_RUNNER_DOCKER_DISK_FAIL_PERCENT'
@@ -79,23 +85,19 @@ for needle in required:
         raise SystemExit(f"dispatch payload missing {needle}")
 PY
 
-python3 - "${ROOT}/.github/workflows" <<'PY'
+python3 - "${CI_WORKFLOW}" <<'PY'
 import sys
-import re
 from pathlib import Path
 
-workflow_dir = Path(sys.argv[1])
-violations = []
-for workflow in workflow_dir.glob("*.yml"):
-    text = workflow.read_text()
-    if "pull_request:" not in text:
-        continue
-    if re.search(r"runs-on:\s*(?:\[.*self-hosted.*\]|self-hosted)", text):
-        violations.append(workflow.name)
-
-if violations:
-    joined = ", ".join(sorted(violations))
-    raise SystemExit(f"pull_request workflows must not use self-hosted runners: {joined}")
+workflow = Path(sys.argv[1]).read_text()
+self_hosted_jobs = workflow.count("runs-on: [self-hosted, Linux, X64, hostlet-core]")
+trusted_guards = workflow.count(
+    "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+)
+if self_hosted_jobs != trusted_guards:
+    raise SystemExit(
+        f"each self-hosted CI job must have the trusted PR guard: jobs={self_hosted_jobs} guards={trusted_guards}"
+    )
 PY
 
 python3 - "${STAGING_WORKFLOW}" "${ROOT}/.github/workflows/release.yml" <<'PY'

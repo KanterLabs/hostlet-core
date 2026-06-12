@@ -278,6 +278,7 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
         return;
     }
     let http_status = bounded_i32(msg, "http_status", HTTP_STATUS_RANGE);
+    let published_port = bounded_i32(msg, "published_port", PORT_RANGE);
     let latency_ms = bounded_i32(msg, "latency_ms", LATENCY_MS_RANGE);
     let failure_count = bounded_i32(msg, "failure_count", HEALTH_COUNTER_RANGE).unwrap_or(0);
     let success_count = bounded_i32(msg, "success_count", HEALTH_COUNTER_RANGE).unwrap_or(0);
@@ -330,6 +331,27 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
     .unwrap_or(0);
     if updated == 0 {
         return;
+    }
+    if let (Some(deployment_id), Some(published_port)) = (deployment_id, published_port) {
+        let _ = sqlx::query(
+            r#"
+                UPDATE deployments d
+                SET published_port=$1
+                FROM apps a
+                WHERE d.id=$2
+                  AND d.server_id=$3
+                  AND d.app_id=$4
+                  AND a.id=d.app_id
+                  AND a.current_deployment_id=d.id
+                  AND d.status IN ('success','rolled_back')
+                "#,
+        )
+        .bind(published_port)
+        .bind(deployment_id)
+        .bind(server_id)
+        .bind(app_id)
+        .execute(&state.db)
+        .await;
     }
     // Append an immutable history event, then trim the per-app event log.
     let _ = sqlx::query(
