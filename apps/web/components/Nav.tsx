@@ -39,7 +39,7 @@ function NavLink({
 }
 
 const LOGOUT_CLASS =
-  "mt-3 w-full justify-start border-white/10 bg-white/5 text-neutral-100 shadow-none hover:bg-white/10";
+  "mt-3 flex min-h-9 w-full items-center gap-2 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-neutral-100 transition hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/30";
 
 export function Nav() {
   const pathname = usePathname();
@@ -96,8 +96,8 @@ export function Nav() {
               item={item}
               iconSize={17}
               className={cx(
-                "flex flex-col items-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium",
-                active ? "bg-white/10 text-white" : "text-neutral-400",
+                "flex flex-col items-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300",
+                active ? "bg-white/10 text-white" : "text-neutral-400 hover:bg-white/5 hover:text-white",
               )}
             />
           );

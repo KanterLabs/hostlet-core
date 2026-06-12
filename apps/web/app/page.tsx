@@ -69,7 +69,7 @@ export default function Dashboard() {
 
       <OverviewMetrics metrics={metrics} />
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
         <RecentApps apps={recentApps} />
         <ReleaseAside version={version} />
       </div>

@@ -69,8 +69,8 @@ export function WebhookNotice({
             <h2 className={tone.heading}>{title}</h2>
             <StatusPill status={ready ? "connected" : "needs attention"} label={statusLabel} />
           </div>
-          <p className={`mt-2 max-w-3xl text-sm ${tone.body}`}>{description}</p>
-          {autoDeployWarning && <p className="mt-2 text-sm font-medium text-amber-950">{autoDeployWarning}</p>}
+          <p className={`mt-2 max-w-2xl text-sm ${tone.body}`}>{description}</p>
+          {autoDeployWarning && <p className="mt-2 max-w-2xl text-sm font-medium text-amber-950">{autoDeployWarning}</p>}
           <div className="mt-3 break-all rounded-md bg-white/70 px-3 py-2 font-mono text-xs text-neutral-800 ring-1 ring-black/5">
             {readiness.webhookUrl}
           </div>

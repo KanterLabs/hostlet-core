@@ -92,9 +92,9 @@ export function DataList({ children, className }: { children: React.ReactNode; c
 
 export function DataRow({ label, value, loading = false }: { label: string; value: React.ReactNode; loading?: boolean }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-md bg-surface-alt px-3 py-2 text-sm">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 rounded-md bg-surface-alt px-3 py-2 text-sm">
       <span className="text-muted">{label}</span>
-      {loading ? <Skeleton className="h-4 w-24" /> : <span className="break-words text-right font-medium">{value}</span>}
+      {loading ? <Skeleton className="h-4 w-24" /> : <span className="ml-auto break-words text-right font-medium">{value}</span>}
     </div>
   );
 }

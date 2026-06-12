@@ -177,7 +177,6 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const visitHref = appVisitHref(app);
   const visitLabel = app ? appVisitLabel(app) : "No route";
   const targetValue = app?.server?.name || "Unknown";
-  const targetStatusLabel = `machine ${app?.server?.status || "offline"}`;
 
   return (
     <AppShell>
@@ -201,13 +200,6 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             <Metric label="Machine" value={targetValue} detail={app?.server?.status || "offline"} icon={Box} />
             <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={visitLabel} icon={Globe2} />
           </MetricsGrid>
-
-          <div className="mb-6 flex flex-wrap gap-2">
-            <StatusPill status={deploymentStatus} />
-            <StatusPill status={health?.status || "unknown"} label={`health ${health?.status || "unknown"}`} />
-            <StatusPill status={app?.server?.status || "offline"} label={targetStatusLabel} />
-            <StatusPill status={app?.publicExposure ? "open" : "closed"} label={app?.publicExposure ? "public URL" : "private app"} />
-          </div>
 
           <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />
 
@@ -246,7 +238,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 )}
               </div>
               <div>
-                <div className="eyebrow mb-2">Destructive</div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-red-700">Destructive</div>
                 <button disabled={!!busyAction} className="button-danger" onClick={deleteApp}><Trash2 size={16} />Delete</button>
               </div>
             </div>
@@ -268,7 +260,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               className="mb-6"
               title="Latest deployment failed."
               description={app.latestDeployment.failure || "Open the logs to inspect the failure."}
-              action={app.latestDeployment.id && <Link className="button-secondary text-red-900 ring-red-200 hover:bg-red-100" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />View failure logs</Link>}
+              action={app.latestDeployment.id && <Link className="button-secondary border-red-200 text-red-900 hover:bg-red-100" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />View failure logs</Link>}
             />
           )}
 
@@ -289,7 +281,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   description="Recurring checks against the current running container."
                 />
                 {health ? (
-                  <Panel>
+                  <>
                     <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
                       <Metric label="Status" value={health.status} detail={health.lastError || "latest agent check"} />
                       <Metric label="HTTP" value={health.httpStatus ? String(health.httpStatus) : "none"} detail={typeof health.latencyMs === "number" ? `${health.latencyMs} ms` : "no response"} />
@@ -299,7 +291,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       <Metric label="Target" value={health.checkedUrl || "waiting"} />
                     </MetricsGrid>
                     {healthEvents.length > 0 && (
-                      <div className="mt-4 overflow-hidden rounded-md border border-line">
+                      <div className="mt-4 overflow-hidden rounded-md border border-line bg-surface">
                         {healthEvents.slice(0, 5).map((event) => (
                           <div key={event.id} className="grid gap-2 border-t border-line px-3 py-2 text-sm first:border-t-0 sm:grid-cols-[140px_110px_1fr]">
                             <span className="text-muted">{formatTimestamp(event.createdAt, "time")}</span>
@@ -309,7 +301,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                         ))}
                       </div>
                     )}
-                  </Panel>
+                  </>
                 ) : (
                   <Notice tone="neutral" description={healthMessage} />
                 )}
@@ -377,7 +369,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <ToggleCard checked={settings.public_exposure} onChange={(value) => setSettings({ ...settings, public_exposure: value })} icon={Globe2} label="Public URL" />
                   <ToggleCard checked={settings.auto_deploy} onChange={(value) => setSettings({ ...settings, auto_deploy: value })} icon={GitBranch} label="Auto redeploy on branch push" />
                 </div>
-                <button className="mt-4" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
+                <button className="button mt-4" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
               </Panel>
             </div>
 
@@ -389,7 +381,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <div key={key} className="rounded-md border border-line p-3">
                       <div className="mb-2 flex items-center justify-between gap-3">
                         <span className="truncate font-mono text-sm">{key}</span>
-                        <button className="button-secondary text-red-700 ring-red-200 hover:bg-red-50" disabled={!!busyAction} onClick={() => deleteEnvVar(key)}><Trash2 size={15} />Delete</button>
+                        <button className="button-secondary border-red-200 text-red-700 hover:bg-red-50" disabled={!!busyAction} onClick={() => deleteEnvVar(key)}><Trash2 size={15} />Delete</button>
                       </div>
                       <div className="flex gap-2">
                         <input type="password" value={envValues[key] || ""} onChange={(event) => setEnvValues({ ...envValues, [key]: event.target.value })} placeholder="New value" />
@@ -422,13 +414,13 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     </button>
                   }
                 />
-                {screenshot ? (
+                {screenshot?.publicUrl && screenshot.capturedAt ? (
                   <a className="mt-4 block overflow-hidden rounded-md border border-line bg-surface-alt" href={screenshot.publicUrl} target="_blank" rel="noreferrer">
                     <img className="aspect-video w-full object-cover" src={screenshot.publicUrl} alt={`${app?.name || "App"} screenshot`} />
                   </a>
                 ) : (
                   <div className="mt-4 flex aspect-video items-center justify-center rounded-md border border-dashed border-line bg-surface-alt text-sm text-muted">
-                    {screenshotMessage}
+                    {screenshotMessage || "Waiting for the first capture."}
                   </div>
                 )}
                 <DataList className="mt-4">

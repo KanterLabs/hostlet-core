@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
 import { AppShell, DataList, LogViewer, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
 import { useDeploymentLogs } from "@/lib/useDeploymentLogs";
+import { shortSha } from "@/lib/app-status";
 import {
   DEPLOYMENT_STEPS,
   formatBytes,
@@ -48,6 +49,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
   const { deployment, logs, socketState, socketMessage } = useDeploymentLogs<Deployment>(id);
 
   const status = deployment?.status || "loading";
+  const finished = status === "success" || status === "failed";
   const activeIndex = DEPLOYMENT_STEPS.indexOf(status as (typeof DEPLOYMENT_STEPS)[number]);
   const metadata = deployment?.runtimeMetadata;
   const isCompose = metadata?.runtime === "compose";
@@ -59,10 +61,10 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
           <PageHeader
             eyebrow="Deployment"
             title="Deployment logs"
-            description={deployment?.commitSha ? `Commit ${deployment.commitSha}` : "Build, runtime, health check, and routing output."}
+            description={deployment?.commitSha ? <>Commit <span className="font-mono">{shortSha(deployment.commitSha)}</span></> : "Build, runtime, health check, and routing output."}
             actions={
               <>
-                {deployment?.appId && <Link className="button" href={`/apps/${deployment.appId}`}><ArrowLeft size={16} />App detail</Link>}
+                {deployment?.appId && <Link className="button-secondary" href={`/apps/${deployment.appId}`}><ArrowLeft size={16} />App detail</Link>}
                 <Link className="button-secondary" href="/apps"><ScrollText size={16} />All apps</Link>
               </>
             }
@@ -92,7 +94,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
               {status === "success" && (
                 <Notice
                   tone="success"
-                  description="Deployment succeeded. Logs remain available here."
+                  description="Logs from this deploy remain available on this page."
                   action={deployment?.appId && <Link className="button-secondary" href={`/apps/${deployment.appId}`}>Open app detail</Link>}
                 />
               )}
@@ -100,7 +102,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
               {metadata && Object.keys(metadata).length > 0 && (
                 <Panel>
                   <SectionHeader title="Deployment metrics" />
-                  <DataList className="mt-4">
+                  <DataList className="mt-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1">
                     <SummaryItem label="Packaging" value={packaging} />
                     <SummaryItem label="Framework" value={framework} />
                     <SummaryItem label="Build backend" value={metadata.buildBackend || (isCompose ? "compose" : "docker")} />
@@ -117,22 +119,24 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                   </DataList>
                 </Panel>
               )}
-              {socketMessage && <Notice tone={socketState === "reconnecting" ? "warning" : "neutral"} description={socketMessage} />}
             </aside>
 
-            <section className="min-w-0">
+            <section className="order-first xl:order-none min-w-0">
               <SectionHeader
                 icon={TerminalSquare}
                 title="Live output"
                 className="mb-3"
-                action={
-                  <div className="flex items-center gap-2 text-xs text-muted">
-                    {socketState === "reconnecting" && <RefreshCw className="animate-spin" size={14} />}
-                    <span>{socketLabel(socketState)}</span>
-                  </div>
+              />
+              {!finished && socketMessage && <Notice tone={socketState === "reconnecting" ? "warning" : "neutral"} className="mb-3" description={socketMessage} />}
+              <LogViewer
+                lines={logs}
+                emptyText="Waiting for deployment logs..."
+                toolbar={
+                  finished
+                    ? <span>stream ended</span>
+                    : <span className="flex items-center gap-1">{socketState === "reconnecting" && <RefreshCw className="animate-spin" size={14} />}{socketLabel(socketState)}</span>
                 }
               />
-              <LogViewer lines={logs} emptyText="Waiting for deployment logs..." />
             </section>
           </div>
     </AppShell>

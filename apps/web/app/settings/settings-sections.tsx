@@ -43,7 +43,7 @@ export function ConnectionsSection({ github, cloudflare }: { github: StatusPaylo
           icon={GitBranch}
           title="GitHub"
           status={github?.tokenValid ? "connected" : github?.oauthConfigured ? "needs attention" : "not configured"}
-          message={github?.message || "Loading GitHub status..."}
+          message={github ? (github.message || "No status details reported.") : "Loading GitHub status..."}
           rows={[
             ["Device Flow", github?.oauthConfigured ? "configured" : "missing"],
             ["Webhook secret", github?.webhookConfigured ? "configured" : "missing"],
@@ -56,7 +56,7 @@ export function ConnectionsSection({ github, cloudflare }: { github: StatusPaylo
         icon={Cloud}
         title="Cloudflare"
         status={cloudflare?.tokenValid ? "connected" : cloudflare?.configured ? "needs attention" : "not configured"}
-        message={cloudflare?.message || "Loading Cloudflare status..."}
+        message={cloudflare ? (cloudflare.message || "No status details reported.") : "Loading Cloudflare status..."}
         rows={[
           ["Base domain", cloudflare?.baseDomain || "missing"],
           ["App domains", cloudflare?.defaultDomainPattern || "missing"],
@@ -91,13 +91,13 @@ export function UpdatesSection({
         </div>
         <StatusPill status={version?.update?.updateAvailable ? "needs attention" : "connected"} label={version?.update?.updateAvailable ? "update available" : "current"} />
       </div>
-      <DataList className="mt-5">
-        <DataRow label="Current version" value={version?.currentVersion || "loading"} />
-        <DataRow label="Latest version" value={version?.update?.latestVersion || "not checked"} />
+      <DataList className="mt-5 lg:grid-cols-2">
+        <DataRow label="Current version" value={version ? <span className="font-mono text-xs">{version.currentVersion}</span> : ""} loading={!version} />
+        <DataRow label="Latest version" value={version?.update?.latestVersion ? <span className="font-mono text-xs">{version.update.latestVersion}</span> : "not checked"} />
         <DataRow label="Minimum supported" value={version?.update?.minimumSupportedVersion || "not specified"} />
         <DataRow label="Migrations" value={updateMigrationSummary(version?.update)} />
         <DataRow label="Last checked" value={version?.update?.checkedAt ? formatTimestamp(version.update.checkedAt) : "not checked"} />
-        <DataRow label="Update command" value="hostlet update" />
+        <DataRow label="Update command" value={<span className="font-mono text-xs">hostlet update</span>} />
         <DataRow label="Latest backup" value={backup?.created_at ? `${formatBackupDate(backup.created_at)}${backup.scheduled === "true" ? " (scheduled)" : ""}` : "not recorded"} />
       </DataList>
       <div className="mt-4 flex flex-wrap gap-2">
@@ -145,6 +145,7 @@ export function OperationsSection({
   onRetryJob: (id: string) => void;
   onCancelJob: (id: string) => void;
 }) {
+  const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
   return (
     <Panel className="mt-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -157,9 +158,9 @@ export function OperationsSection({
         </div>
         <button className="button-secondary" onClick={onRunCleanup}><Trash2 size={16} />Run cleanup</button>
       </div>
-      <DataList className="mt-5">
-        <DataRow label="Database cleanup" value={cleanup ? cleanupSummary(cleanup.database) : "loading"} />
-        <DataRow label="Docker keep set" value={cleanup ? `${cleanup.docker.keepContainers} containers, ${cleanup.docker.keepImages} images` : "loading"} />
+      <DataList className="mt-5 lg:grid-cols-2">
+        <DataRow label="Database cleanup" loading={!cleanup} value={cleanup ? cleanupSummary(cleanup.database) : ""} />
+        <DataRow label="Docker keep set" loading={!cleanup} value={cleanup ? `${plural(cleanup.docker.keepContainers, "container")}, ${plural(cleanup.docker.keepImages, "image")}` : ""} />
         <DataRow label="Docker cleanup job" value={cleanup?.docker.jobWillRun ? "available" : "not available"} />
       </DataList>
       {message.text && <Notice tone={message.tone} className="mt-3" description={message.text} />}
@@ -175,10 +176,10 @@ export function OperationsSection({
 function JobsList({ jobs, onRetryJob, onCancelJob }: { jobs: AgentJob[]; onRetryJob: (id: string) => void; onCancelJob: (id: string) => void }) {
   return (
     <div>
-      <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">Recent jobs</h3>
+      <h3 className="data-label">Recent jobs</h3>
       <div className="mt-3 grid gap-2">
         {jobs.slice(0, 8).map((job) => (
-          <div key={job.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2">
+          <div key={job.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2 last:border-b-0 last:pb-0">
             <div className="min-w-0">
               <div className="truncate font-medium">{job.type}</div>
               <div className="muted text-sm">{formatTimestamp(job.createdAt)} · attempt {job.attempt}/{job.maxAttempts}</div>
@@ -200,10 +201,10 @@ function JobsList({ jobs, onRetryJob, onCancelJob }: { jobs: AgentJob[]; onRetry
 function AuditTrail({ audit }: { audit: AuditEvent[] }) {
   return (
     <div>
-      <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">Audit trail</h3>
+      <h3 className="data-label">Audit trail</h3>
       <div className="mt-3 grid gap-2">
         {audit.slice(0, 8).map((event) => (
-          <div key={event.id} className="border-b border-line pb-2">
+          <div key={event.id} className="border-b border-line pb-2 last:border-b-0 last:pb-0">
             <div className="font-medium">{event.eventType}</div>
             <div className="muted text-sm">{event.actorType} · {formatTimestamp(event.createdAt)}</div>
           </div>
@@ -229,7 +230,7 @@ function StatusCard({
 }) {
   return (
     <Panel>
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-center gap-3">
           <IconFrame icon={icon} />
           <div>

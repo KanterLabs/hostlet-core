@@ -55,7 +55,7 @@ a {
 }
 
 input, select, textarea {
-  @apply w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink outline-none transition placeholder:text-neutral-400 focus:border-action focus-visible:ring-2 focus-visible:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-500;
+  @apply w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink text-ellipsis outline-none transition placeholder:text-neutral-400 focus:border-action focus-visible:ring-2 focus-visible:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-500;
 }
 
 input[type="checkbox"] {
@@ -66,76 +66,78 @@ label {
   @apply text-sm font-medium text-ink;
 }
 
-.button {
-  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-action-strong focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
-}
+@layer components {
+  .button {
+    @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-action px-3 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition [&:not(:disabled)]:hover:bg-action-strong focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-500 disabled:shadow-none;
+  }
 
-.compact {
-  @apply min-h-8 px-2.5 py-1.5 text-xs;
-}
+  .compact {
+    @apply min-h-8 px-2.5 py-1.5 text-xs;
+  }
 
-.button-secondary {
-  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-line bg-surface px-3 py-2 text-sm font-medium text-ink shadow-sm shadow-neutral-950/5 ring-0 transition hover:border-neutral-300 hover:bg-surface-alt focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50;
-}
+  .button-secondary {
+    @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-line bg-surface px-3 py-2 text-sm font-medium text-ink shadow-sm shadow-neutral-950/5 ring-0 transition [&:not(:disabled)]:hover:border-neutral-300 [&:not(:disabled)]:hover:bg-surface-alt focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-500 disabled:shadow-none;
+  }
 
-.button-danger {
-  @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-red-700 px-3 py-2 text-sm font-medium text-white shadow-sm shadow-red-950/10 transition hover:bg-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200 disabled:cursor-not-allowed disabled:opacity-50;
-}
+  .button-danger {
+    @apply inline-flex min-h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-red-700 px-3 py-2 text-sm font-medium text-white shadow-sm shadow-red-950/10 transition [&:not(:disabled)]:hover:bg-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-500 disabled:shadow-none;
+  }
 
-.app-shell {
-  @apply grid min-h-screen grid-cols-1 lg:grid-cols-[252px_minmax(0,1fr)];
-}
+  .app-shell {
+    @apply grid min-h-screen grid-cols-1 lg:grid-cols-[252px_minmax(0,1fr)];
+  }
 
-.page {
-  @apply min-w-0 px-4 py-5 sm:px-6 lg:px-8 lg:py-7;
-}
+  .page {
+    @apply min-w-0 px-4 py-5 sm:px-6 lg:px-8 lg:py-7;
+  }
 
-.page-inner {
-  @apply mx-auto w-full max-w-7xl;
-}
+  .page-inner {
+    @apply mx-auto w-full max-w-7xl;
+  }
 
-.panel {
-  @apply rounded-lg border border-line bg-surface shadow-sm shadow-neutral-950/5;
-}
+  .panel {
+    @apply rounded-lg border border-line bg-surface shadow-sm shadow-neutral-950/5;
+  }
 
-.panel-muted {
-  @apply rounded-lg border border-line bg-surface-alt;
-}
+  .panel-muted {
+    @apply rounded-lg border border-line bg-surface-alt;
+  }
 
-.metric {
-  @apply rounded-lg border border-line bg-surface p-4 shadow-sm shadow-neutral-950/5;
-}
+  .metric {
+    @apply rounded-lg border border-line bg-surface p-4 shadow-sm shadow-neutral-950/5;
+  }
 
-.pill {
-  @apply inline-flex min-h-7 items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ring-1;
-}
+  .pill {
+    @apply inline-flex min-h-7 items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ring-1;
+  }
 
-.muted {
-  @apply text-sm text-muted;
-}
+  .muted {
+    @apply text-sm text-muted;
+  }
 
-/* Brand eyebrow — small uppercase tracked emerald label above titles
-   ("Build. Deploy. Showcase.", page eyebrows, hero kickers). */
-.eyebrow {
-  @apply text-xs font-semibold uppercase tracking-[0.08em] text-action;
-}
+  /* Brand eyebrow — small uppercase tracked emerald label above titles
+     ("Build. Deploy. Showcase.", page eyebrows, hero kickers). */
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-[0.08em] text-action;
+  }
 
-/* Data-grid label — same small-caps shape but muted, for dense metric /
-   key-value / summary grids where emerald would over-saturate. */
-.data-label {
-  @apply text-xs font-semibold uppercase tracking-[0.04em] text-muted;
-}
+  /* Data-grid label — same small-caps shape but muted, for dense metric /
+     key-value / summary grids where emerald would over-saturate. */
+  .data-label {
+    @apply text-xs font-semibold uppercase tracking-[0.04em] text-muted;
+  }
 
-.code-box {
-  @apply overflow-x-auto rounded-md border border-line bg-neutral-950 p-4 font-mono text-sm text-green-100;
-}
+  .code-box {
+    @apply overflow-x-auto rounded-md border border-line bg-neutral-950 p-4 font-mono text-sm text-green-100;
+  }
 
-.table-row {
-  @apply grid gap-3 border-t border-line px-4 py-3 first:border-t-0;
-}
+  .table-row {
+    @apply grid gap-3 border-t border-line px-4 py-3 first:border-t-0;
+  }
 
-.skeleton {
-  @apply animate-pulse rounded-md bg-neutral-200;
+  .skeleton {
+    @apply animate-pulse rounded-md bg-neutral-200;
+  }
 }
 
 @media (max-width: 1023px) {

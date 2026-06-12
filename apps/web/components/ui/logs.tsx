@@ -70,7 +70,7 @@ export function LogViewer({
         ref={logRef}
         onScroll={onLogScroll}
         className={[
-          "h-[52vh] max-w-full overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-sm leading-6 text-green-100 shadow-sm shadow-neutral-950/20 md:h-[68vh]",
+          "min-h-[220px] max-h-[52vh] max-w-full overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-sm leading-6 text-green-100 shadow-sm shadow-neutral-950/20 md:max-h-[68vh]",
           wrapMobile ? "[overflow-wrap:anywhere] [white-space:pre-wrap] md:[overflow-wrap:normal] md:[white-space:pre]" : "whitespace-pre",
         ].join(" ")}
       >

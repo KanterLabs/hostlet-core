@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Box, CheckCircle2, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
 import { api } from "@/lib/api";
-import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard } from "@/components/ui";
+import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard, cx } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 import {
   CreateAppForm,
@@ -177,7 +177,7 @@ export default function CreateApp() {
                 />
                 <label className="block">
                   <span className="flex items-center gap-2"><Search size={15} />Search repositories</span>
-                  <input className="mt-1" value={repoSearch} onChange={(event) => setRepoSearch(event.target.value)} placeholder="owner/repo" />
+                  <input className="mt-1.5" value={repoSearch} onChange={(event) => setRepoSearch(event.target.value)} placeholder="owner/repo" />
                 </label>
                 {repoMessage && <p className="muted mt-3">{repoMessage}</p>}
                 {filteredRepos.length > 0 && (
@@ -187,9 +187,10 @@ export default function CreateApp() {
                         key={repo.full_name}
                         type="button"
                         onClick={() => selectRepo(repo)}
-                        className={`flex w-full items-center justify-between rounded-none border-b border-line bg-surface px-3 py-2 text-left text-ink shadow-none last:border-b-0 hover:bg-surface-alt ${
-                          form.repo_full_name === repo.full_name ? "bg-emerald-50" : ""
-                        }`}
+                        className={cx(
+                          "flex w-full items-center justify-between rounded-none border-b border-line px-3 py-2 text-left text-ink shadow-none last:border-b-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-200",
+                          form.repo_full_name === repo.full_name ? "bg-emerald-50 hover:bg-emerald-50" : "bg-surface hover:bg-surface-alt"
+                        )}
                       >
                         <span className="min-w-0">
                           <span className="block truncate text-sm font-medium">{repo.full_name}</span>
@@ -301,8 +302,8 @@ export default function CreateApp() {
                   </SelectField>
                 </div>
                 <div className="mt-4 grid gap-4">
-                  <Field label="Build command" value={form.build_command} onChange={(value) => setField("build_command", value)} placeholder="optional Railpack override, npm run build, go build, cargo build --release" />
-                  <Field label="Start command" value={form.start_command} onChange={(value) => setField("start_command", value)} placeholder="optional Railpack override, npm start, uvicorn main:app --host 0.0.0.0 --port $PORT" />
+                  <Field label="Build command" value={form.build_command} onChange={(value) => setField("build_command", value)} placeholder="Optional Railpack override, e.g. npm run build" />
+                  <Field label="Start command" value={form.start_command} onChange={(value) => setField("start_command", value)} placeholder="Optional Railpack override, e.g. npm start" />
                 </div>
               </Panel>
             </div>
@@ -315,7 +316,7 @@ export default function CreateApp() {
                   <SummaryItem label="Machine" value={selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
                   <SummaryItem label="Route" value={routePreview} />
                   <SummaryItem label="Runtime" value={`${form.runtime_kind === "compose" ? "Compose" : "Single"} · :${form.container_port}${form.health_path}`} />
-                  <SummaryItem label="Automation" value={`${form.auto_deploy ? "auto deploy" : "manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
+                  <SummaryItem label="Automation" value={`${form.auto_deploy ? "Auto deploy" : "Manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
                 </DataList>
                 <button className="button mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>
                   <Plus size={16} />
@@ -328,8 +329,8 @@ export default function CreateApp() {
                 tone="neutral"
                 description={
                   <div>
-                    <div className="flex items-center gap-2 font-medium text-ink">
-                      <HardDrive size={17} />
+                    <div className="flex items-center gap-2 font-semibold text-ink">
+                      <HardDrive size={18} />
                       Target status
                     </div>
                     <p className="muted mt-2">Hostlet will build from GitHub, start a Docker container on this machine, health check it, then publish the route after success.</p>
