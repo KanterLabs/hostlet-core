@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3
+  HOSTLET_ALLOWED_RUNNER_NAMES: homelab,hostlet-core-homelab-2,hostlet-core-homelab-3
 
 concurrency:
   group: ci-${{ github.ref }}
