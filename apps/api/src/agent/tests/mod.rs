@@ -1,6 +1,8 @@
 use super::routes::{ClaimJobRequest, CompleteJobRequest};
 use super::*;
 
+mod lifecycle;
+
 /// Deterministic server id shared by every fixture insert in this module.
 /// `00000000-0000-0000-0000-000000000001`.
 const TEST_SERVER_ID: Uuid = Uuid::from_u128(1);

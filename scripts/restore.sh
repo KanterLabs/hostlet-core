@@ -18,8 +18,21 @@ psql_exec() {
 }
 
 BACKUP_DIR="${1:-}"
-if [[ -z "$BACKUP_DIR" || ! -f "$BACKUP_DIR/postgres.sql" ]]; then
+if [[ -z "$BACKUP_DIR" ]]; then
   echo "Usage: $0 /path/to/hostlet-backup" >&2
+  exit 1
+fi
+# Reject missing or zero-byte dumps before any destructive step.  A power-loss
+# during backup.sh can leave a 0-byte postgres.sql that would otherwise destroy
+# the live DB and print "Restore complete." using `-f` alone.
+if [[ ! -s "$BACKUP_DIR/postgres.sql" ]]; then
+  echo "Backup file $BACKUP_DIR/postgres.sql is missing or empty; refusing to restore." >&2
+  exit 1
+fi
+# Verify the dump carries the pg_dump header so a truncated or wrong-format
+# file is caught before the schema is dropped.
+if ! head -c 512 "$BACKUP_DIR/postgres.sql" | grep -q 'PostgreSQL database dump'; then
+  echo "$BACKUP_DIR/postgres.sql does not look like a pg_dump SQL backup; refusing to restore." >&2
   exit 1
 fi
 
@@ -43,7 +56,7 @@ trap warn_partial_restore EXIT
 
 psql_exec -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
-psql_exec < "$BACKUP_DIR/postgres.sql"
+psql_exec -v ON_ERROR_STOP=1 --single-transaction < "$BACKUP_DIR/postgres.sql"
 
 RESTORE_OK=true
 

@@ -240,7 +240,7 @@ pub async fn create_and_send_deploy(
     Ok(deployment_id)
 }
 
-async fn create_and_send_rollback(
+pub(crate) async fn create_and_send_rollback(
     state: &AppState,
     user_id: Uuid,
     app_id: Uuid,

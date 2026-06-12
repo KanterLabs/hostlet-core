@@ -278,6 +278,37 @@ pub async fn retry_agent_job(
         Ok(context) => context,
         Err(response) => return response,
     };
+    let select = format!(
+        r#"
+        SELECT j.job_type, j.app_id, j.payload_json
+        FROM agent_jobs j
+        JOIN servers s ON s.id = j.server_id
+        WHERE j.id=$1
+          {}
+          AND j.status IN ('failed','expired','cancelled')
+        "#,
+        agent_job_visibility_predicate(2, 3)
+    );
+    let row = match sqlx::query(&select)
+        .bind(id)
+        .bind(context.user_id)
+        .bind(false)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, job_id = %id, "failed to load agent job for retry");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let job_type = row.get::<String, _>("job_type");
+    if matches!(job_type.as_str(), "deploy" | "rollback") {
+        return retry_deployment_job(&state, context.user_id, id, &job_type, &row).await;
+    }
+    // Non-deploy job types retry in place: their payload survives the scrub and
+    // the original job row carries everything the agent needs to re-run.
     let update = format!(
         r#"
         UPDATE agent_jobs j
@@ -307,10 +338,62 @@ pub async fn retry_agent_job(
         JobMutationOutcome {
             event_type: "agent_job_retried",
             failure_log: "failed to retry agent job",
-            success: StatusCode::ACCEPTED,
+            success: StatusCode::NO_CONTENT,
         },
     )
     .await
+}
+
+/// Retries a `deploy`/`rollback` job by creating a FRESH deployment instead of
+/// requeuing the original row. The stored secrets were scrubbed on the terminal
+/// transition, and the original deployment row is already terminal — so
+/// `handle_deployment_status` would silently drop a reused run's reports. The
+/// new deployment re-decrypts the env vars and GitHub token at retry time and
+/// its status reports flow normally.
+async fn retry_deployment_job(
+    state: &AppState,
+    user_id: Uuid,
+    id: Uuid,
+    job_type: &str,
+    row: &sqlx::postgres::PgRow,
+) -> axum::response::Response {
+    let Some(app_id) = row.get::<Option<Uuid>, _>("app_id") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "job no longer has an app to retry against",
+        )
+            .into_response();
+    };
+    let result = if job_type == "rollback" {
+        deploy::create_and_send_rollback(state, user_id, app_id).await
+    } else {
+        let payload = row.get::<Option<serde_json::Value>, _>("payload_json");
+        let commit_sha = payload
+            .as_ref()
+            .and_then(|payload| payload.get("commit_sha"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("HEAD");
+        deploy::create_and_send_deploy(state, user_id, app_id, commit_sha).await
+    };
+    match result {
+        Ok(new_deployment_id) => {
+            record_audit_event(
+                state,
+                AuditEventInput {
+                    actor_type: "owner",
+                    actor_id: None,
+                    event_type: "agent_job_retried",
+                    app_id: Some(app_id),
+                    deployment_id: Some(new_deployment_id),
+                    job_id: Some(id),
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
 }
 
 pub async fn cancel_agent_job(
@@ -328,6 +411,7 @@ pub async fn cancel_agent_job(
         SET status='cancelled',
             failure_summary='Cancelled by owner before the agent started work.',
             last_error='Cancelled by owner before the agent started work.',
+            payload_json=j.payload_json - 'env' - 'github_token',
             finished_at=now(),
             updated_at=now()
         FROM servers s

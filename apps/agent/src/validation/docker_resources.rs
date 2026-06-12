@@ -173,7 +173,39 @@ pub(crate) async fn remove_compose_project_resources(project: &str) -> anyhow::R
             .await?;
         }
     }
+    // Compose `up` always creates the project's default network; every deleted
+    // or torn-down compose app would otherwise leak one bridge network until
+    // Docker's address pool is exhausted. Containers are removed above first or
+    // `network rm` fails with "has active endpoints".
+    let networks = docker_names_by_label(
+        "network",
+        &[
+            "ls",
+            "--filter",
+            &format!("label=com.docker.compose.project={project}"),
+        ],
+        "{{.Name}}",
+    )
+    .await?;
+    for network in networks {
+        if compose_network_belongs_to_project(&network, project) {
+            run_quiet_absent_ok(
+                "docker",
+                &["network", "rm", &network],
+                &["No such network", "not found"],
+            )
+            .await?;
+        }
+    }
     Ok(())
+}
+
+/// The label filter scopes the listing, but only names under the validated
+/// project prefix may be removed (e.g. `<project>_default`).
+fn compose_network_belongs_to_project(network: &str, project: &str) -> bool {
+    network
+        .strip_prefix(project)
+        .is_some_and(|rest| rest.starts_with('_'))
 }
 
 pub(crate) async fn docker_names_by_label(
@@ -195,4 +227,50 @@ pub(crate) async fn docker_names_by_label(
         .filter(|line| !line.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compose_network_belongs_to_project;
+
+    #[test]
+    fn network_default_matches_project() {
+        assert!(compose_network_belongs_to_project(
+            "hostlet-app-abc_default",
+            "hostlet-app-abc"
+        ));
+    }
+
+    #[test]
+    fn network_internal_matches_project() {
+        assert!(compose_network_belongs_to_project(
+            "hostlet-app-abc_internal",
+            "hostlet-app-abc"
+        ));
+    }
+
+    #[test]
+    fn network_prefix_collision_excluded() {
+        // "hostlet-app-abcd_default" must NOT match project "hostlet-app-abc"
+        assert!(!compose_network_belongs_to_project(
+            "hostlet-app-abcd_default",
+            "hostlet-app-abc"
+        ));
+    }
+
+    #[test]
+    fn network_exact_project_name_no_suffix_excluded() {
+        assert!(!compose_network_belongs_to_project(
+            "hostlet-app-abc",
+            "hostlet-app-abc"
+        ));
+    }
+
+    #[test]
+    fn network_other_project_excluded() {
+        assert!(!compose_network_belongs_to_project(
+            "other_default",
+            "hostlet-app-abc"
+        ));
+    }
 }

@@ -385,11 +385,16 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
         return;
     }
     // Refresh the lease on active statuses, clear it on terminal ones, and stamp
-    // finished_at when the job ends.
+    // finished_at when the job ends. Terminal transitions also strip the
+    // decrypted secrets from the payload. The status IN ('queued','claimed',
+    // 'running') guard means a terminal job can never be reopened by a late or
+    // replayed event — the ws-push path may report 'running' for a job that was
+    // never REST-claimed and is still 'queued', so the list stays positive.
     let _ = sqlx::query(
         "UPDATE agent_jobs
                  SET status=$1,
                      failure_summary=$2,
+                     payload_json=CASE WHEN $1 IN ('success','failed') THEN payload_json - 'env' - 'github_token' ELSE payload_json END,
                      updated_at=now(),
                      lease_expires_at=CASE
                        WHEN $1 IN ('claimed','running') THEN now() + interval '5 minutes'
@@ -397,7 +402,8 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
                        ELSE lease_expires_at
                      END,
                      finished_at=CASE WHEN $1 IN ('success','failed') THEN now() ELSE finished_at END
-                 WHERE id=$3 AND server_id=$4",
+                 WHERE id=$3 AND server_id=$4
+                   AND status IN ('queued','claimed','running')",
     )
     .bind(status)
     .bind(msg.get("failure").and_then(|v| v.as_str()))

@@ -43,7 +43,7 @@ pub(crate) fn record_latest_backup_metadata(root: &Path) -> anyhow::Result<()> {
     // :'metadata' substitution instead of hand-escaping single quotes into the
     // SQL text. Same upsert effect, no string-interpolation injection surface.
     let sql = "INSERT INTO settings (key,value,updated_at) VALUES ('latest_backup_metadata',:'metadata',now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now();";
-    let mut args = compose_args(false);
+    let mut args = compose_args(root, false);
     args.extend([
         "exec".into(),
         "-T".into(),

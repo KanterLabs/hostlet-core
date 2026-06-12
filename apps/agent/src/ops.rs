@@ -1,11 +1,13 @@
 use super::*;
 
+mod capture_url;
 mod resource_stats;
 #[cfg(test)]
 mod screenshot_tests;
 #[cfg(test)]
 mod status_tests;
 
+use capture_url::validate_capture_url;
 pub(crate) use resource_stats::publish_resource_stats;
 
 pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
@@ -604,14 +606,6 @@ fn payload_uuid(payload: &Value, key: &str) -> Option<Uuid> {
         .get(key)
         .and_then(|value| value.as_str())
         .and_then(|value| Uuid::parse_str(value).ok())
-}
-
-fn validate_capture_url(value: &str) -> anyhow::Result<()> {
-    let url = url::Url::parse(value).context("capture_url must be an absolute URL")?;
-    match url.scheme() {
-        "http" | "https" => Ok(()),
-        _ => bail!("capture_url must use http or https"),
-    }
 }
 
 pub(crate) async fn health_targets(cfg: &Config) -> anyhow::Result<Vec<HealthTarget>> {

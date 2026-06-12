@@ -1,14 +1,43 @@
 use super::*;
 
 #[test]
-fn validate_capture_url_accepts_http_and_https() {
-    assert!(validate_capture_url("http://localhost:3000/").is_ok());
+fn validate_capture_url_accepts_public_targets() {
     assert!(validate_capture_url("https://demo.example.com/").is_ok());
+    assert!(validate_capture_url("https://demo.example.com:8443/").is_ok());
+    assert!(validate_capture_url("http://172.32.0.1/").is_ok());
+    assert!(validate_capture_url("http://100.128.0.1/").is_ok());
+    assert!(validate_capture_url("http://9.9.9.9/").is_ok());
 }
 
 #[test]
 fn validate_capture_url_rejects_non_http_schemes() {
     assert!(validate_capture_url("file:///etc/passwd").is_err());
+}
+
+#[test]
+fn validate_capture_url_rejects_private_and_local_targets() {
+    for value in [
+        "http://localhost:3000/",
+        "http://127.0.0.1:8080/",
+        "http://10.0.0.5/",
+        "http://172.16.0.1/",
+        "http://172.31.255.1/",
+        "http://192.168.1.10/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://100.64.1.1/",
+        "http://0.0.0.0/",
+        "http://[::1]/",
+        "http://[fe80::1]/",
+        "http://[fd00::1]/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://metadata/",
+        "http://LOCALHOST/",
+    ] {
+        assert!(
+            validate_capture_url(value).is_err(),
+            "expected rejection for {value}"
+        );
+    }
 }
 
 #[test]

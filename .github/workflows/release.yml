@@ -15,6 +15,10 @@ permissions:
 jobs:
   linux-cli:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
+    env:
+      # Cap cargo parallelism (release build is the most expensive cargo
+      # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh

@@ -73,6 +73,7 @@ cleanup() {
     docker images "hostlet/app-${app}" --format "{{.Repository}}:{{.Tag}}" | xargs -r docker image rm -f >/dev/null 2>&1 || true
     docker ps -aq --filter "label=com.docker.compose.project=hostlet-app-${app//-/}" | xargs -r docker rm -f >/dev/null 2>&1 || true
     docker volume ls -q --filter "label=com.docker.compose.project=hostlet-app-${app//-/}" | xargs -r docker volume rm >/dev/null 2>&1 || true
+    docker network ls -q --filter "label=com.docker.compose.project=hostlet-app-${app//-/}" | xargs -r docker network rm >/dev/null 2>&1 || true
   done
   if [ "${FAILED}" = "0" ]; then
     rm -rf "${TMP_DIR}"
@@ -691,5 +692,12 @@ compose_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@
 compose_delete_job="$(printf '%s' "${compose_delete_payload}" | json_get jobId)"
 wait_job_status "${compose_delete_job}"
 expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${compose_app_id}"
+
+# The agent's delete-job teardown must remove the compose project network
+# (leaked networks exhaust Docker's address pool; see remove_compose_project_resources).
+if docker network ls -q --filter "label=com.docker.compose.project=hostlet-app-${compose_app_id//-/}" | grep -q .; then
+  echo "compose project network leaked after app delete" >&2
+  exit 1
+fi
 
 echo "self-hosted deploy E2E passed"

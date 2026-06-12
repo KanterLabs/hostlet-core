@@ -1,16 +1,23 @@
 use super::*;
 use std::process::Output;
 
-pub(crate) fn compose_args(dev: bool) -> Vec<String> {
-    vec![
-        "compose".into(),
+pub(crate) fn compose_args(root: &Path, dev: bool) -> Vec<String> {
+    let mut args = vec!["compose".into()];
+    // `hostlet init` writes the repo-root .env, but compose v2 only auto-loads
+    // .env from the directory of the first -f file (infra/). Pass it explicitly;
+    // skipped when missing so pre-init commands (doctor) still run.
+    if root.join(".env").is_file() {
+        args.extend(["--env-file".into(), ".env".into()]);
+    }
+    args.extend([
         "-f".into(),
         if dev {
             "infra/docker-compose.yml".into()
         } else {
             "infra/docker-compose.prod.yml".into()
         },
-    ]
+    ]);
+    args
 }
 
 pub(crate) fn run_passthrough(root: &Path, bin: &str, args: &[String]) -> anyhow::Result<()> {
@@ -51,7 +58,7 @@ fn compose_status(
     subcommand: &[&str],
     accept: impl Fn(&Output) -> bool,
 ) -> bool {
-    let mut args = compose_args(dev);
+    let mut args = compose_args(root, dev);
     args.extend(subcommand.iter().map(|arg| arg.to_string()));
     Command::new("docker")
         .current_dir(root)
@@ -324,6 +331,56 @@ mod tests {
             image_tag: None,
             images: ReleaseImages::default(),
         }
+    }
+
+    #[test]
+    fn compose_args_passes_root_env_file_when_present() {
+        let root = std::env::temp_dir().join(format!(
+            "hostlet-cli-test-envfile-present-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".env"), "POSTGRES_PASSWORD=secret\n").unwrap();
+
+        let args = compose_args(&root, false);
+
+        // --env-file .env must appear as a consecutive pair before the -f flag.
+        let env_file_pos = args
+            .windows(2)
+            .position(|w| w[0] == "--env-file" && w[1] == ".env")
+            .expect("--env-file .env pair not found");
+        let f_pos = args.iter().position(|a| a == "-f").expect("-f not found");
+        assert!(
+            env_file_pos < f_pos,
+            "--env-file must precede -f (positions: {env_file_pos} vs {f_pos})"
+        );
+        // Prod compose file selected when dev=false.
+        assert!(args.contains(&"infra/docker-compose.prod.yml".to_string()));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compose_args_omits_env_file_when_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "hostlet-cli-test-envfile-absent-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let args_prod = compose_args(&root, false);
+        let args_dev = compose_args(&root, true);
+
+        assert!(
+            !args_prod.contains(&"--env-file".to_string()),
+            "--env-file must be absent when .env does not exist"
+        );
+        assert!(args_prod.contains(&"infra/docker-compose.prod.yml".to_string()));
+        assert!(args_dev.contains(&"infra/docker-compose.yml".to_string()));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

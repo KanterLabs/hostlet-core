@@ -30,6 +30,12 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+/// Interval between background sweeps of stale deployments and agent jobs.
+/// Startup runs the same recovery once, but a crashed or offline agent can
+/// strand jobs/deployments at any time; without this sweep they block new
+/// deploys until the API restarts.
+const RUNTIME_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub async fn run_from_env() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
@@ -40,6 +46,17 @@ pub async fn run_from_env() -> anyhow::Result<()> {
 
     let state = AppState::from_env().await?;
     recover_startup_state(&state).await?;
+    let recovery_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(RUNTIME_RECOVERY_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick completes immediately and startup recovery just ran.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            recover_runtime_state(&recovery_state).await;
+        }
+    });
     if state.update_checks_enabled {
         let update_state = state.clone();
         tokio::spawn(async move {
@@ -76,6 +93,26 @@ pub async fn recover_startup_state(state: &AppState) -> anyhow::Result<()> {
         tracing::warn!(finalized_deletes, "finalized completed delete jobs");
     }
     Ok(())
+}
+
+/// One background recovery sweep. Both recover functions are idempotent
+/// UPDATE-based sweeps shared with startup; database errors are logged and
+/// never end the loop.
+async fn recover_runtime_state(state: &AppState) {
+    match deploy::recover_stale_deployments(state).await {
+        Ok(recovered) if recovered > 0 => {
+            tracing::warn!(recovered, "marked stale deployments as failed");
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(error = %err, "periodic stale-deployment recovery failed"),
+    }
+    match agent::recover_stale_agent_jobs(state).await {
+        Ok(recovered) if recovered > 0 => {
+            tracing::warn!(recovered, "reconciled stale agent jobs");
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(error = %err, "periodic stale-job recovery failed"),
+    }
 }
 
 pub fn core_router(state: AppState) -> anyhow::Result<Router> {

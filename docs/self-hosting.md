@@ -61,6 +61,8 @@ Start production:
 docker compose --env-file .env -f infra/docker-compose.prod.yml -p hostlet-release up -d --no-build
 ```
 
+`hostlet up` supplies `--env-file .env` automatically when the repo-root file exists; the manual command above is for direct `docker compose` invocations.
+
 With tunnel profile:
 
 ```bash

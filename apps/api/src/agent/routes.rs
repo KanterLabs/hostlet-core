@@ -253,6 +253,7 @@ pub async fn complete_job(
              failure_summary=$2,
              last_error=$2,
              result_json=$3,
+             payload_json=payload_json - 'env' - 'github_token',
              lease_expires_at=NULL,
              updated_at=now(),
              finished_at=now()
@@ -295,6 +296,7 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
          SET status='failed',
              failure_summary=COALESCE(failure_summary, 'Agent job lease expired and retry limit was reached.'),
              last_error=COALESCE(last_error, 'Agent job lease expired and retry limit was reached.'),
+             payload_json=payload_json - 'env' - 'github_token',
              lease_expires_at=NULL,
              updated_at=now(),
              finished_at=now()
@@ -306,5 +308,26 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
     .await?
     .rows_affected();
 
+    let scrubbed = scrub_terminal_job_payload_secrets(state).await?;
+    if scrubbed > 0 {
+        tracing::warn!(
+            scrubbed,
+            "scrubbed secrets from terminal agent job payloads"
+        );
+    }
+
     Ok(retried + failed)
+}
+
+/// Strips decrypted secrets (env map, GitHub token) from terminal jobs'
+/// payloads. Terminal transitions scrub inline; this sweep catches rows that
+/// reached a terminal state before the scrub existed or through a path that
+/// missed it.
+async fn scrub_terminal_job_payload_secrets(state: &AppState) -> anyhow::Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE agent_jobs\n         SET payload_json = payload_json - 'env' - 'github_token'\n         WHERE status IN ('success','failed','cancelled','expired')\n           AND (jsonb_exists(payload_json,'env') OR jsonb_exists(payload_json,'github_token'))",
+    )
+    .execute(&state.db)
+    .await?
+    .rows_affected())
 }
