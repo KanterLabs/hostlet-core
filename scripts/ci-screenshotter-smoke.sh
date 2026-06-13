@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${HOSTLET_SCREENSHOTTER_TEST_IMAGE:-hostlet-screenshotter-ci}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hostlet-screenshotter-smoke.XXXXXX")"
-REDIRECT_PID=""
-trap 'kill "${REDIRECT_PID}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
+REDIRECT_CONTAINER="hostlet-screenshotter-redirect-$$"
+trap 'docker rm -f "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
 
 if [ "${HOSTLET_SCREENSHOTTER_SKIP_BUILD:-0}" != "1" ]; then
   docker build -f "${ROOT}/apps/screenshotter/Dockerfile" -t "${IMAGE}" "${ROOT}"
@@ -33,60 +33,28 @@ echo "screenshotter smoke passed"
 # host-local origin. The target origin (127.0.0.1:PORT) is allowed, but the
 # redirect hop to a different loopback origin must be blocked. --network host is
 # intentional here so the negative test exercises the real production posture.
-python3 - "${TMP_DIR}/redirect-port" <<'PY' &
-import http.server
-import errno
-import socketserver
-import sys
-from pathlib import Path
-
-REDIRECT_TARGET_PORT = 18081
-LISTEN_PORTS = (18080, 18082, 18083, 18084, 18085)
-
-
-class TestServer(socketserver.TCPServer):
-    allow_reuse_address = True
-
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(302)
-        self.send_header("Location", f"http://127.0.0.1:{REDIRECT_TARGET_PORT}/")
-        self.end_headers()
-
-    def log_message(self, *args):
-        pass
-
-
-httpd = None
-for port in LISTEN_PORTS:
-    try:
-        httpd = TestServer(("127.0.0.1", port), Handler)
-        break
-    except OSError as error:
-        if error.errno != errno.EADDRINUSE:
-            raise
-
-if httpd is None:
-    raise SystemExit("no available Chromium-safe redirect test port")
-
-with httpd:
-    Path(sys.argv[1]).write_text(str(httpd.server_address[1]))
-    httpd.serve_forever()
-PY
-REDIRECT_PID=$!
-
 REDIRECT_PORT=""
-for _ in $(seq 1 50); do
-  if [ -s "${TMP_DIR}/redirect-port" ]; then
-    REDIRECT_PORT="$(cat "${TMP_DIR}/redirect-port")"
+for port in 18080 18082 18083 18084 18085; do
+  docker rm -f "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true
+  if ! docker run -d --rm --network host --name "${REDIRECT_CONTAINER}" \
+    --entrypoint node \
+    "${IMAGE}" \
+    -e "require('http').createServer((_, res) => { res.writeHead(302, { Location: 'http://127.0.0.1:18081/' }); res.end(); }).listen(${port}, '127.0.0.1');" \
+    > "${TMP_DIR}/redirect-container" 2> "${TMP_DIR}/redirect-start.log"; then
+    continue
+  fi
+  if docker run --rm --network host --entrypoint node \
+    "${IMAGE}" \
+    -e "require('http').get('http://127.0.0.1:${port}/', (res) => process.exit(res.statusCode === 302 ? 0 : 1)).on('error', () => process.exit(1));" \
+    >/dev/null 2>&1; then
+    REDIRECT_PORT="${port}"
     break
   fi
-  sleep 0.1
 done
 
 if [ -z "${REDIRECT_PORT}" ]; then
-  echo "redirect server did not report a port"
+  echo "redirect server did not start on a Chromium-safe port"
+  cat "${TMP_DIR}/redirect-start.log" 2>/dev/null || true
   exit 1
 fi
 
