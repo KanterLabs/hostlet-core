@@ -35,22 +35,42 @@ echo "screenshotter smoke passed"
 # intentional here so the negative test exercises the real production posture.
 python3 - "${TMP_DIR}/redirect-port" <<'PY' &
 import http.server
+import errno
 import socketserver
 import sys
 from pathlib import Path
+
+REDIRECT_TARGET_PORT = 18081
+LISTEN_PORTS = (18080, 18082, 18083, 18084, 18085)
+
+
+class TestServer(socketserver.TCPServer):
+    allow_reuse_address = True
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(302)
-        self.send_header("Location", "http://127.0.0.1:9/")
+        self.send_header("Location", f"http://127.0.0.1:{REDIRECT_TARGET_PORT}/")
         self.end_headers()
 
     def log_message(self, *args):
         pass
 
 
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+httpd = None
+for port in LISTEN_PORTS:
+    try:
+        httpd = TestServer(("127.0.0.1", port), Handler)
+        break
+    except OSError as error:
+        if error.errno != errno.EADDRINUSE:
+            raise
+
+if httpd is None:
+    raise SystemExit("no available Chromium-safe redirect test port")
+
+with httpd:
     Path(sys.argv[1]).write_text(str(httpd.server_address[1]))
     httpd.serve_forever()
 PY
