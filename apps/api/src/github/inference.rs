@@ -5,7 +5,10 @@ pub(super) use hostlet_contracts::{
 
 #[cfg(test)]
 mod tests {
-    use super::{gitea_inspection, infer_dockerfile, infer_package_json, railpack_inspection};
+    use super::{
+        gitea_inspection, infer_dockerfile, infer_package_json, node_inspection,
+        railpack_inspection,
+    };
 
     #[test]
     fn dockerfile_inference_prefers_web_port_and_prompts_env() {
@@ -67,5 +70,22 @@ VOLUME ["/data"]
         );
         assert_eq!(inference.framework, "Next.js");
         assert_eq!(inference.package_manager, "pnpm");
+    }
+
+    #[test]
+    fn node_inspection_with_dockerfile_still_recommends_railpack() {
+        let inference = infer_package_json(
+            r#"{"dependencies":{"next":"16.0.0"},"packageManager":"pnpm@10.0.0"}"#,
+            false,
+            false,
+            false,
+        );
+        let value = node_inspection("owner/homebase", "main", "main", inference, true);
+
+        assert_eq!(value["recommendedPackagingStrategy"], "generated");
+        assert_eq!(
+            value["packagingOptions"],
+            serde_json::json!(["auto", "generated", "dockerfile"])
+        );
     }
 }

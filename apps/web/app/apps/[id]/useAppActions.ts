@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { useRouter } from "next/navigation";
 import { useConfirm } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -44,6 +44,11 @@ export function useAppActions({
   const [message, setMessage] = useState("");
   const [healthMessage, setHealthMessage] = useState("Waiting for runtime health.");
   const [busyAction, setBusyAction] = useState<BusyAction>("");
+
+  // Tracks whether the component that owns this hook is still mounted; used to
+  // guard state updates and navigation after async operations complete.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const refreshApp = useCallback(async () => {
     try {
@@ -111,8 +116,9 @@ export function useAppActions({
       const result = await api<{ jobId?: string } | undefined>(`/api/apps/${id}`, { method: "DELETE" });
       if (result?.jobId) {
         setMessage("Server cleanup is running...");
-        await waitForAgentJob(result.jobId, setMessage);
+        await waitForAgentJob(result.jobId, setMessage, () => mountedRef.current);
       }
+      if (!mountedRef.current) return;
       router.push("/apps");
     } catch (error) {
       setMessage(`Delete failed. ${error instanceof Error ? error.message : ""}`);
@@ -232,8 +238,10 @@ export function useAppActions({
     try {
       const result = await api<{ jobId: string }>(`/api/apps/${id}/screenshots`, { method: "POST", body: "{}" });
       setMessage("Screenshot capture is running...");
-      await waitForAgentJob(result.jobId, setMessage);
+      await waitForAgentJob(result.jobId, setMessage, () => mountedRef.current);
+      if (!mountedRef.current) return;
       await refreshScreenshot();
+      if (!mountedRef.current) return;
       setMessage("Screenshot captured.");
     } catch (error) {
       setMessage(`Screenshot capture failed. ${error instanceof Error ? error.message : ""}`);

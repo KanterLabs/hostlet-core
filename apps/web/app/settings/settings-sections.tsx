@@ -72,11 +72,13 @@ export function UpdatesSection({
   version,
   backup,
   message,
+  busy,
   onCheckForUpdates,
 }: {
   version: VersionPayload | null;
   backup: BackupMetadata | null;
   message: StatusMessage;
+  busy: boolean;
   onCheckForUpdates: () => void;
 }) {
   return (
@@ -101,7 +103,7 @@ export function UpdatesSection({
         <DataRow label="Latest backup" value={backup?.created_at ? `${formatBackupDate(backup.created_at)}${backup.scheduled === "true" ? " (scheduled)" : ""}` : "not recorded"} />
       </DataList>
       <div className="mt-4 flex flex-wrap gap-2">
-        <button className="button-secondary" onClick={onCheckForUpdates} disabled={version?.updateChecksEnabled === false}>
+        <button className="button-secondary" onClick={onCheckForUpdates} disabled={busy || version?.updateChecksEnabled === false}>
           <RefreshCw size={16} />
           Check for updates
         </button>
@@ -133,6 +135,7 @@ export function OperationsSection({
   jobs,
   audit,
   message,
+  busy,
   onRunCleanup,
   onRetryJob,
   onCancelJob,
@@ -141,6 +144,7 @@ export function OperationsSection({
   jobs: AgentJob[];
   audit: AuditEvent[];
   message: StatusMessage;
+  busy: boolean;
   onRunCleanup: () => void;
   onRetryJob: (id: string) => void;
   onCancelJob: (id: string) => void;
@@ -156,7 +160,7 @@ export function OperationsSection({
             <p className="muted mt-1">Preview retention counts, start cleanup, and recover recent durable jobs.</p>
           </div>
         </div>
-        <button className="button-secondary" onClick={onRunCleanup}><Trash2 size={16} />Run cleanup</button>
+        <button className="button-secondary" onClick={onRunCleanup} disabled={busy}><Trash2 size={16} />Run cleanup</button>
       </div>
       <DataList className="mt-5 lg:grid-cols-2">
         <DataRow label="Database cleanup" loading={!cleanup} value={cleanup ? cleanupSummary(cleanup.database) : ""} />

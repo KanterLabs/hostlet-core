@@ -445,6 +445,23 @@ VOLUME ["/data"]
     }
 
     #[test]
+    fn node_inspection_with_dockerfile_prefers_generated_packaging() {
+        let inference = infer_package_json(
+            r#"{"dependencies":{"next":"16.0.0"},"packageManager":"pnpm@10.0.0"}"#,
+            false,
+            false,
+            false,
+        );
+        let value = node_inspection("owner/homebase", "main", "main", inference, true);
+
+        assert_eq!(value["recommendedPackagingStrategy"], "generated");
+        assert_eq!(
+            value["packagingOptions"],
+            serde_json::json!(["auto", "generated", "dockerfile"])
+        );
+    }
+
+    #[test]
     fn inspection_payloads_emit_packaging_contract() {
         let value = railpack_inspection("owner/repo", "main", "main", "Python");
 

@@ -207,8 +207,7 @@ async fn ensure_railpack_buildkit(
             }
         }
         _ => {
-            let image = std::env::var("HOSTLET_RAILPACK_BUILDKIT_IMAGE")
-                .unwrap_or_else(|_| DEFAULT_RAILPACK_BUILDKIT_IMAGE.into());
+            let image = railpack_buildkit_image();
             let args = railpack_buildkit_run_args(&image, &container);
             let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
             if let Err(run_err) = run_log(cfg, deployment_id, "docker", &arg_refs).await {
@@ -286,6 +285,24 @@ fn railpack_buildkit_container() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| RAILPACK_BUILDKIT_CONTAINER.to_string())
+}
+
+fn railpack_buildkit_image() -> String {
+    railpack_buildkit_image_value(
+        std::env::var("HOSTLET_RAILPACK_BUILDKIT_IMAGE")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Returns `value` if non-empty and non-whitespace; otherwise the default image.
+/// Empty strings must fall back to the default so that `VAR=` in compose
+/// (passthrough with unset host var) behaves identically to an absent var.
+fn railpack_buildkit_image_value(value: Option<&str>) -> String {
+    value
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(DEFAULT_RAILPACK_BUILDKIT_IMAGE)
+        .to_string()
 }
 
 fn railpack_buildkit_keepalive() -> bool {
@@ -450,6 +467,37 @@ mod tests {
         );
         assert_eq!(railpack_buildkit_container(), "hostlet-buildkit-ci-123");
         std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_CONTAINER");
+    }
+
+    #[test]
+    fn railpack_buildkit_image_defaults_when_unset_or_empty() {
+        // unset → default
+        assert_eq!(
+            railpack_buildkit_image_value(None),
+            DEFAULT_RAILPACK_BUILDKIT_IMAGE
+        );
+        // empty string → default (VAR= passthrough with unset host var)
+        assert_eq!(
+            railpack_buildkit_image_value(Some("")),
+            DEFAULT_RAILPACK_BUILDKIT_IMAGE
+        );
+        // whitespace-only → default
+        assert_eq!(
+            railpack_buildkit_image_value(Some("   ")),
+            DEFAULT_RAILPACK_BUILDKIT_IMAGE
+        );
+    }
+
+    #[test]
+    fn railpack_buildkit_image_uses_exact_value_when_set() {
+        assert_eq!(
+            railpack_buildkit_image_value(Some("custom/buildkit:v0.12")),
+            "custom/buildkit:v0.12"
+        );
+        assert_eq!(
+            railpack_buildkit_image_value(Some("moby/buildkit:v0.19.0")),
+            "moby/buildkit:v0.19.0"
+        );
     }
 
     #[test]

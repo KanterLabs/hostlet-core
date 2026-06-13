@@ -62,8 +62,14 @@ export function pidsDisplay(resources?: ResourceStats | null) {
   return typeof resources.pidsCurrent === "number" ? String(resources.pidsCurrent) : resources.pids;
 }
 
-export async function waitForAgentJob(jobId: string, setMessage: (message: string) => void) {
+export async function waitForAgentJob(
+  jobId: string,
+  setMessage: (message: string) => void,
+  // When false the loop exits immediately; defaults to always-active.
+  isActive: () => boolean = () => true,
+) {
   for (let attempt = 1; attempt <= 60; attempt += 1) {
+    if (!isActive()) return;
     const job = await api<AgentJob>(`/api/agent-jobs/${jobId}`);
     if (job.status === "success") return;
     if (job.status === "failed") {

@@ -274,15 +274,7 @@ async fn inspect_repo(
         return Ok(gitea_inspection(repo, branch, default_branch));
     }
 
-    if let Some(contents) = github_file_text(state, repo, branch, "Dockerfile", token).await? {
-        let inference = infer_dockerfile(&contents);
-        return Ok(dockerfile_inspection(
-            repo,
-            branch,
-            default_branch,
-            inference,
-        ));
-    }
+    let dockerfile = github_file_text(state, repo, branch, "Dockerfile", token).await?;
 
     if let Some(package_text) = github_file_text(state, repo, branch, "package.json", token).await?
     {
@@ -301,7 +293,23 @@ async fn inspect_repo(
                 .await?
                 .is_some(),
         );
-        return Ok(node_inspection(repo, branch, default_branch, inference));
+        return Ok(node_inspection(
+            repo,
+            branch,
+            default_branch,
+            inference,
+            dockerfile.is_some(),
+        ));
+    }
+
+    if let Some(contents) = dockerfile {
+        let inference = infer_dockerfile(&contents);
+        return Ok(dockerfile_inspection(
+            repo,
+            branch,
+            default_branch,
+            inference,
+        ));
     }
 
     for (path, language) in [

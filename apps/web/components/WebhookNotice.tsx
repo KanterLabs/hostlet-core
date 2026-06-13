@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useTimedReset } from "@/lib/useTimedReset";
 import { Copy, GitBranch, Globe2, Play } from "lucide-react";
 import { webhookReadiness } from "@/lib/webhooks";
 import { StatusPill } from "@/components/ui";
@@ -33,7 +33,7 @@ export function WebhookNotice({
   deployDisabled?: boolean;
   className?: string;
 }) {
-  const [copyState, setCopyState] = useState(COPY_IDLE_LABEL);
+  const [copyState, flashCopyState] = useTimedReset(COPY_IDLE_LABEL, COPY_RESET_MS);
   const readiness = webhookReadiness();
   const ready = readiness.canReceiveGitHub;
   const tone = ready ? READY_TONE : NOT_READY_TONE;
@@ -45,11 +45,6 @@ export function WebhookNotice({
   const autoDeployWarning = autoDeployEnabled && !ready
     ? "Auto redeploy is enabled for this app, but pushes will not start deployments until PUBLIC_WEBHOOK_URL or PUBLIC_API_URL is a public HTTPS URL."
     : "";
-
-  function flashCopyState(label: string) {
-    setCopyState(label);
-    window.setTimeout(() => setCopyState(COPY_IDLE_LABEL), COPY_RESET_MS);
-  }
 
   async function copyWebhookUrl() {
     try {

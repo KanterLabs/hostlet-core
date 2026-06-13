@@ -124,9 +124,13 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   });
 
   useEffect(() => {
+    let active = true;
     refreshApp();
     refreshScreenshot();
-    api<Array<{ key: string }>>(`/api/apps/${id}/env`).then(setEnvKeys).catch(() => setEnvKeys([]));
+    api<Array<{ key: string }>>(`/api/apps/${id}/env`)
+      .then((keys) => { if (active) setEnvKeys(keys); })
+      .catch(() => { if (active) setEnvKeys([]); });
+    return () => { active = false; };
   }, [id, refreshApp, refreshScreenshot]);
 
   useVisibilityPoll(
@@ -260,7 +264,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
               className="mb-6"
               title="Latest deployment failed."
               description={app.latestDeployment.failure || "Open the logs to inspect the failure."}
-              action={app.latestDeployment.id && <Link className="button-secondary border-red-200 text-red-900 hover:bg-red-100" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />View failure logs</Link>}
+              action={app.latestDeployment.id && <Link className="button-secondary border-red-200 text-red-900" href={`/deployments/${app.latestDeployment.id}`}><ScrollText size={16} />View failure logs</Link>}
             />
           )}
 
@@ -381,7 +385,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <div key={key} className="rounded-md border border-line p-3">
                       <div className="mb-2 flex items-center justify-between gap-3">
                         <span className="truncate font-mono text-sm">{key}</span>
-                        <button className="button-secondary border-red-200 text-red-700 hover:bg-red-50" disabled={!!busyAction} onClick={() => deleteEnvVar(key)}><Trash2 size={15} />Delete</button>
+                        <button className="button-secondary border-red-200 text-red-700" disabled={!!busyAction} onClick={() => deleteEnvVar(key)}><Trash2 size={15} />Delete</button>
                       </div>
                       <div className="flex gap-2">
                         <input type="password" value={envValues[key] || ""} onChange={(event) => setEnvValues({ ...envValues, [key]: event.target.value })} placeholder="New value" />

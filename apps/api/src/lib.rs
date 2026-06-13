@@ -46,6 +46,13 @@ pub async fn run_from_env() -> anyhow::Result<()> {
 
     let state = AppState::from_env().await?;
     recover_startup_state(&state).await?;
+    // One-shot orphan sweep: runs once at startup in the background to remove
+    // screenshot files that have no app_screenshots row. Not added to the
+    // RUNTIME_RECOVERY ticker; the sweep is startup hygiene, not periodic.
+    let sweep_state = state.clone();
+    tokio::spawn(async move {
+        screenshots::sweep_orphaned_screenshot_files(&sweep_state).await;
+    });
     let recovery_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(RUNTIME_RECOVERY_INTERVAL);

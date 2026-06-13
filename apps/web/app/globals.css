@@ -127,14 +127,6 @@ label {
     @apply text-xs font-semibold uppercase tracking-[0.04em] text-muted;
   }
 
-  .code-box {
-    @apply overflow-x-auto rounded-md border border-line bg-neutral-950 p-4 font-mono text-sm text-green-100;
-  }
-
-  .table-row {
-    @apply grid gap-3 border-t border-line px-4 py-3 first:border-t-0;
-  }
-
   .skeleton {
     @apply animate-pulse rounded-md bg-neutral-200;
   }

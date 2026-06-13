@@ -175,6 +175,7 @@ pub fn node_inspection(
     branch: &str,
     default_branch: &str,
     inference: PackageInference,
+    has_dockerfile: bool,
 ) -> Value {
     let mut result = object_map(inspection_base(InspectionBaseInput {
         repo,
@@ -182,10 +183,23 @@ pub fn node_inspection(
         default_branch,
         deployable: true,
         container_port: serde_json::json!(3000),
-        packaging_options: serde_json::json!(["auto", "generated"]),
+        packaging_options: if has_dockerfile {
+            serde_json::json!(["auto", "generated", "dockerfile"])
+        } else {
+            serde_json::json!(["auto", "generated"])
+        },
         recommended_packaging_strategy: "generated",
         env: serde_json::json!([]),
-        warnings: serde_json::json!(["Node app detected. Hostlet will build it with Railpack unless a repository Dockerfile is selected. Set custom build/start commands if the preview is incomplete."]),
+        warnings: if has_dockerfile {
+            serde_json::json!([
+                "Node app and Dockerfile detected. Hostlet recommends Railpack generated runtime; select repository Dockerfile only when the app depends on custom image setup.",
+                "Set custom build/start commands if the Railpack preview is incomplete."
+            ])
+        } else {
+            serde_json::json!([
+                "Node app detected. Hostlet will build it with Railpack. Set custom build/start commands if the preview is incomplete."
+            ])
+        },
         summary: format!(
             "{} app detected. Hostlet will use generated Railpack runtime support with {}.",
             inference.framework, inference.package_manager

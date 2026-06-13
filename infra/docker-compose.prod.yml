@@ -44,8 +44,11 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?Run hostlet init first}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      HOSTLET_SCREENSHOT_DIR: /var/lib/hostlet/screenshots
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - hostlet-screenshots:/var/lib/hostlet/screenshots
     depends_on:
       - postgres
 
@@ -68,6 +71,13 @@ services:
       HOSTLET_LOCAL_ROUTER: caddy
       HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR: /var/lib/hostlet/caddy
       HOSTLET_LOCAL_ROUTER_RELOAD: docker exec hostlet-caddy caddy reload --config /etc/caddy/Caddyfile
+      # Agent BuildKit + health-check tuning (see docs/deploying-apps.md).
+      HOSTLET_RAILPACK_BUILDKIT_IMAGE: ${HOSTLET_RAILPACK_BUILDKIT_IMAGE:-}
+      HOSTLET_RAILPACK_BUILDKIT_KEEPALIVE: ${HOSTLET_RAILPACK_BUILDKIT_KEEPALIVE:-}
+      HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS: ${HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS:-}
+      HOSTLET_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS: ${HOSTLET_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS:-}
+      HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB: ${HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB:-}
+      HOSTLET_HEALTH_CHECK_ATTEMPTS: ${HOSTLET_HEALTH_CHECK_ATTEMPTS:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - hostlet-agent:/var/lib/hostlet
@@ -113,3 +123,4 @@ services:
 volumes:
   hostlet-postgres:
   hostlet-agent:
+  hostlet-screenshots:

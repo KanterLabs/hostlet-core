@@ -119,6 +119,10 @@ fn is_docker_socket_path(value: &str) -> bool {
     value == "/var/run/docker.sock"
 }
 
+fn is_host_bind_source(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with('.') || value.contains('/') || value.contains('\\')
+}
+
 pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
     let value: serde_yaml::Value =
         serde_yaml::from_str(contents).context("compose file is not valid YAML")?;
@@ -157,7 +161,8 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
         if let Some(volumes) = yaml_get(service, "volumes").and_then(|v| v.as_sequence()) {
             for volume in volumes {
                 if let Some(value) = volume.as_str() {
-                    if value.starts_with('/') || value.contains("../") {
+                    let source = value.split(':').next().unwrap_or("");
+                    if is_host_bind_source(source) {
                         bail!("compose service {service_name} uses an unsupported host bind mount");
                     }
                     if value.split(':').nth(1).is_some_and(is_docker_socket_path) {
@@ -173,7 +178,7 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
                         .or_else(|| yaml_get(mapping, "src"))
                         .and_then(|value| value.as_str())
                         .unwrap_or("");
-                    if volume_type == "bind" || source.starts_with('/') || source.contains("../") {
+                    if volume_type == "bind" || is_host_bind_source(source) {
                         bail!("compose service {service_name} uses an unsupported host bind mount");
                     }
                     let target = yaml_get(mapping, "target")
@@ -526,6 +531,14 @@ services:
       - /etc:/host-etc
 "#;
         assert!(validate_compose_subset(bind_mount, "web").is_err());
+        let relative_bind_mount = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - ./data:/app/data
+"#;
+        assert!(validate_compose_subset(relative_bind_mount, "web").is_err());
         let long_bind_mount = r#"
 services:
   web:
@@ -536,6 +549,16 @@ services:
         target: /host-etc
 "#;
         assert!(validate_compose_subset(long_bind_mount, "web").is_err());
+        let long_relative_bind_mount = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - type: volume
+        source: data/cache
+        target: /app/data
+"#;
+        assert!(validate_compose_subset(long_relative_bind_mount, "web").is_err());
         let service_network = r#"
 services:
   web:

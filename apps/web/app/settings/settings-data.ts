@@ -83,6 +83,8 @@ export type SettingsData = {
   backup: BackupMetadata | null;
   updateMessage: StatusMessage;
   operationsMessage: StatusMessage;
+  // True while either checkForUpdates or runCleanup is in flight; cleared in finally.
+  busy: boolean;
   refresh: () => void;
   checkForUpdates: () => Promise<void>;
   runCleanup: () => Promise<void>;
@@ -103,6 +105,7 @@ export function useSettingsData(): SettingsData {
   const [backup, setBackup] = useState<BackupMetadata | null>(null);
   const [updateMessage, setUpdateMessage] = useState<StatusMessage>(EMPTY_MESSAGE);
   const [operationsMessage, setOperationsMessage] = useState<StatusMessage>(EMPTY_MESSAGE);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     refresh();
@@ -127,6 +130,7 @@ export function useSettingsData(): SettingsData {
   }
 
   async function checkForUpdates() {
+    setBusy(true);
     setUpdateMessage({ text: "Checking for updates...", tone: "neutral" });
     try {
       const update = await api<UpdatePayload>("/api/system/update-check", { method: "POST", body: "{}" });
@@ -134,10 +138,13 @@ export function useSettingsData(): SettingsData {
       setUpdateMessage({ text: update.updateAvailable ? "Update available. Run hostlet update on the server." : "Hostlet is up to date.", tone: "neutral" });
     } catch (error) {
       setUpdateMessage({ text: errorText(error, "Could not check for updates."), tone: "danger" });
+    } finally {
+      setBusy(false);
     }
   }
 
   async function runCleanup() {
+    setBusy(true);
     setOperationsMessage({ text: "Cleanup requested...", tone: "neutral" });
     try {
       await api("/api/system/cleanup", { method: "POST", body: "{}" });
@@ -145,6 +152,8 @@ export function useSettingsData(): SettingsData {
       refresh();
     } catch (error) {
       setOperationsMessage({ text: errorText(error, "Cleanup failed."), tone: "danger" });
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -176,6 +185,7 @@ export function useSettingsData(): SettingsData {
     backup,
     updateMessage,
     operationsMessage,
+    busy,
     refresh,
     checkForUpdates,
     runCleanup,

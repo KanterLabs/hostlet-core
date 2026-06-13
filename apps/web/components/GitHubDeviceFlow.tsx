@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTimedReset } from "@/lib/useTimedReset";
 import { CheckCircle2, Clipboard, ExternalLink, GitBranch, Loader2, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import { Notice } from "@/components/ui";
@@ -46,12 +47,14 @@ export function GitHubDeviceFlow({
   const [flow, setFlow] = useState<DeviceStart | null>(null);
   const [status, setStatus] = useState<FlowState>("idle");
   const [message, setMessage] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTimedReset(false, COPY_RESET_MS);
+  // Captured from the server response; consumed by the dedicated redirect effect.
+  const [redirectTo, setRedirectTo] = useState<string | undefined>(undefined);
 
   async function start() {
     setStatus("loading");
     setMessage("");
-    setCopied(false);
+    flashCopied(false);
     try {
       const next = await api<DeviceStart>("/auth/github/device/start", {
         method: "POST",
@@ -86,9 +89,9 @@ export function GitHubDeviceFlow({
         return;
       }
       if (result.status === "authorized") {
+        setRedirectTo(result.redirectTo);
         setStatus("authorized");
         onAuthorized?.();
-        window.setTimeout(() => window.location.assign(localRedirectPath(result.redirectTo)), REDIRECT_DELAY_MS);
         return;
       }
       if (result.status === "expired" || result.status === "denied") {
@@ -121,12 +124,20 @@ export function GitHubDeviceFlow({
     };
   }, [flow, status, onAuthorized]);
 
+  // Dedicated effect: arms the redirect timer only when status reaches "authorized".
+  // Kept separate from the polling effect so its cleanup cannot cancel the timer
+  // mid-flight when polling re-runs on status change.
+  useEffect(() => {
+    if (status !== "authorized") return;
+    const id = window.setTimeout(() => window.location.assign(localRedirectPath(redirectTo)), REDIRECT_DELAY_MS);
+    return () => window.clearTimeout(id);
+  }, [status, redirectTo]);
+
   async function copyCode() {
     if (!flow) return;
     try {
       await navigator.clipboard.writeText(flow.userCode);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), COPY_RESET_MS);
+      flashCopied(true);
     } catch {
       setMessage(flow.userCode);
     }

@@ -22,6 +22,7 @@ export default function Settings() {
     backup,
     updateMessage,
     operationsMessage,
+    busy,
     refresh,
     checkForUpdates,
     runCleanup,
@@ -46,6 +47,7 @@ export default function Settings() {
         version={version}
         backup={backup}
         message={updateMessage}
+        busy={busy}
         onCheckForUpdates={checkForUpdates}
       />
 
@@ -56,6 +58,7 @@ export default function Settings() {
         jobs={jobs}
         audit={audit}
         message={operationsMessage}
+        busy={busy}
         onRunCleanup={runCleanup}
         onRetryJob={retryJob}
         onCancelJob={cancelJob}

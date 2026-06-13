@@ -10,8 +10,10 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{Postgres, Row, Transaction};
-use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
+
+mod storage;
+pub(crate) use storage::sweep_orphaned_screenshot_files;
 
 const MAX_SCREENSHOT_BYTES: usize = 1_500_000;
 const GENERATED_SOURCE: &str = "generated";
@@ -411,16 +413,7 @@ async fn store_uploaded_screenshot(
     let storage_path = format!("{id}.{extension}");
     let final_path = state.screenshot_dir.join(&storage_path);
     let tmp_path = state.screenshot_dir.join(format!("{id}.tmp"));
-    let mut file = tokio::fs::File::create(&tmp_path)
-        .await
-        .map_err(|err| ScreenshotUploadError::Internal(err.into()))?;
-    file.write_all(&body)
-        .await
-        .map_err(|err| ScreenshotUploadError::Internal(err.into()))?;
-    file.flush()
-        .await
-        .map_err(|err| ScreenshotUploadError::Internal(err.into()))?;
-    tokio::fs::rename(&tmp_path, &final_path)
+    storage::write_screenshot_file(&tmp_path, &final_path, &body)
         .await
         .map_err(|err| ScreenshotUploadError::Internal(err.into()))?;
     let mut tx = state
@@ -944,5 +937,62 @@ mod tests {
         );
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
         headers
+    }
+
+    #[tokio::test]
+    async fn db_sweep_spares_row_backed_files_and_removes_orphans() {
+        let Some(state) = db_test_state().await else {
+            return;
+        };
+        reset_screenshot_db(&state).await;
+        let user_id = insert_user(&state, 5120, "sweep-user").await;
+        let app_id = insert_public_app(&state, user_id, "sweep.example.test").await;
+        let deployment_id = insert_successful_deployment(&state, app_id).await;
+        let job_id = insert_screenshot_job(&state, app_id, deployment_id, "running").await;
+
+        let backed_id = Uuid::new_v4();
+        let backed_path = format!("{backed_id}.jpg");
+        let orphan_id = Uuid::new_v4();
+        let orphan_path = format!("{orphan_id}.jpg");
+
+        tokio::fs::write(state.screenshot_dir.join(&backed_path), b"x")
+            .await
+            .unwrap();
+        tokio::fs::write(state.screenshot_dir.join(&orphan_path), b"x")
+            .await
+            .unwrap();
+
+        // Insert a DB row only for the backed file.
+        sqlx::query(
+            "INSERT INTO app_screenshots
+               (id,app_id,deployment_id,agent_job_id,source,content_type,byte_size,storage_path,capture_url)
+             VALUES ($1,$2,$3,$4,'generated','image/jpeg',1,$5,'u://x')",
+        )
+        .bind(backed_id)
+        .bind(app_id)
+        .bind(deployment_id)
+        .bind(job_id)
+        .bind(&backed_path)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Back-date both files beyond the 1-hour threshold so the sweep considers them.
+        let two_hours_ago = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+        );
+        filetime::set_file_mtime(state.screenshot_dir.join(&backed_path), two_hours_ago).unwrap();
+        filetime::set_file_mtime(state.screenshot_dir.join(&orphan_path), two_hours_ago).unwrap();
+
+        super::storage::sweep_orphaned_screenshot_files(&state).await;
+
+        assert!(
+            state.screenshot_dir.join(&backed_path).exists(),
+            "row-backed file must survive the sweep"
+        );
+        assert!(
+            !state.screenshot_dir.join(&orphan_path).exists(),
+            "orphaned file must be removed by the sweep"
+        );
     }
 }

@@ -275,6 +275,14 @@ pub(in crate::web) async fn delete_app_records(
     {
         anyhow::bail!("failed to delete resource snapshots");
     }
+    // Collect screenshot storage paths inside the transaction before the app
+    // row (and its cascaded app_screenshots rows) are deleted. The paths are
+    // used for best-effort file cleanup after commit.
+    let screenshot_paths: Vec<String> =
+        sqlx::query_scalar("SELECT storage_path FROM app_screenshots WHERE app_id=$1")
+            .bind(app_id)
+            .fetch_all(&mut *tx)
+            .await?;
     let res = sqlx::query("DELETE FROM apps WHERE id=$1 AND user_id=$2")
         .bind(app_id)
         .bind(user_id)
@@ -282,6 +290,26 @@ pub(in crate::web) async fn delete_app_records(
         .await?;
     let deleted = res.rows_affected() > 0;
     tx.commit().await?;
+    // Best-effort file cleanup; only runs when the app row was actually deleted.
+    // Paths containing path separators are rejected as a defensive measure.
+    if deleted {
+        for path in screenshot_paths {
+            if path.contains('/') || path.contains('\\') {
+                continue;
+            }
+            match tokio::fs::remove_file(state.screenshot_dir.join(&path)).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %path,
+                        "failed to remove screenshot file during app deletion"
+                    );
+                }
+            }
+        }
+    }
     Ok(deleted)
 }
 
@@ -358,4 +386,113 @@ pub(in crate::web) async fn mark_agent_job_failed(state: &AppState, job_id: Uuid
     .bind(failure)
     .execute(&state.db)
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal test state: real DB (skipped when `HOSTLET_DB_TEST_URL` is
+    /// absent) with a temp screenshot directory.
+    async fn test_state() -> Option<AppState> {
+        let mut state = crate::state::db_test_state_from_env().await?;
+        state.screenshot_dir =
+            std::env::temp_dir().join(format!("hostlet-del-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&state.screenshot_dir)
+            .await
+            .ok()?;
+        Some(state)
+    }
+
+    async fn reset_db(state: &AppState) {
+        sqlx::query(
+            "TRUNCATE app_screenshots, agent_jobs, deployments, app_env_vars, apps, users CASCADE",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn db_delete_app_records_removes_screenshot_file() {
+        let Some(state) = test_state().await else {
+            return;
+        };
+        reset_db(&state).await;
+
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (github_id, login) VALUES (9901, 'del-test-user') RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+        let app_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO apps
+               (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,root_directory,public_exposure,auto_deploy)
+             VALUES ($1,$2,'del-app','hostlet-ci/test','main',3000,'/health','del.example.test','single','.',false,false)
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(state.local_server_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+        let deployment_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployments
+               (app_id,server_id,status,commit_sha,started_at,finished_at,runtime_kind,container_name,published_port)
+             VALUES ($1,$2,'success','HEAD',now(),now(),'single','hostlet-del-test',32100)
+             RETURNING id",
+        )
+        .bind(app_id)
+        .bind(state.local_server_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+        let job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO agent_jobs
+               (server_id,app_id,deployment_id,job_type,status,payload_json)
+             VALUES ($1,$2,$3,'capture_screenshot','running','{}'::jsonb)
+             RETURNING id",
+        )
+        .bind(state.local_server_id)
+        .bind(app_id)
+        .bind(deployment_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+        let ss_id = Uuid::new_v4();
+        let storage_path = format!("{ss_id}.jpg");
+        let file_path = state.screenshot_dir.join(&storage_path);
+        tokio::fs::write(&file_path, b"test").await.unwrap();
+        sqlx::query(
+            "INSERT INTO app_screenshots
+               (id,app_id,deployment_id,agent_job_id,source,content_type,byte_size,storage_path,capture_url)
+             VALUES ($1,$2,$3,$4,'generated','image/jpeg',4,$5,'u://x')",
+        )
+        .bind(ss_id)
+        .bind(app_id)
+        .bind(deployment_id)
+        .bind(job_id)
+        .bind(&storage_path)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let deleted = delete_app_records(&state, app_id, user_id, &[])
+            .await
+            .unwrap();
+        assert!(deleted);
+
+        let row_count: i64 = sqlx::query_scalar("SELECT count(*) FROM app_screenshots WHERE id=$1")
+            .bind(ss_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(row_count, 0, "screenshot row should be gone (CASCADE)");
+        assert!(!file_path.exists(), "screenshot file should be deleted");
+    }
 }
