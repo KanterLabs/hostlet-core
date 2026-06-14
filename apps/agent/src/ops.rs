@@ -220,6 +220,8 @@ pub(crate) struct HealthTarget {
     container_port: u16,
     pub(crate) published_port: u16,
     health_path: String,
+    domain: Option<String>,
+    route_key: Option<String>,
 }
 
 /// Builds a `health_status` event payload for a probed target. Centralizes the
@@ -264,7 +266,7 @@ pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uu
         return;
     };
     for mut target in targets {
-        let mut result = probe_health_target(cfg, &target).await;
+        let mut result = probe_health_target(cfg, &mut target).await;
         let entry = counts.entry(target.app_id).or_default();
         record_health_probe(entry, &result);
         if should_auto_start_container(entry, &result) {
@@ -320,11 +322,6 @@ async fn auto_start_container(
     match run_quiet("docker", &["start", &target.container_name]).await {
         Ok(()) => {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Ok(port) =
-                docker_published_port(&target.container_name, target.container_port).await
-            {
-                target.published_port = port;
-            }
             let result = probe_health_target(cfg, target).await;
             if result.healthy {
                 entry.successes = entry.successes.saturating_add(1);
@@ -355,10 +352,10 @@ async fn auto_start_container(
 }
 
 pub(crate) async fn health_check_job(cfg: &Config, payload: &Value) {
-    let Some(target) = health_target_from_payload(payload) else {
+    let Some(mut target) = health_target_from_payload(payload) else {
         return;
     };
-    let result = probe_health_target(cfg, &target).await;
+    let result = probe_health_target(cfg, &mut target).await;
     post(cfg, single_probe_health_event(&target, &result)).await;
 }
 
@@ -369,10 +366,7 @@ pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyh
     run_quiet("docker", &["restart", &target.container_name]).await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let mut target = target;
-    if let Ok(port) = docker_published_port(&target.container_name, target.container_port).await {
-        target.published_port = port;
-    }
-    let result = probe_health_target(cfg, &target).await;
+    let result = probe_health_target(cfg, &mut target).await;
     post(cfg, single_probe_health_event(&target, &result)).await;
     Ok(())
 }
@@ -671,6 +665,16 @@ pub(crate) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
     if validate_health_path(health_path).is_err() {
         return None;
     }
+    let domain = value
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .filter(|value| validate_domain(value).is_ok())
+        .map(str::to_string);
+    let route_key = value
+        .get("routeKey")
+        .or_else(|| value.get("route_key"))
+        .and_then(|v| v.as_str())
+        .and_then(clean_route_key);
     Some(HealthTarget {
         app_id,
         deployment_id,
@@ -678,7 +682,17 @@ pub(crate) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
         container_port,
         published_port,
         health_path: health_path.to_string(),
+        domain,
+        route_key,
     })
+}
+
+fn clean_route_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || app_slug(trimmed) != trimmed {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 pub(crate) struct HealthProbeResult {
@@ -690,7 +704,10 @@ pub(crate) struct HealthProbeResult {
     container_state: Option<ContainerState>,
 }
 
-pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> HealthProbeResult {
+pub(crate) async fn probe_health_target(
+    cfg: &Config,
+    target: &mut HealthTarget,
+) -> HealthProbeResult {
     let url = format!(
         "http://{}:{}{}",
         cfg.health_host, target.published_port, target.health_path
@@ -719,6 +736,20 @@ pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> 
             container_state: Some(container_state),
         };
     }
+    if let Err(err) = refresh_published_port(cfg, target).await {
+        return HealthProbeResult {
+            healthy: false,
+            url,
+            http_status: None,
+            latency_ms: started.elapsed().as_millis(),
+            error: Some(err.to_string()),
+            container_state: Some(container_state),
+        };
+    }
+    let url = format!(
+        "http://{}:{}{}",
+        cfg.health_host, target.published_port, target.health_path
+    );
     match cfg
         .http
         .get(&url)
@@ -746,6 +777,54 @@ pub(crate) async fn probe_health_target(cfg: &Config, target: &HealthTarget) -> 
             container_state: Some(container_state),
         },
     }
+}
+
+async fn refresh_published_port(cfg: &Config, target: &mut HealthTarget) -> anyhow::Result<()> {
+    let actual = docker_published_port(&target.container_name, target.container_port).await?;
+    if !published_port_changed(target.published_port, actual) {
+        return Ok(());
+    }
+    log(
+        cfg,
+        target.deployment_id,
+        "stdout",
+        &format!(
+            "Detected Docker-published port drift for {}; updating route from {} to {}.",
+            target.container_name, target.published_port, actual
+        ),
+    )
+    .await;
+    refresh_route(cfg, target, actual).await?;
+    target.published_port = actual;
+    Ok(())
+}
+
+fn published_port_changed(stored: u16, actual: u16) -> bool {
+    stored != actual
+}
+
+async fn refresh_route(cfg: &Config, target: &HealthTarget, port: u16) -> anyhow::Result<()> {
+    let Some(route_key) = target.route_key.as_deref() else {
+        return Ok(());
+    };
+    let Some(domain) = target.domain.as_deref() else {
+        return Ok(());
+    };
+    if cfg.local_mode {
+        if let Some(router) = &cfg.local_router {
+            return apply_local_caddy_route(
+                cfg,
+                target.deployment_id,
+                router,
+                route_key,
+                domain,
+                port,
+            )
+            .await;
+        }
+        return Ok(());
+    }
+    apply_caddy_route(cfg, target.deployment_id, route_key, domain, port).await
 }
 
 fn failed_health_probe(cfg: &Config, target: &HealthTarget, error: String) -> HealthProbeResult {

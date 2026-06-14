@@ -43,6 +43,7 @@ pub async fn health_targets(
         SELECT a.id AS app_id,
                a.health_path,
                a.container_port,
+               a.domain,
                d.id AS deployment_id,
                d.container_name,
                d.published_port
@@ -70,6 +71,8 @@ pub async fn health_targets(
                         "containerPort": row.get::<i32, _>("container_port"),
                         "publishedPort": row.get::<i32, _>("published_port"),
                         "healthPath": row.get::<String, _>("health_path"),
+                        "domain": row.get::<String, _>("domain"),
+                        "routeKey": format!("app-{}", row.get::<Uuid, _>("app_id")),
                     })
                 })
                 .collect::<Vec<_>>(),

@@ -254,6 +254,7 @@ pub async fn check_app_health_now(
         SELECT a.server_id,
                a.health_path,
                a.container_port,
+               a.domain,
                d.id AS deployment_id,
                d.container_name,
                d.published_port
@@ -298,6 +299,8 @@ pub async fn check_app_health_now(
         "container_port": row.get::<i32, _>("container_port"),
         "published_port": published_port,
         "health_path": row.get::<String, _>("health_path"),
+        "domain": row.get::<String, _>("domain"),
+        "route_key": format!("app-{id}"),
     });
     enqueue_interactive_agent_job(
         &state,

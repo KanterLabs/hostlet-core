@@ -134,6 +134,55 @@ fn auto_start_ignores_restarting_oom_and_missing_containers() {
     }
 }
 
+#[test]
+fn health_target_payload_accepts_route_metadata() {
+    let app_id = Uuid::from_u128(1);
+    let deployment_id = Uuid::from_u128(2);
+    let target = health_target_from_payload(&json!({
+        "appId": app_id,
+        "deploymentId": deployment_id,
+        "containerName": "hostlet-app-demo",
+        "containerPort": 3000,
+        "publishedPort": 32000,
+        "healthPath": "/health",
+        "domain": "demo.example.com",
+        "routeKey": "app-00000000-0000-0000-0000-000000000001"
+    }))
+    .unwrap();
+
+    assert_eq!(target.domain.as_deref(), Some("demo.example.com"));
+    assert_eq!(
+        target.route_key.as_deref(),
+        Some("app-00000000-0000-0000-0000-000000000001")
+    );
+}
+
+#[test]
+fn health_target_payload_rejects_invalid_route_metadata_without_rejecting_target() {
+    let app_id = Uuid::from_u128(1);
+    let deployment_id = Uuid::from_u128(2);
+    let target = health_target_from_payload(&json!({
+        "app_id": app_id,
+        "deployment_id": deployment_id,
+        "container_name": "hostlet-app-demo",
+        "container_port": 3000,
+        "published_port": 32000,
+        "health_path": "/health",
+        "domain": "not a domain",
+        "route_key": "../../bad"
+    }))
+    .unwrap();
+
+    assert_eq!(target.domain, None);
+    assert_eq!(target.route_key, None);
+}
+
+#[test]
+fn published_port_changed_detects_drift_only() {
+    assert!(!published_port_changed(32000, 32000));
+    assert!(published_port_changed(32000, 32001));
+}
+
 fn health_probe_for_state(state: ContainerState) -> HealthProbeResult {
     HealthProbeResult {
         healthy: false,

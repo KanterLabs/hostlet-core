@@ -338,6 +338,9 @@ export HOSTLET_JOB_SIGNING_SECRET="${JOB_SIGNING_SECRET}"
 export HOSTLET_WORKDIR="${TMP_DIR}/agent-work"
 export HOSTLET_LOCAL_MODE=true
 export HOSTLET_HEALTH_HOST=127.0.0.1
+export HOSTLET_LOCAL_ROUTER=caddy
+export HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR="${TMP_DIR}/caddy"
+export HOSTLET_LOCAL_ROUTER_RELOAD=true
 export HOSTLET_RUNTIME_HEALTH_INTERVAL_SECONDS=2
 export HOSTLET_RAILPACK_BUILDKIT_CONTAINER="${RAILPACK_BUILDKIT_CONTAINER}"
 export GIT_CONFIG_GLOBAL
@@ -593,6 +596,36 @@ wait_published_health_ok "${published_port}" "/health" "${container_name}"
 recovery_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
 printf '%s' "${recovery_logs}" | grep -q "Health checks failed and container is stopped; starting ${container_name}."
 printf '%s' "${recovery_logs}" | grep -q "Auto-started container ${container_name}."
+
+# ---------------------------------------------------------------------------
+# Runtime route recovery: Docker can assign a new ephemeral loopback port after
+# daemon or machine restart. Simulate stale Hostlet DB + route state and prove
+# the health loop repairs both without a redeploy.
+# ---------------------------------------------------------------------------
+route_file="${HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR}/app-${app_id}.caddy"
+if [ ! -f "${route_file}" ]; then
+  echo "expected local Caddy route snippet ${route_file}" >&2
+  exit 1
+fi
+actual_port="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3000/tcp") 0).HostPort}}' "${container_name}")"
+stale_port=9
+docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+UPDATE deployments SET published_port=${stale_port} WHERE id='${deployment_id}';
+SQL
+sed -i "s/127\\.0\\.0\\.1:[0-9][0-9]*/127.0.0.1:${stale_port}/" "${route_file}"
+health_before_port_repair="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}/health")"
+checked_before_port_repair="$(printf '%s' "${health_before_port_repair}" | json_get lastCheckedAt || true)"
+wait_app_health_checked_after "${app_id}" "${checked_before_port_repair}"
+app_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publishedPort)"
+if [ "${published_port}" != "${actual_port}" ]; then
+  echo "expected health loop to repair published port to ${actual_port}, got ${published_port}" >&2
+  exit 1
+fi
+grep -q "127.0.0.1:${actual_port}" "${route_file}"
+wait_published_health_ok "${published_port}" "/health" "${container_name}"
+port_repair_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
+printf '%s' "${port_repair_logs}" | grep -q "Detected Docker-published port drift for ${container_name}; updating route from ${stale_port} to ${actual_port}."
 
 # ---------------------------------------------------------------------------
 # Redeploy v2: bumping APP_VERSION and redeploying serves v2 (data volume keeps
