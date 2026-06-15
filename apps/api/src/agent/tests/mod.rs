@@ -1,5 +1,8 @@
 use super::routes::{ClaimJobRequest, CompleteJobRequest};
 use super::*;
+use crate::deployment_policy::{
+    DeploymentStatusDecision, DeploymentStatusEvent, DeploymentStatusPolicy,
+};
 
 mod lifecycle;
 
@@ -838,6 +841,74 @@ async fn db_terminal_deployment_ignores_late_agent_events() {
         None,
         "current_deployment_id must not be set when success was blocked"
     );
+}
+
+struct RejectOverBudgetPolicy;
+
+impl DeploymentStatusPolicy for RejectOverBudgetPolicy {
+    fn evaluate(&self, event: DeploymentStatusEvent<'_>) -> DeploymentStatusDecision {
+        let Some(metadata) = event.runtime_metadata else {
+            return DeploymentStatusDecision::Accept;
+        };
+        if event.status == "success" && metadata["imageBudgetStatus"] == "over_budget" {
+            let mut metadata = metadata.clone();
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert("imageBudgetEnforced".into(), serde_json::json!(true));
+            }
+            return DeploymentStatusDecision::Fail {
+                failure: "image is over budget".into(),
+                runtime_metadata: Some(metadata),
+            };
+        }
+        DeploymentStatusDecision::Accept
+    }
+}
+
+#[tokio::test]
+async fn db_deployment_status_policy_can_fail_success_event() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    let state = state.with_deployment_status_policy(std::sync::Arc::new(RejectOverBudgetPolicy));
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+    let deployment_id = insert_deployment(&state, app_id).await;
+
+    handle_agent_message(
+        &state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "deployment_status",
+            "deployment_id": deployment_id,
+            "status": "success",
+            "container_name": format!("hostlet-app-{app_id}"),
+            "published_port": 32100,
+            "runtime_metadata": {
+                "imageBudgetStatus": "over_budget",
+                "imageBudgetMaxBytes": 1_000_000_000
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        deployment_status_by_id(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("failed")
+    );
+    assert_eq!(
+        deployment_failure_summary(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("image is over budget")
+    );
+    assert_eq!(
+        deployment_runtime_metadata(&state, deployment_id).await["imageBudgetEnforced"],
+        true
+    );
+    assert_eq!(current_deployment(&state, app_id).await, None);
 }
 
 /// A deployment_status 'success' event enqueues a docker_cleanup job whose

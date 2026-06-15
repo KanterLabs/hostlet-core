@@ -1,4 +1,5 @@
 use crate::crypto::{hash_token, nonempty_env, Crypto};
+use crate::deployment_policy::{DeploymentStatusPolicy, NoopDeploymentStatusPolicy};
 use crate::env::{bool_env, http_client, screenshot_dir, secret_from_env};
 use crate::rate_limit::RateLimiter;
 use crate::screenshots::{NoopScreenshotHooks, ScreenshotHooks};
@@ -56,6 +57,7 @@ pub struct AppState {
     pub public_web_url: String,
     pub screenshot_dir: PathBuf,
     pub screenshot_hooks: Arc<dyn ScreenshotHooks>,
+    pub deployment_status_policy: Arc<dyn DeploymentStatusPolicy>,
     pub allowed_web_origins: Vec<String>,
     pub base_domain: Option<String>,
     pub domain_prefix: String,
@@ -146,6 +148,7 @@ impl AppState {
             public_web_url,
             screenshot_dir,
             screenshot_hooks: Arc::new(NoopScreenshotHooks),
+            deployment_status_policy: Arc::new(NoopDeploymentStatusPolicy),
             allowed_web_origins,
             base_domain: base_domain(),
             domain_prefix: domain_prefix(),
@@ -166,6 +169,15 @@ impl AppState {
     #[cfg(test)]
     pub fn with_screenshot_hooks(mut self, hooks: Arc<dyn ScreenshotHooks>) -> Self {
         self.screenshot_hooks = hooks;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_deployment_status_policy(
+        mut self,
+        policy: Arc<dyn DeploymentStatusPolicy>,
+    ) -> Self {
+        self.deployment_status_policy = policy;
         self
     }
 }

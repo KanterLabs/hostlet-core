@@ -101,6 +101,30 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
     if !valid_deployment_status(status) {
         return;
     }
+    let mut status = status.to_string();
+    let mut failure_summary = msg
+        .get("failure")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let mut runtime_metadata = msg.get("runtime_metadata").cloned();
+    match state
+        .deployment_status_policy
+        .evaluate(crate::deployment_policy::DeploymentStatusEvent {
+            status: &status,
+            runtime_metadata: runtime_metadata.as_ref(),
+        }) {
+        crate::deployment_policy::DeploymentStatusDecision::Accept => {}
+        crate::deployment_policy::DeploymentStatusDecision::Fail {
+            failure,
+            runtime_metadata: policy_metadata,
+        } => {
+            status = "failed".into();
+            failure_summary = Some(failure);
+            if policy_metadata.is_some() {
+                runtime_metadata = policy_metadata;
+            }
+        }
+    }
     // Update the deployment in place: COALESCE keeps existing columns when the
     // agent omits a field, runtime_metadata is replaced only when supplied, and
     // finished_at is stamped once the deployment reaches a terminal status.
@@ -119,13 +143,13 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
          finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END \
          WHERE id=$8 AND server_id=$9 AND status = ANY($10)",
     )
-    .bind(status)
+    .bind(&status)
     .bind(msg.get("image_tag").and_then(|v| v.as_str()))
     .bind(msg.get("container_name").and_then(|v| v.as_str()))
     .bind(bounded_i32(msg, "published_port", PORT_RANGE))
-    .bind(msg.get("failure").and_then(|v| v.as_str()))
+    .bind(failure_summary.as_deref())
     .bind(msg.get("compose_project").and_then(|v| v.as_str()))
-    .bind(msg.get("runtime_metadata").cloned())
+    .bind(runtime_metadata)
     .bind(id)
     .bind(server_id)
     .bind(crate::deploy::ACTIVE_DEPLOYMENT_STATUSES)
@@ -133,7 +157,7 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
     .await
     .map(|done| done.rows_affected())
     .unwrap_or(0);
-    if matches!(status, "success" | "rolled_back") && updated == 1 {
+    if matches!(status.as_str(), "success" | "rolled_back") && updated == 1 {
         let _ = sqlx::query("UPDATE apps SET current_deployment_id=$1, domain=COALESCE($2, domain) WHERE id=(SELECT app_id FROM deployments WHERE id=$1)")
             .bind(id)
             .bind(msg.get("local_url").and_then(|v| v.as_str()))

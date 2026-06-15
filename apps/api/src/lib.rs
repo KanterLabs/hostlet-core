@@ -4,6 +4,7 @@ pub mod auth;
 pub mod cleanup;
 pub mod crypto;
 pub mod deploy;
+pub mod deployment_policy;
 pub mod env;
 pub mod github;
 pub mod policies;
