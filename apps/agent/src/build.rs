@@ -302,11 +302,13 @@ pub(crate) async fn image_size_bytes(image: &str) -> anyhow::Result<i64> {
 
 pub(crate) fn build_runtime_metadata(
     build: &BuildPlan,
+    image_ref: &str,
     build_duration_ms: u128,
     image_size_bytes: Option<i64>,
 ) -> Value {
-    image_budget_runtime_metadata(
+    build_artifact_runtime_metadata(image_budget_runtime_metadata(
         json!({
+            "imageRef": image_ref,
             "packagingStrategy": build.packaging_strategy.label(),
             "generatedDockerfile": build.generated,
             "detectedLanguage": null,
@@ -317,7 +319,25 @@ pub(crate) fn build_runtime_metadata(
             "imageSizeBytes": image_size_bytes,
         }),
         image_size_bytes,
-    )
+    ))
+}
+
+pub(crate) fn build_artifact_runtime_metadata(mut metadata: Value) -> Value {
+    let Some(image_ref) = metadata
+        .get("imageRef")
+        .and_then(Value::as_str)
+        .filter(|image_ref| !image_ref.trim().is_empty())
+        .map(str::to_owned)
+    else {
+        return metadata;
+    };
+    let Some(object) = metadata.as_object_mut() else {
+        return metadata;
+    };
+    object
+        .entry("buildArtifact")
+        .or_insert_with(|| json!({ "imageRef": image_ref }));
+    metadata
 }
 
 pub(crate) fn image_budget_runtime_metadata(
@@ -612,8 +632,18 @@ mod tests {
 
     #[test]
     fn build_runtime_metadata_records_build_time_and_image_size() {
-        let metadata = build_runtime_metadata(&test_build_plan(), 12_345, Some(149_422_080));
+        let metadata = build_runtime_metadata(
+            &test_build_plan(),
+            "hostlet/example:deployment",
+            12_345,
+            Some(149_422_080),
+        );
 
+        assert_eq!(metadata["imageRef"], "hostlet/example:deployment");
+        assert_eq!(
+            metadata["buildArtifact"]["imageRef"],
+            "hostlet/example:deployment"
+        );
         assert_eq!(metadata["packagingStrategy"], "dockerfile");
         assert_eq!(metadata["generatedDockerfile"], false);
         assert_eq!(metadata["buildDurationMs"], 12_345);
@@ -625,8 +655,14 @@ mod tests {
 
     #[test]
     fn build_runtime_metadata_records_unknown_image_size() {
-        let metadata = build_runtime_metadata(&test_build_plan(), 3_000, None);
+        let metadata =
+            build_runtime_metadata(&test_build_plan(), "hostlet/example:unknown", 3_000, None);
 
+        assert_eq!(metadata["imageRef"], "hostlet/example:unknown");
+        assert_eq!(
+            metadata["buildArtifact"]["imageRef"],
+            "hostlet/example:unknown"
+        );
         assert_eq!(metadata["packagingStrategy"], "dockerfile");
         assert_eq!(metadata["buildDurationMs"], 3_000);
         assert!(metadata["imageSizeBytes"].is_null());
@@ -650,7 +686,12 @@ mod tests {
 
     #[test]
     fn startup_runtime_metadata_preserves_build_metrics_and_records_boot_time() {
-        let metadata = build_runtime_metadata(&test_build_plan(), 2_000, Some(42_000));
+        let metadata = build_runtime_metadata(
+            &test_build_plan(),
+            "hostlet/example:startup",
+            2_000,
+            Some(42_000),
+        );
         let metadata = add_git_sync_runtime_metadata(metadata, 175);
         let metadata = add_build_plan_runtime_metadata(metadata, 45);
         let metadata = add_startup_runtime_metadata(metadata, 350, 1_250);

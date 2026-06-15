@@ -121,16 +121,18 @@ pub(crate) async fn railpack_build_app(
         .await;
     }
     Ok(RailpackBuildResult {
-        runtime_metadata: railpack_runtime_metadata(build_duration_ms, image_size),
+        runtime_metadata: railpack_runtime_metadata(image, build_duration_ms, image_size),
     })
 }
 
 pub(crate) fn railpack_runtime_metadata(
+    image_ref: &str,
     build_duration_ms: u128,
     image_size_bytes: Option<i64>,
 ) -> Value {
-    image_budget_runtime_metadata(
+    build_artifact_runtime_metadata(image_budget_runtime_metadata(
         json!({
+            "imageRef": image_ref,
             "packagingStrategy": "generated",
             "generatedDockerfile": false,
             "buildBackend": "railpack",
@@ -142,7 +144,7 @@ pub(crate) fn railpack_runtime_metadata(
             "imageSizeBytes": image_size_bytes,
         }),
         image_size_bytes,
-    )
+    ))
 }
 
 fn railpack_build_args(
@@ -557,8 +559,13 @@ mod tests {
 
     #[test]
     fn railpack_runtime_metadata_records_unknown_image_size() {
-        let metadata = railpack_runtime_metadata(1_500, None);
+        let metadata = railpack_runtime_metadata("hostlet/example:railpack", 1_500, None);
 
+        assert_eq!(metadata["imageRef"], "hostlet/example:railpack");
+        assert_eq!(
+            metadata["buildArtifact"]["imageRef"],
+            "hostlet/example:railpack"
+        );
         assert_eq!(metadata["packagingStrategy"], "generated");
         assert_eq!(metadata["buildBackend"], "railpack");
         assert_eq!(metadata["buildDurationMs"], 1_500);

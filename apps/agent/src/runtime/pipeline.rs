@@ -336,6 +336,7 @@ async fn build_image(
                                 runtime_metadata: Some(add_git_sync_runtime_metadata(
                                     add_build_plan_runtime_metadata(
                                         railpack_runtime_metadata(
+                                            image,
                                             build_started.elapsed().as_millis(),
                                             None,
                                         ),
@@ -439,7 +440,12 @@ async fn build_image(
                 image: Some(image),
                 runtime_metadata: Some(add_git_sync_runtime_metadata(
                     add_build_plan_runtime_metadata(
-                        build_runtime_metadata(&build, build_started.elapsed().as_millis(), None),
+                        build_runtime_metadata(
+                            &build,
+                            image,
+                            build_started.elapsed().as_millis(),
+                            None,
+                        ),
                         build_plan_duration_ms,
                     ),
                     git_sync_duration_ms,
@@ -465,7 +471,7 @@ async fn build_image(
     Ok(BuiltImage {
         runtime_metadata: hardening.add_runtime_metadata(add_git_sync_runtime_metadata(
             add_build_plan_runtime_metadata(
-                build_runtime_metadata(&build, build_duration_ms, image_size),
+                build_runtime_metadata(&build, image, build_duration_ms, image_size),
                 build_plan_duration_ms,
             ),
             git_sync_duration_ms,
