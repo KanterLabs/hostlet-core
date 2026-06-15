@@ -44,3 +44,13 @@ export function socketLabel(state: SocketState) {
     default: return "connecting";
   }
 }
+
+export function imageBudgetLabel(status?: string | null) {
+  switch (status) {
+    case "ok": return "Within budget";
+    case "warning": return "Large";
+    case "over_budget": return "Over budget";
+    case "unknown": return "Unknown";
+    default: return "n/a";
+  }
+}

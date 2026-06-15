@@ -129,17 +129,20 @@ pub(crate) fn railpack_runtime_metadata(
     build_duration_ms: u128,
     image_size_bytes: Option<i64>,
 ) -> Value {
-    json!({
-        "packagingStrategy": "generated",
-        "generatedDockerfile": false,
-        "buildBackend": "railpack",
-        "detectedLanguage": null,
-        "detectedFramework": null,
-        "runtimeKind": null,
-        "packageManager": null,
-        "buildDurationMs": build_duration_ms,
-        "imageSizeBytes": image_size_bytes,
-    })
+    image_budget_runtime_metadata(
+        json!({
+            "packagingStrategy": "generated",
+            "generatedDockerfile": false,
+            "buildBackend": "railpack",
+            "detectedLanguage": null,
+            "detectedFramework": null,
+            "runtimeKind": null,
+            "packageManager": null,
+            "buildDurationMs": build_duration_ms,
+            "imageSizeBytes": image_size_bytes,
+        }),
+        image_size_bytes,
+    )
 }
 
 fn railpack_build_args(
@@ -560,6 +563,7 @@ mod tests {
         assert_eq!(metadata["buildBackend"], "railpack");
         assert_eq!(metadata["buildDurationMs"], 1_500);
         assert!(metadata["imageSizeBytes"].is_null());
+        assert_eq!(metadata["imageBudgetStatus"], "unknown");
     }
 
     #[test]

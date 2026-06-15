@@ -11,6 +11,7 @@ import {
   formatBytes,
   formatDuration,
   humanStatus,
+  imageBudgetLabel,
   socketLabel,
   statusHelp,
 } from "./deploymentStatus";
@@ -28,6 +29,9 @@ type RuntimeMetadata = {
   buildPlanDurationMs?: number | null;
   buildDurationMs?: number | null;
   imageSizeBytes?: number | null;
+  imageBudgetStatus?: string | null;
+  imageBudgetWarnBytes?: number | null;
+  imageBudgetMaxBytes?: number | null;
   composeUpDurationMs?: number | null;
   containerStartDurationMs?: number | null;
   healthCheckDurationMs?: number | null;
@@ -129,6 +133,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                     <SummaryItem label="Build plan" value={formatDuration(metadata.buildPlanDurationMs)} />
                     <SummaryItem label="Build time" value={formatDuration(metadata.buildDurationMs)} />
                     <SummaryItem label="Image size" value={formatBytes(metadata.imageSizeBytes)} />
+                    <SummaryItem label="Image budget" value={imageBudgetLabel(metadata.imageBudgetStatus)} />
                     {isCompose && <SummaryItem label="Compose up" value={formatDuration(metadata.composeUpDurationMs)} />}
                     <SummaryItem label={isCompose ? "Startup" : "Container start"} value={formatDuration(metadata.containerStartDurationMs)} />
                     <SummaryItem label="Health wait" value={formatDuration(metadata.healthCheckDurationMs)} />

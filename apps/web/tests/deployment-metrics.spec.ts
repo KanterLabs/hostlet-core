@@ -9,6 +9,9 @@ const validRuntimeMetadata = {
   buildPlanDurationMs: 75,
   buildDurationMs: 12500,
   imageSizeBytes: 0,
+  imageBudgetStatus: "ok",
+  imageBudgetWarnBytes: 500000000,
+  imageBudgetMaxBytes: 1000000000,
   containerStartDurationMs: 0,
   healthCheckDurationMs: 2000,
   bootDurationMs: 2000,
@@ -27,6 +30,8 @@ test("deployment detail shows startup and boot metrics", async ({ page }) => {
   await expect(page.getByText("Container start")).toBeVisible();
   await expect(page.getByText("0 ms", { exact: true })).toBeVisible();
   await expect(page.getByText("0 B")).toBeVisible();
+  await expect(page.getByText("Image budget")).toBeVisible();
+  await expect(page.getByText("Within budget")).toBeVisible();
   await expect(page.getByText("Health wait")).toBeVisible();
   await expect(page.getByText("Boot time")).toBeVisible();
   await expect(page.locator(".data-label").filter({ hasText: "Routing" })).toBeVisible();
@@ -39,13 +44,14 @@ test("deployment detail tolerates malformed runtime metrics", async ({ page }) =
     buildPlanDurationMs: "stalled",
     buildDurationMs: "slow",
     imageSizeBytes: "large",
+    imageBudgetStatus: "huge",
     containerStartDurationMs: -1,
     healthCheckDurationMs: Number.NaN,
   });
   await page.goto("/deployments/deploy-1");
 
   await expect(page.getByRole("heading", { name: "Deployment metrics" })).toBeVisible();
-  await expect(page.getByText("n/a")).toHaveCount(5);
+  await expect(page.getByText("n/a")).toHaveCount(6);
   await expect(page.getByText("NaN")).toHaveCount(0);
 });
 
