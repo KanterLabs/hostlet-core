@@ -253,7 +253,7 @@ record_deployment_metric() {
   if [ -z "${HOSTLET_RAILPACK_METRICS_FILE:-}" ]; then
     return 0
   fi
-  python3 - "${fixture}" "${scenario}" "${detail}" <<'PY' | ci_metrics_append_object "${HOSTLET_RAILPACK_METRICS_FILE}"
+  python3 - "${fixture}" "${scenario}" "${detail}" <<'PY' | ci_metrics_upsert_object_by_fixture "${HOSTLET_RAILPACK_METRICS_FILE}"
 import json
 import sys
 

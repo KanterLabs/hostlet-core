@@ -8,19 +8,21 @@ ci_metrics_init() {
   printf '[]\n' >"${path}"
 }
 
-ci_metrics_append_object() {
+ci_metrics_write_object() {
   local path="$1"
+  local mode="$2"
   local raw
   raw="$(cat)"
   mkdir -p "$(dirname "${path}")"
-  python3 - "${path}" "${raw}" <<'PY'
+  python3 - "${path}" "${mode}" "${raw}" <<'PY'
 import json
 import os
 import sys
 import tempfile
 
 path = sys.argv[1]
-entry = json.loads(sys.argv[2])
+mode = sys.argv[2]
+entry = json.loads(sys.argv[3])
 if not isinstance(entry, dict):
     raise SystemExit("metrics entry must be a JSON object")
 
@@ -33,7 +35,18 @@ except FileNotFoundError:
 if not isinstance(payload, list):
     raise SystemExit(f"metrics file must contain a JSON array: {path}")
 
+if mode == "append":
+    pass
+elif mode == "upsert-fixture":
+    fixture = entry.get("fixture")
+    if not isinstance(fixture, str) or not fixture:
+        raise SystemExit("metrics entry must include a non-empty fixture")
+    payload = [item for item in payload if not (isinstance(item, dict) and item.get("fixture") == fixture)]
+else:
+    raise SystemExit(f"unknown metrics write mode: {mode}")
+
 payload.append(entry)
+
 directory = os.path.dirname(path) or "."
 fd, tmp_path = tempfile.mkstemp(prefix=f"{os.path.basename(path)}.", suffix=".tmp", dir=directory)
 try:
@@ -45,6 +58,14 @@ finally:
     if os.path.exists(tmp_path):
         os.unlink(tmp_path)
 PY
+}
+
+ci_metrics_append_object() {
+  ci_metrics_write_object "$1" append
+}
+
+ci_metrics_upsert_object_by_fixture() {
+  ci_metrics_write_object "$1" upsert-fixture
 }
 
 ci_docker_ready_stats_json() {
