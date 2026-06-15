@@ -272,14 +272,15 @@ async fn seed_local_server(
         .or_else(|_| std::env::var("LOCAL_SERVER_PUBLIC_IP"))
         .unwrap_or_else(|_| "127.0.0.1".into());
     sqlx::query(
-        "INSERT INTO servers (id,user_id,name,public_ip,kind,agent_token_hash,job_signing_secret_ciphertext,status)
-         VALUES ($1,NULL,'This machine',$2,'local',$3,$4,'offline')
+        "INSERT INTO servers (id,user_id,name,public_ip,kind,agent_token_hash,job_signing_secret_ciphertext,status,capabilities,draining,max_concurrent_apps,max_concurrent_builds)
+         VALUES ($1,NULL,'This machine',$2,'local',$3,$4,'offline',ARRAY['builder','app_runner']::TEXT[],false,8,1)
          ON CONFLICT (id) DO UPDATE SET
            agent_token_hash=EXCLUDED.agent_token_hash,
            job_signing_secret_ciphertext=EXCLUDED.job_signing_secret_ciphertext,
            kind='local',
            name='This machine',
-           public_ip=EXCLUDED.public_ip",
+           public_ip=EXCLUDED.public_ip,
+           capabilities=EXCLUDED.capabilities",
     )
     .bind(local_server_id)
     .bind(public_ip)

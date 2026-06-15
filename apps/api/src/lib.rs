@@ -10,6 +10,7 @@ pub mod github;
 pub mod policies;
 pub mod rate_limit;
 pub mod screenshots;
+pub mod server_capacity;
 pub mod state;
 pub mod web;
 

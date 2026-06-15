@@ -8,7 +8,7 @@ pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> 
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let rows = sqlx::query(
-        "SELECT id,name,public_ip,kind,status,last_seen_at,created_at \
+        "SELECT id,name,public_ip,kind,status,last_seen_at,created_at,capabilities,draining,max_concurrent_apps,max_concurrent_builds \
          FROM servers WHERE kind='local' ORDER BY created_at ASC",
     )
     .fetch_all(&state.db)
@@ -24,6 +24,10 @@ pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> 
                         "kind": r.get::<String, _>("kind"),
                         "status": r.get::<String, _>("status"),
                         "lastSeenAt": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_seen_at"),
+                        "capabilities": r.get::<Vec<String>, _>("capabilities"),
+                        "draining": r.get::<bool, _>("draining"),
+                        "maxConcurrentApps": r.get::<i32, _>("max_concurrent_apps"),
+                        "maxConcurrentBuilds": r.get::<i32, _>("max_concurrent_builds"),
                     })
                 })
                 .collect::<Vec<_>>(),

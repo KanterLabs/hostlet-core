@@ -76,16 +76,12 @@ pub async fn create_app(
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    let server_id = match body.server_id {
-        Some(id) => id,
-        None => state.local_server_id,
-    };
-    let server = sqlx::query("SELECT id FROM servers WHERE id=$1 AND kind='local'")
-        .bind(server_id)
-        .fetch_optional(&state.db)
-        .await;
-    let Ok(Some(_)) = server else {
-        return (StatusCode::BAD_REQUEST, "server is not available").into_response();
+    let server_id = match crate::server_capacity::select_app_runner(&state, body.server_id).await {
+        Ok(server_id) => server_id,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to select app runner for app create");
+            return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+        }
     };
     let domain = if body.domain.trim().is_empty() {
         match &state.base_domain {
