@@ -154,6 +154,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
               <LogViewer
                 lines={logs}
                 emptyText="Waiting for deployment logs..."
+                highlightFirstError={status === "failed"}
                 toolbar={
                   finished
                     ? <span>stream ended</span>

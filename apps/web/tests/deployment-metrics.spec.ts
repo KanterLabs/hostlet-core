@@ -74,7 +74,20 @@ test("deployment log first error ignores railpack command flags", async ({ page 
   await page.goto("/deployments/deploy-1");
 
   await expect(page.getByText("First error in the log")).toBeVisible();
-  await expect(page.getByText("stderr: error: no start command could be inferred")).toBeVisible();
+  await expect(page.locator(".border-red-300").getByText("stderr: error: no start command could be inferred")).toBeVisible();
+});
+
+test("successful deployment does not promote transient health check retries", async ({ page }) => {
+  await mockDeploymentApi(page, validRuntimeMetadata, { status: "success" }, [
+    { stream: "stdout", line: "Waiting for health check: http://127.0.0.1:37438/" },
+    { stream: "stdout", line: "Health check attempt 1/30 did not connect: error sending request for url (http://127.0.0.1:37438/)" },
+    { stream: "stdout", line: "Health check passed." },
+  ]);
+  await page.goto("/deployments/deploy-1");
+
+  await expect(page.getByText("First error in the log")).toHaveCount(0);
+  await expect(page.getByText("stdout: Health check attempt 1/30 did not connect: error sending request for url (http://127.0.0.1:37438/)")).toBeVisible();
+  await expect(page.getByText("stdout: Health check passed.")).toBeVisible();
 });
 
 test("firstErrorLine skips command echoes with error-like flags", () => {
