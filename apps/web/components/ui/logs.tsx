@@ -5,9 +5,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, XCircle } from "lucide-react";
 
 const ERROR_PATTERN = /\b(error|fatal|exception|failed|cannot|not found|denied|panic|traceback)\b/i;
+const COMMAND_ECHO_PATTERN = /^(?:[a-z]+:\s*)?\$\s+/i;
 
 export function firstErrorLine(lines: readonly string[]) {
-  return lines.find((line) => ERROR_PATTERN.test(line)) || "";
+  return lines.find((line) => !COMMAND_ECHO_PATTERN.test(line) && ERROR_PATTERN.test(line)) || "";
 }
 
 export function LogViewer({

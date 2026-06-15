@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { firstErrorLine } from "@/components/ui";
 
 const validRuntimeMetadata = {
   packagingStrategy: "generated",
@@ -65,10 +66,29 @@ test("deployment detail shows queue position while waiting", async ({ page }) =>
   await expect(page.getByText("3 deploys ahead of you")).toBeVisible();
 });
 
+test("deployment log first error ignores railpack command flags", async ({ page }) => {
+  await mockDeploymentApi(page, validRuntimeMetadata, { status: "failed", failure: "Generated image build failed." }, [
+    { stream: "stdout", line: "$ railpack build --name hostlet/app-demo:image --progress plain --error-missing-start /var/lib/hostlet/repos/app-demo" },
+    { stream: "stderr", line: "error: no start command could be inferred" },
+  ]);
+  await page.goto("/deployments/deploy-1");
+
+  await expect(page.getByText("First error in the log")).toBeVisible();
+  await expect(page.getByText("stderr: error: no start command could be inferred")).toBeVisible();
+});
+
+test("firstErrorLine skips command echoes with error-like flags", () => {
+  expect(firstErrorLine([
+    "stdout: $ railpack build --name hostlet/app-demo:image --progress plain --error-missing-start /var/lib/hostlet/repos/app-demo",
+    "stderr: error: no start command could be inferred",
+  ])).toBe("stderr: error: no start command could be inferred");
+});
+
 async function mockDeploymentApi(
   page: Page,
   runtimeMetadata: Record<string, unknown> = validRuntimeMetadata,
   deployment: Record<string, unknown> = {},
+  logs: Array<{ stream: string; line: string }> = [{ stream: "stdout", line: "Health check passed." }],
 ) {
   await page.route("**/*", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -98,7 +118,7 @@ async function mockDeploymentApi(
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([{ stream: "stdout", line: "Health check passed." }]),
+        body: JSON.stringify(logs),
       });
     }
     if (path.startsWith("/api") || path.startsWith("/auth")) {
