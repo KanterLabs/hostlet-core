@@ -18,6 +18,7 @@
 use crate::{deploy, state::AppState};
 use anyhow::Context;
 use serde::Serialize;
+use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -118,7 +119,7 @@ const LIVE_DOCKER_DEPLOYMENT_STATUSES: &[&str] = &["success", "rolled_back"];
 /// `success_rn` ranks non-current success rows per app by `finished_at DESC`.
 /// It protects rollback targets even when a `rolled_back` row occupies rn=2 and
 /// pushes the most-recent success to rn=3.  See `deploy.rs::create_and_send_rollback`.
-const CANDIDATES_CTE_BODY: &str = r#"SELECT d.id, d.container_name, d.image_tag, d.status,
+const CANDIDATES_CTE_BODY: &str = r#"SELECT d.id, d.container_name, d.image_tag, d.runtime_metadata, d.status,
      CASE WHEN d.status = ANY($1) THEN
        row_number() OVER (
          PARTITION BY d.app_id, (d.status = ANY($1))
@@ -240,6 +241,48 @@ struct DockerKeepLists {
     keep_images: Vec<String>,
 }
 
+fn deployment_image_refs(image_tag: Option<&str>, runtime_metadata: Option<&Value>) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(image_tag) = image_tag.and_then(clean_image_ref) {
+        refs.push(image_tag.to_string());
+    }
+    if let Some(metadata) = runtime_metadata {
+        push_metadata_image_ref(&mut refs, metadata, "imageRef");
+        push_metadata_image_ref(&mut refs, metadata, "image_ref");
+        push_metadata_image_ref(&mut refs, metadata, "imageDigest");
+        push_metadata_image_ref(&mut refs, metadata, "image_digest");
+        if let Some(artifact) = metadata.get("buildArtifact") {
+            push_metadata_image_ref(&mut refs, artifact, "imageRef");
+            push_metadata_image_ref(&mut refs, artifact, "imageDigest");
+        }
+        if let Some(artifact) = metadata.get("build_artifact") {
+            push_metadata_image_ref(&mut refs, artifact, "image_ref");
+            push_metadata_image_ref(&mut refs, artifact, "image_digest");
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn push_metadata_image_ref(refs: &mut Vec<String>, metadata: &Value, key: &str) {
+    if let Some(image_ref) = metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(clean_image_ref)
+    {
+        refs.push(image_ref.to_string());
+    }
+}
+
+fn clean_image_ref(value: &str) -> Option<&str> {
+    let image_ref = value.trim();
+    if image_ref.is_empty() || image_ref.len() > 512 || image_ref.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(image_ref)
+}
+
 /// Query the keep lists for Docker cleanup: the containers and images that
 /// must NOT be removed by the `docker_cleanup` agent job.
 async fn docker_keep_lists(
@@ -251,7 +294,7 @@ async fn docker_keep_lists(
     let protected_statuses = docker_cleanup_keep_statuses();
     let keep_rows = sqlx::query(&format!(
         r#"WITH candidates AS ({CANDIDATES_CTE_BODY})
-        SELECT container_name, image_tag
+        SELECT container_name, image_tag, runtime_metadata
         FROM candidates
         WHERE {KEEP_PREDICATE}"#
     ))
@@ -269,7 +312,12 @@ async fn docker_keep_lists(
     keep_containers.dedup();
     let mut keep_images = keep_rows
         .iter()
-        .filter_map(|row| row.get::<Option<String>, _>("image_tag"))
+        .flat_map(|row| {
+            deployment_image_refs(
+                row.get::<Option<String>, _>("image_tag").as_deref(),
+                row.get::<Option<Value>, _>("runtime_metadata").as_ref(),
+            )
+        })
         .collect::<Vec<_>>();
     keep_images.sort();
     keep_images.dedup();
@@ -730,6 +778,32 @@ mod tests {
         .unwrap()
     }
 
+    async fn insert_cleanup_deployment_with_meta(
+        state: &AppState,
+        app_id: Uuid,
+        status: &str,
+        image_tag: &str,
+        container_name: &str,
+        metadata: serde_json::Value,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO deployments
+               (app_id,server_id,status,commit_sha,image_tag,container_name,\
+                runtime_metadata,started_at,finished_at,runtime_kind)
+             VALUES ($1,$2,$3,'HEAD',$4,$5,$6,now(),now(),'single')
+             RETURNING id",
+        )
+        .bind(app_id)
+        .bind(state.local_server_id)
+        .bind(status)
+        .bind(image_tag)
+        .bind(container_name)
+        .bind(metadata)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
     /// Same as `insert_cleanup_deployment` but with an explicit `finished_at`
     /// offset (in minutes ago) so tests can establish a strict ordering without
     /// relying on wall-clock timing.
@@ -816,6 +890,51 @@ mod tests {
         assert!(!plan
             .keep_images
             .contains(&"hostlet/app-failed:latest".into()));
+    }
+
+    #[tokio::test]
+    async fn db_cleanup_plan_keeps_runtime_metadata_image_refs() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_cleanup_db(&state).await;
+        let user_id = insert_cleanup_user(&state).await;
+        let app_id = insert_cleanup_app(&state, user_id).await;
+        let current_deployment = insert_cleanup_deployment_with_meta(
+            &state,
+            app_id,
+            "success",
+            "hostlet/app-current:latest",
+            "hostlet-app-current",
+            serde_json::json!({
+                "imageRef": "registry.example.test/images/app:sha",
+                "buildArtifact": {
+                    "imageDigest": "registry.example.test/images/app@sha256:abc123"
+                },
+                "image_ref": "  ",
+                "image_digest": "bad ref with whitespace"
+            }),
+        )
+        .await;
+        sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+            .bind(current_deployment)
+            .bind(app_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let plan = cleanup_plan(&state).await.unwrap();
+
+        assert!(plan
+            .keep_images
+            .contains(&"hostlet/app-current:latest".into()));
+        assert!(plan
+            .keep_images
+            .contains(&"registry.example.test/images/app:sha".into()));
+        assert!(plan
+            .keep_images
+            .contains(&"registry.example.test/images/app@sha256:abc123".into()));
+        assert!(!plan.keep_images.contains(&"bad ref with whitespace".into()));
     }
 
     /// Verifies the rollback-target fix.
