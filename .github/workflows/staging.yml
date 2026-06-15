@@ -75,7 +75,7 @@ jobs:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
           for app in api web agent screenshotter; do
-            docker build \
+            scripts/ci-docker-retry.sh docker build \
               --label org.opencontainers.image.revision="${GITHUB_SHA}" \
               --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
               --label org.opencontainers.image.version="staging" \
@@ -88,8 +88,8 @@ jobs:
               HOSTLET_SCREENSHOTTER_SKIP_BUILD=1 \
                 scripts/ci-screenshotter-smoke.sh
             fi
-            docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"
-            docker push "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}"
+            scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"
+            scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}"
           done
 
   notify-cloud:

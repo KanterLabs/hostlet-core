@@ -8,7 +8,7 @@ REDIRECT_CONTAINER="hostlet-screenshotter-redirect-$$"
 trap 'docker rm -f "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
 
 if [ "${HOSTLET_SCREENSHOTTER_SKIP_BUILD:-0}" != "1" ]; then
-  docker build -f "${ROOT}/apps/screenshotter/Dockerfile" -t "${IMAGE}" "${ROOT}"
+  "${ROOT}/scripts/ci-docker-retry.sh" docker build -f "${ROOT}/apps/screenshotter/Dockerfile" -t "${IMAGE}" "${ROOT}"
 fi
 
 docker run --rm \

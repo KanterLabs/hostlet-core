@@ -27,10 +27,15 @@ assert_contains "${SELF_HOSTED_LIB}" 'ci_tmp_dir()'
 assert_contains "${SELF_HOSTED_LIB}" 'local parent="${RUNNER_TEMP:-/tmp}"'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-screenshotter-smoke.sh'
+assert_contains "${CI_WORKFLOW}" 'scripts/ci-docker-retry.sh docker build'
 assert_contains "${STAGING_WORKFLOW}" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
 assert_contains "${STAGING_WORKFLOW}" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
+assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-docker-retry.sh docker build'
+assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-core-workflow-contracts.sh'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
+assert_contains "${ROOT}/.github/workflows/release.yml" 'scripts/ci-docker-retry.sh docker build'
+assert_contains "${ROOT}/.github/workflows/release.yml" 'scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
 assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3'
@@ -112,12 +117,12 @@ staging = Path(sys.argv[1]).read_text()
 release = Path(sys.argv[2]).read_text()
 
 staging_smoke = staging.index("scripts/ci-screenshotter-smoke.sh")
-staging_push = staging.index('docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"')
+staging_push = staging.index('scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"')
 if staging_smoke > staging_push:
     raise SystemExit("staging workflow must smoke-test screenshotter before pushing it")
 
 release_smoke = release.index("scripts/ci-screenshotter-smoke.sh")
-release_push = release.index('docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"')
+release_push = release.index('scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"')
 if release_smoke > release_push:
     raise SystemExit("release workflow must smoke-test screenshotter before pushing it")
 PY

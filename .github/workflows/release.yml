@@ -51,7 +51,7 @@ jobs:
         env:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
-          docker build \
+          scripts/ci-docker-retry.sh docker build \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -59,7 +59,7 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-api:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-api:${SHA_TAG}" \
             .
-          docker build \
+          scripts/ci-docker-retry.sh docker build \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -67,7 +67,7 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-web:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-web:${SHA_TAG}" \
             .
-          docker build \
+          scripts/ci-docker-retry.sh docker build \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -75,7 +75,7 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-agent:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-agent:${SHA_TAG}" \
             .
-          docker build \
+          scripts/ci-docker-retry.sh docker build \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -87,8 +87,8 @@ jobs:
           HOSTLET_SCREENSHOTTER_SKIP_BUILD=1 \
             scripts/ci-screenshotter-smoke.sh
           for image in hostlet-api hostlet-web hostlet-agent hostlet-screenshotter; do
-            docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"
-            docker push "${IMAGE_REGISTRY}/${image}:${SHA_TAG}"
+            scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"
+            scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/${image}:${SHA_TAG}"
           done
       - name: Capture release image digests
         if: startsWith(github.ref, 'refs/tags/v')
