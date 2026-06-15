@@ -12,6 +12,7 @@ use axum::{
 };
 use deploy_app::{DeployApp, DEPLOY_APP_COLUMNS};
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -24,6 +25,26 @@ pub(crate) const ACTIVE_DEPLOYMENT_STATUSES: &[&str] = &[
     "health_checking",
     "routing",
 ];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeploymentQueue {
+    pub status: String,
+    pub position: Option<i64>,
+    pub deploys_ahead: i64,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl DeploymentQueue {
+    fn not_applicable(updated_at: Option<chrono::DateTime<chrono::Utc>>) -> Self {
+        Self {
+            status: "not_applicable".to_string(),
+            position: None,
+            deploys_ahead: 0,
+            updated_at,
+        }
+    }
+}
 
 pub async fn manual_deploy(
     State(state): State<AppState>,
@@ -60,15 +81,108 @@ pub async fn get_deployment(
     .fetch_optional(&state.db)
     .await;
     match row {
-        Ok(Some(r)) => Json(json!({
-            "id": r.get::<Uuid,_>("id"),
-            "appId": r.get::<Uuid,_>("app_id"),
-            "status": r.get::<String,_>("status"),
-            "commitSha": r.get::<String,_>("commit_sha"),
-            "failure": r.get::<Option<String>,_>("failure_summary"),
-            "runtimeMetadata": r.try_get::<serde_json::Value,_>("runtime_metadata").unwrap_or_else(|_| json!({}))
-        })).into_response(),
+        Ok(Some(r)) => {
+            let status = r.get::<String, _>("status");
+            let queue =
+                deployment_queue_status(&state, id, r.get::<Uuid, _>("server_id"), &status).await;
+            Json(json!({
+                "id": r.get::<Uuid,_>("id"),
+                "appId": r.get::<Uuid,_>("app_id"),
+                "status": status,
+                "commitSha": r.get::<String,_>("commit_sha"),
+                "failure": r.get::<Option<String>,_>("failure_summary"),
+                "runtimeMetadata": r.try_get::<serde_json::Value,_>("runtime_metadata").unwrap_or_else(|_| json!({})),
+                "queue": queue
+            })).into_response()
+        }
         _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+pub(crate) async fn deployment_queue_status(
+    state: &AppState,
+    deployment_id: Uuid,
+    server_id: Uuid,
+    deployment_status: &str,
+) -> DeploymentQueue {
+    let job = match sqlx::query(
+        "SELECT id, status, priority, created_at, updated_at
+         FROM agent_jobs
+         WHERE deployment_id=$1 AND job_type IN ('deploy','rollback')
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(deployment_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(job) => job,
+        Err(err) => {
+            tracing::warn!(error = %err, deployment_id = %deployment_id, "failed to load deployment queue job");
+            return DeploymentQueue::not_applicable(None);
+        }
+    };
+
+    let Some(job) = job else {
+        return DeploymentQueue {
+            status: if ACTIVE_DEPLOYMENT_STATUSES.contains(&deployment_status) {
+                "building"
+            } else {
+                "not_applicable"
+            }
+            .to_string(),
+            position: None,
+            deploys_ahead: 0,
+            updated_at: None,
+        };
+    };
+
+    let job_status = job.get::<String, _>("status");
+    let updated_at = job.get::<chrono::DateTime<chrono::Utc>, _>("updated_at");
+    if job_status == "queued" {
+        let priority = job.get::<i32, _>("priority");
+        let created_at = job.get::<chrono::DateTime<chrono::Utc>, _>("created_at");
+        let deploys_ahead = match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::bigint
+             FROM agent_jobs
+             WHERE server_id=$1
+               AND status='queued'
+               AND COALESCE(payload_json, '{}'::jsonb) <> '{}'::jsonb
+               AND job_type IN ('deploy','rollback')
+               AND (priority < $2 OR (priority = $2 AND created_at < $3))",
+        )
+        .bind(server_id)
+        .bind(priority)
+        .bind(created_at)
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(count) => count,
+            Err(err) => {
+                tracing::warn!(error = %err, deployment_id = %deployment_id, "failed to count deployment queue position");
+                return DeploymentQueue::not_applicable(Some(updated_at));
+            }
+        };
+        return DeploymentQueue {
+            status: "queued".to_string(),
+            position: Some(deploys_ahead + 1),
+            deploys_ahead,
+            updated_at: Some(updated_at),
+        };
+    }
+
+    DeploymentQueue {
+        status: if ACTIVE_DEPLOYMENT_STATUSES.contains(&deployment_status)
+            || matches!(job_status.as_str(), "claimed" | "running")
+        {
+            "building"
+        } else {
+            "not_applicable"
+        }
+        .to_string(),
+        position: None,
+        deploys_ahead: 0,
+        updated_at: Some(updated_at),
     }
 }
 
@@ -577,8 +691,14 @@ fn rollback_supported_for_runtime(runtime_kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_active_deployment_status, rollback_supported_for_runtime, route_key};
+    use super::{
+        deployment_queue_status, is_active_deployment_status, rollback_supported_for_runtime,
+        route_key,
+    };
+    use crate::state::AppState;
     use uuid::Uuid;
+
+    const TEST_SERVER_ID: Uuid = Uuid::from_u128(1);
 
     #[test]
     fn route_key_is_app_prefixed_id() {
@@ -610,5 +730,136 @@ mod tests {
     fn compose_rollback_is_disabled_for_release() {
         assert!(rollback_supported_for_runtime("single"));
         assert!(!rollback_supported_for_runtime("compose"));
+    }
+
+    #[tokio::test]
+    async fn db_deployment_queue_reports_deploys_ahead() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_deploy_db(&state).await;
+        let user_id = insert_user(&state).await;
+        let first_app_id = insert_app(&state, user_id, "queue-first").await;
+        let target_app_id = insert_app(&state, user_id, "queue-target").await;
+        let first_deployment_id = insert_deployment(&state, first_app_id, "running").await;
+        let target_deployment_id = insert_deployment(&state, target_app_id, "running").await;
+        insert_deploy_job(
+            &state,
+            first_app_id,
+            first_deployment_id,
+            "queued",
+            "2 minutes",
+        )
+        .await;
+        insert_deploy_job(
+            &state,
+            target_app_id,
+            target_deployment_id,
+            "queued",
+            "1 minute",
+        )
+        .await;
+
+        let queue =
+            deployment_queue_status(&state, target_deployment_id, TEST_SERVER_ID, "running").await;
+
+        assert_eq!(queue.status, "queued");
+        assert_eq!(queue.deploys_ahead, 1);
+        assert_eq!(queue.position, Some(2));
+        assert!(queue.updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn db_deployment_queue_without_job_falls_back_to_status() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_deploy_db(&state).await;
+        let user_id = insert_user(&state).await;
+        let app_id = insert_app(&state, user_id, "queue-no-job").await;
+        let deployment_id = insert_deployment(&state, app_id, "building").await;
+
+        let queue =
+            deployment_queue_status(&state, deployment_id, TEST_SERVER_ID, "building").await;
+
+        assert_eq!(queue.status, "building");
+        assert_eq!(queue.deploys_ahead, 0);
+        assert_eq!(queue.position, None);
+        assert_eq!(queue.updated_at, None);
+    }
+
+    async fn reset_deploy_db(state: &AppState) {
+        sqlx::query(
+            "TRUNCATE app_screenshots, app_resource_snapshots, agent_jobs, deployments, app_env_vars, apps CASCADE",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM users")
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_user(state: &AppState) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (github_id, login) VALUES (9601,'deploy-queue-user') RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_app(state: &AppState, user_id: Uuid, name: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO apps
+               (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain,runtime_kind,root_directory,public_exposure,auto_deploy)
+             VALUES ($1,$2,$3,'hostlet-ci/node-hello','main',3000,'/health',$4,'single','.',true,false)
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(TEST_SERVER_ID)
+        .bind(name)
+        .bind(format!("{name}.example.test"))
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_deployment(state: &AppState, app_id: Uuid, status: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,runtime_kind)
+             VALUES ($1,$2,$3,'HEAD',now(),'single')
+             RETURNING id",
+        )
+        .bind(app_id)
+        .bind(TEST_SERVER_ID)
+        .bind(status)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_deploy_job(
+        state: &AppState,
+        app_id: Uuid,
+        deployment_id: Uuid,
+        status: &str,
+        age: &str,
+    ) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO agent_jobs
+               (server_id,app_id,deployment_id,job_type,status,payload_json,created_at,updated_at)
+             VALUES ($1,$2,$3,'deploy',$4,'{\"type\":\"deploy\"}'::jsonb,now() - $5::interval,now() - $5::interval)
+             RETURNING id",
+        )
+        .bind(TEST_SERVER_ID)
+        .bind(app_id)
+        .bind(deployment_id)
+        .bind(status)
+        .bind(age)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
     }
 }

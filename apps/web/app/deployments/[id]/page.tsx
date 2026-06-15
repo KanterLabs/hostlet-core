@@ -42,7 +42,23 @@ type Deployment = {
   commitSha?: string | null;
   failure?: string | null;
   runtimeMetadata?: RuntimeMetadata | null;
+  queue?: DeploymentQueue | null;
 };
+
+type DeploymentQueue = {
+  status: "queued" | "building" | "not_applicable";
+  position?: number | null;
+  deploysAhead?: number | null;
+  updatedAt?: string | null;
+};
+
+function queueMessage(queue?: DeploymentQueue | null) {
+  if (!queue || queue.status === "not_applicable") return null;
+  if (queue.status === "building") return "Your app is building now";
+  const deploysAhead = Math.max(0, queue.deploysAhead ?? 0);
+  if (deploysAhead === 0) return "You're next in line";
+  return `${deploysAhead} ${deploysAhead === 1 ? "deploy" : "deploys"} ahead of you`;
+}
 
 export default function DeploymentDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -55,6 +71,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
   const isCompose = metadata?.runtime === "compose";
   const packaging = isCompose ? "Docker Compose" : metadata?.packagingStrategy || "auto";
   const framework = isCompose ? metadata?.webService ? `service ${metadata.webService}` : "Compose service" : metadata?.detectedFramework || "Repository Dockerfile";
+  const queueText = queueMessage(deployment?.queue);
 
   return (
     <AppShell>
@@ -89,6 +106,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                   })}
                 </div>
                 <p className="muted mt-4">{statusHelp(status)}</p>
+                {queueText && <Notice tone="neutral" className="mt-4" description={queueText} />}
               </Panel>
 
               {status === "success" && (

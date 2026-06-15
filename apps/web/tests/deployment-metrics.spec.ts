@@ -49,7 +49,21 @@ test("deployment detail tolerates malformed runtime metrics", async ({ page }) =
   await expect(page.getByText("NaN")).toHaveCount(0);
 });
 
-async function mockDeploymentApi(page: Page, runtimeMetadata: Record<string, unknown> = validRuntimeMetadata) {
+test("deployment detail shows queue position while waiting", async ({ page }) => {
+  await mockDeploymentApi(page, validRuntimeMetadata, {
+    status: "queued",
+    queue: { status: "queued", position: 4, deploysAhead: 3, updatedAt: "2026-06-15T18:00:00Z" },
+  });
+  await page.goto("/deployments/deploy-1");
+
+  await expect(page.getByText("3 deploys ahead of you")).toBeVisible();
+});
+
+async function mockDeploymentApi(
+  page: Page,
+  runtimeMetadata: Record<string, unknown> = validRuntimeMetadata,
+  deployment: Record<string, unknown> = {},
+) {
   await page.route("**/*", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session" || path === "/api/setup/status") {
@@ -70,6 +84,7 @@ async function mockDeploymentApi(page: Page, runtimeMetadata: Record<string, unk
           commitSha: "abc1234",
           failure: null,
           runtimeMetadata,
+          ...deployment,
         }),
       });
     }
