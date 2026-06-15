@@ -1,7 +1,7 @@
 const fs = require("fs");
 const dns = require("dns").promises;
 const net = require("net");
-const { chromium } = require("playwright");
+const { chromium } = require("playwright-core");
 
 const [targetUrl, outputPath] = process.argv.slice(2);
 if (!targetUrl || !outputPath) {
@@ -88,7 +88,11 @@ async function rejectBlockedRedirects(startUrl, allowedOrigin, lookupCache) {
 
 async function main() {
   fs.mkdirSync(require("path").dirname(outputPath), { recursive: true });
-  const browser = await chromium.launch({ headless: true });
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+  const browser = await chromium.launch({
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+  });
   try {
     const context = await browser.newContext({
       viewport: { width, height },

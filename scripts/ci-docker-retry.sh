@@ -18,8 +18,9 @@ for index in "${!delays[@]}"; do
   fi
   if "$@"; then
     exit 0
+  else
+    last_status="$?"
   fi
-  last_status="$?"
   echo "Docker command failed with exit ${last_status} (attempt ${attempt}/${#delays[@]})." >&2
 done
 
