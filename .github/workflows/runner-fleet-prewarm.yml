@@ -1,0 +1,25 @@
+name: Runner Fleet Prewarm
+run-name: Prewarm Core runner caches on ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Staggered 1h after hostlet-cloud's runner-fleet-drift prewarm (10:41).
+    - cron: "41 11 * * *"
+
+permissions:
+  contents: read
+
+env:
+  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3
+
+jobs:
+  prewarm:
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    steps:
+      - name: Checkout Core runner maintenance scripts
+        uses: actions/checkout@v4
+      - name: Verify job is on an approved Core homelab runner
+        run: scripts/ci-verify-runner.sh
+      - name: Prewarm Core runner pnpm, Playwright, and base-image caches
+        run: scripts/ci-core-runner-prewarm.sh

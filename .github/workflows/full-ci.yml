@@ -26,6 +26,8 @@ jobs:
           # Scheduled runs validate staging, not the default branch.
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - run: scripts/check-line-cap.sh
       - run: scripts/ci-self-hosted-api-smoke.sh
@@ -66,6 +68,8 @@ jobs:
       - run: scripts/ci-verify-runner.sh
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - run: scripts/ci-self-hosted-deploy-e2e.sh
 
@@ -93,6 +97,8 @@ jobs:
           # Scheduled runs validate staging, not the default branch.
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - run: docker compose -f infra/docker-compose.yml config >/dev/null
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null

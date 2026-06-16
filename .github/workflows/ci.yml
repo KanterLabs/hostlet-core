@@ -38,6 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
+      # Put the runner's pre-installed rustup on PATH so dtolnay/rust-toolchain
+      # reuses the cached toolchain instead of re-bootstrapping it via
+      # `curl sh.rustup.rs` (slow + flaky) on every job.
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check-line-cap.sh
