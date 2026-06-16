@@ -87,7 +87,6 @@ async function rejectBlockedRedirects(startUrl, allowedOrigin, lookupCache) {
 }
 
 async function main() {
-  fs.mkdirSync(require("path").dirname(outputPath), { recursive: true });
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   const browser = await chromium.launch({
     headless: true,
@@ -136,6 +135,11 @@ async function main() {
     }
     await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+    // Create the output directory only once navigation succeeds — placing this
+    // after the SSRF guard and page.goto means SSRF-blocked runs exit before
+    // touching the filesystem, which matters when running as a non-root user
+    // without write access to the output directory's parent.
+    fs.mkdirSync(require("path").dirname(outputPath), { recursive: true });
     await page.screenshot({
       path: outputPath,
       type: "jpeg",

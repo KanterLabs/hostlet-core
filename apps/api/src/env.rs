@@ -4,8 +4,14 @@
 /// **Why this file exists:** cloud's overlay replaces whole files. Any helper
 /// defined in `state.rs`, `lib.rs`, `main.rs`, etc. becomes an unmanaged fork
 /// the moment cloud needs to customise those files. Placing shared, stable
-/// helpers here keeps them outside the override boundary so cloud inherits
-/// changes automatically via the `vendor/hostlet-core` submodule.
+/// helpers here is *intended* to keep them outside the override boundary.
+///
+/// **Current limitation:** hostlet-cloud currently re-inlines its own copies of
+/// several helpers from this file rather than inheriting them through the
+/// submodule. Changes made here are therefore NOT automatically reflected in
+/// cloud until the corresponding cloud-side duplicates are removed and the
+/// imports are redirected to core. The real fix is cloud-side; this file itself
+/// is correct and should remain the canonical source.
 ///
 /// Placement rule (mandatory): shared helpers must live here (or in another
 /// file not listed in the cloud override set). See `AGENTS.md` for the full

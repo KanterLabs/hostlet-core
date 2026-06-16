@@ -11,6 +11,10 @@ if [ "${HOSTLET_SCREENSHOTTER_SKIP_BUILD:-0}" != "1" ]; then
   "${ROOT}/scripts/ci-docker-retry.sh" docker build -f "${ROOT}/apps/screenshotter/Dockerfile" -t "${IMAGE}" "${ROOT}"
 fi
 
+# The screenshotter now runs as non-root (pwuser). Make the bind-mounted output
+# directory world-accessible so the container user can create files inside it.
+chmod a+rwx "${TMP_DIR}"
+
 docker run --rm \
   -v "${TMP_DIR}:/out" \
   "${IMAGE}" \

@@ -396,14 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn version_comparison_handles_patch_versions() {
-        assert!(version_is_newer("0.2.0", "0.2.1"));
-        assert!(version_is_newer("0.1.9", "0.2.0"));
-        assert!(!version_is_newer("0.2.0", "0.2.0"));
-        assert!(!version_is_newer("0.2.1", "0.2.0"));
-    }
-
-    #[test]
     fn release_manifest_parses_image_metadata() {
         let manifest = serde_json::json!({
             "version": "v0.4.1",

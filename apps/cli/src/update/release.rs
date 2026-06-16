@@ -3,6 +3,7 @@
 //! used to validate update assets.
 
 use super::*;
+pub(crate) use hostlet_contracts::version_is_newer;
 
 pub(crate) struct ReleaseInfo {
     pub(crate) version: String,
@@ -247,22 +248,6 @@ pub(crate) fn print_update_check(release: &ReleaseInfo) {
             "not available"
         }
     );
-}
-
-pub(crate) fn version_is_newer(current: &str, latest: &str) -> bool {
-    version_parts(latest) > version_parts(current)
-}
-
-pub(crate) fn version_parts(value: &str) -> (u64, u64, u64) {
-    let mut parts = value
-        .trim_start_matches('v')
-        .split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0));
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    )
 }
 
 pub(crate) async fn download(

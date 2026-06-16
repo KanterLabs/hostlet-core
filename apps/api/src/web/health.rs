@@ -100,14 +100,14 @@ fn fresh_sample_time(
     let sampled_at = row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("sampled_at");
     let Some(sampled_at) = sampled_at else {
         return Err((
-            StatusCode::ACCEPTED,
+            StatusCode::SERVICE_UNAVAILABLE,
             "resource usage is waiting for the local agent",
         )
             .into_response());
     };
     if chrono::Utc::now().signed_duration_since(sampled_at) > chrono::Duration::seconds(45) {
         return Err((
-            StatusCode::ACCEPTED,
+            StatusCode::SERVICE_UNAVAILABLE,
             "resource usage is waiting for a fresh local agent sample",
         )
             .into_response());
