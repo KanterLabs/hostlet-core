@@ -33,7 +33,7 @@ pub(in crate::agent) use messages::handle_agent_message;
 pub(in crate::agent) use socket::handle_socket;
 pub(in crate::agent) use validation::{
     connection_is_current, header_uuid, truncate_log_line, valid_agent_job_status,
-    valid_container_name, valid_deployment_status, valid_health_status,
+    valid_container_name, valid_deployment_status, valid_health_status, valid_reconcile_reason,
 };
 
 #[cfg(test)]

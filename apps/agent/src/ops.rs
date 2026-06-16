@@ -2,6 +2,7 @@ use super::*;
 
 mod capture_url;
 mod health;
+mod reconcile;
 mod resource_stats;
 #[cfg(test)]
 mod screenshot_tests;
@@ -12,8 +13,10 @@ use capture_url::validate_capture_url;
 pub(crate) use health::CONTAINER_STATE_INSPECT_FORMAT;
 use health::{
     failed_health_probe, health_status_event, health_target_from_payload, health_targets,
-    probe_health_target, single_probe_health_event, ContainerState, HealthProbeResult,
-    HealthTarget,
+    probe_health_target, single_probe_health_event, HealthProbeResult, HealthTarget,
+};
+use reconcile::{
+    container_actual_from_state, decide_reconcile, ContainerActual, ReconcileDecision,
 };
 pub(crate) use resource_stats::publish_resource_stats;
 
@@ -212,11 +215,21 @@ pub(crate) fn event_retry_delays() -> [Duration; 4] {
     ]
 }
 
+/// Maximum number of reconcile_request events the agent will emit per failure
+/// streak before giving up and waiting for the streak to reset.
+const MAX_REPAIR_ATTEMPTS: u32 = 3;
+
 #[derive(Default)]
 pub(crate) struct HealthCounts {
     failures: u32,
     successes: u32,
     auto_start_attempted: bool,
+    /// Set when a `reconcile_request` has been posted for the current failure
+    /// streak. Reset to `false` when the app reports healthy again.
+    repair_requested: bool,
+    /// Total reconcile_request events posted in the current failure streak.
+    /// Capped at `MAX_REPAIR_ATTEMPTS` to prevent a hot repair loop.
+    repair_attempts: u32,
 }
 
 pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uuid, HealthCounts>) {
@@ -227,8 +240,53 @@ pub(crate) async fn publish_runtime_health(cfg: &Config, counts: &mut HashMap<Uu
         let mut result = probe_health_target(cfg, &mut target).await;
         let entry = counts.entry(target.app_id).or_default();
         record_health_probe(entry, &result);
-        if should_auto_start_container(entry, &result) {
-            result = auto_start_container(cfg, &mut target, entry).await;
+        // Only act on unhealthy containers once the 3-failure threshold is met.
+        if entry.failures >= 3 {
+            match container_actual_from_state(result.container_state.as_ref()) {
+                Some(ContainerActual::Stopped) => {
+                    // Existing path: inline docker start for stopped containers.
+                    if !entry.auto_start_attempted {
+                        result = auto_start_container(cfg, &mut target, entry).await;
+                    }
+                }
+                // New path: request a redeploy for completely-removed containers.
+                Some(ContainerActual::Missing)
+                    if !entry.repair_requested && entry.repair_attempts < MAX_REPAIR_ATTEMPTS =>
+                {
+                    let image_tag = format!(
+                        "hostlet/{}:{}",
+                        app_slug(&format!("app-{}", target.app_id)),
+                        target.deployment_id
+                    );
+                    let image_present =
+                        docker_image_present(&image_tag, target.deployment_id).await;
+                    // In-flight is keyed on `repair_requested` only — NOT on
+                    // `auto_start_attempted`. A container that was stopped (and
+                    // auto-started) earlier in the same failure streak and then
+                    // removed must still be rebuilt; the stopped-path flag must
+                    // not suppress the missing-path repair.
+                    let decision = decide_reconcile(
+                        ContainerActual::Missing,
+                        image_present,
+                        entry.repair_requested,
+                    );
+                    if matches!(
+                        decision,
+                        ReconcileDecision::Rebuild | ReconcileDecision::RebuildImageGone
+                    ) {
+                        request_app_rebuild(
+                            cfg,
+                            target.app_id,
+                            target.deployment_id,
+                            image_present,
+                        )
+                        .await;
+                        entry.repair_requested = true;
+                        entry.repair_attempts += 1;
+                    }
+                }
+                _ => {}
+            }
         }
         let status = if result.healthy {
             "healthy"
@@ -250,15 +308,11 @@ fn record_health_probe(entry: &mut HealthCounts, result: &HealthProbeResult) {
         entry.successes = entry.successes.saturating_add(1);
         entry.failures = 0;
         entry.auto_start_attempted = false;
+        entry.repair_requested = false;
+        entry.repair_attempts = 0;
     } else {
         entry.failures = entry.failures.saturating_add(1);
     }
-}
-
-fn should_auto_start_container(entry: &HealthCounts, result: &HealthProbeResult) -> bool {
-    entry.failures >= 3
-        && !entry.auto_start_attempted
-        && matches!(result.container_state, Some(ContainerState::Stopped(_)))
 }
 
 async fn auto_start_container(
@@ -307,6 +361,54 @@ async fn auto_start_container(
             result
         }
     }
+}
+
+/// Check whether a Docker image tag is present on the local daemon.
+/// On any error (timeout, docker not available, inspect error) treats the image
+/// as absent so we still request a redeploy — never let an inspect failure
+/// suppress the repair.
+async fn docker_image_present(image_tag: &str, deployment_id: Uuid) -> bool {
+    match command_output(
+        "docker",
+        &["image", "inspect", "--format", "{{.Id}}", image_tag],
+        Duration::from_secs(5),
+    )
+    .await
+    {
+        Ok(output) if output.status.success() => true,
+        Ok(_) => false,
+        Err(err) => {
+            tracing::debug!(
+                %deployment_id,
+                error = %err,
+                image = image_tag,
+                "docker image inspect failed; treating image as absent for reconcile decision"
+            );
+            false
+        }
+    }
+}
+
+/// Post a `reconcile_request` agent event asking the API to enqueue a fresh
+/// deploy job for the app whose container has been removed.
+async fn request_app_rebuild(cfg: &Config, app_id: Uuid, deployment_id: Uuid, image_present: bool) {
+    tracing::warn!(
+        %app_id,
+        %deployment_id,
+        image_present,
+        "Container for current deployment is missing; requesting redeploy from source."
+    );
+    post(
+        cfg,
+        json!({
+            "type": "reconcile_request",
+            "app_id": app_id,
+            "deployment_id": deployment_id,
+            "reason": "rebuild",
+            "image_present": image_present,
+        }),
+    )
+    .await;
 }
 
 pub(crate) async fn health_check_job(cfg: &Config, payload: &Value) {
