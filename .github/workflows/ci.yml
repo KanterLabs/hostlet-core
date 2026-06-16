@@ -47,6 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check-line-cap.sh
       - run: scripts/check-line-cap-selftest.sh
+      - run: scripts/check-migration-versions.sh
       - run: scripts/ci-core-workflow-contracts.sh
       - run: scripts/ci-verify-runner-selftest.sh
       - run: cargo fmt --all -- --check
