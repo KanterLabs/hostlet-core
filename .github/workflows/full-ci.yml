@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
   schedule:
     # Nightly runs validate staging (the development branch); see the checkout ref.
+    # The heavy suites below no longer run on every staging push — this nightly
+    # plus the release gate is their guaranteed cadence.
     - cron: "17 8 * * *"
   push:
     branches:
       - main
-      - staging
 
 permissions:
   contents: read
@@ -18,20 +19,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  full-self-hosted-api:
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Scheduled runs validate staging, not the default branch.
-          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
-      - run: scripts/ci-verify-runner.sh
-      - name: Use runner's cached rustup
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/check-line-cap.sh
-      - run: scripts/ci-self-hosted-api-smoke.sh
-
   full-web-visual:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     defaults:

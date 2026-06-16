@@ -4,7 +4,10 @@ on:
   push:
     branches:
       - main
-      - staging
+  schedule:
+    # Nightly safety net for these heavy suites against staging — they no longer
+    # run on every staging push. Pairs with the release gate (see release.yml).
+    - cron: "30 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,6 +22,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Scheduled runs validate staging, not the default branch.
+          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
       - run: scripts/ci-railpack-generated-fixtures.sh
@@ -36,6 +42,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Scheduled runs validate staging, not the default branch.
+          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
       - name: Use runner's cached rustup
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
