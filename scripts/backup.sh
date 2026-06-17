@@ -69,7 +69,7 @@ trap 'exit 143' TERM
 mkdir -p "$BACKUP_DIR"
 
 compose_cmd exec -T postgres \
-  pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > "$BACKUP_DIR/postgres.sql"
+  pg_dump --single-transaction -U "$POSTGRES_USER" "$POSTGRES_DB" > "$BACKUP_DIR/postgres.sql"
 
 cat > "$BACKUP_DIR/ENVIRONMENT_REQUIRED.txt" <<'TXT'
 Restore requires the same secret values used by the original deployment:
@@ -122,3 +122,21 @@ MANIFEST_VALUES=("$STAMP" "$BACKUP_DIR" "$COMPOSE_FILE" "$POSTGRES_DB" "$POSTGRE
 
 BACKUP_COMPLETE=true
 echo "Backup written to $BACKUP_DIR"
+
+# ---------------------------------------------------------------------------
+# Off-host upload (optional).
+# Set HOSTLET_BACKUP_BUCKET to a gs:// bucket path to enable off-host
+# durability via gsutil rsync.  When unset this step is a no-op.
+# Example: HOSTLET_BACKUP_BUCKET=gs://my-bucket/hostlet-backups
+# ---------------------------------------------------------------------------
+if [[ -n "${HOSTLET_BACKUP_BUCKET:-}" ]]; then
+  if ! command -v gsutil >/dev/null 2>&1; then
+    echo "ERROR: HOSTLET_BACKUP_BUCKET is set but gsutil is not installed/on PATH. Local backup is complete; off-host upload failed." >&2
+    exit 1
+  fi
+  echo "Uploading backup to $HOSTLET_BACKUP_BUCKET ..."
+  gsutil -m rsync -r "$BACKUP_DIR" "$HOSTLET_BACKUP_BUCKET/hostlet-$STAMP"
+  echo "Off-host upload complete: $HOSTLET_BACKUP_BUCKET/hostlet-$STAMP"
+else
+  echo "HOSTLET_BACKUP_BUCKET not set — skipping off-host upload."
+fi
