@@ -8,3 +8,14 @@ export { DataList, DataRow, KeyValueGrid, KeyValueItem, Metric, MetricsGrid, Ske
 export { Field, FilterTabs, SelectField, ToggleCard } from "@/components/ui/forms";
 export { SecretField } from "@/components/ui/secret-field";
 export { ToastProvider, useToast } from "@/components/ui/toast";
+
+// shadcn-style primitives (token-driven, brand-matched). New surfaces should
+// build on these; existing primitives above are migrating onto them.
+export { Button, buttonVariants, type ButtonProps } from "@/components/ui/button";
+export { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
+export { Badge, badgeVariants, type BadgeProps } from "@/components/ui/badge";
+export { Alert, AlertTitle, AlertDescription, alertVariants, type AlertProps } from "@/components/ui/alert";
+export { Input } from "@/components/ui/input";
+export { Textarea } from "@/components/ui/textarea";
+export { Label } from "@/components/ui/label";
+export { cn } from "@/lib/utils";

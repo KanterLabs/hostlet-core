@@ -11,22 +11,22 @@ const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: 
   active: {
     values: ["queued", "pending", "waiting", "running", "building", "starting", "health_checking", "routing"],
     icon: Loader2,
-    tone: "bg-amber-50 text-amber-900 ring-amber-300",
+    tone: "bg-warning-bg text-warning-fg ring-warning-border",
   },
   success: {
     values: ["success", "online", "connected", "open", "enabled", "healthy", "live"],
     icon: CheckCircle2,
-    tone: "bg-emerald-50 text-emerald-900 ring-emerald-300",
+    tone: "bg-success-bg text-success-fg ring-success-border",
   },
   failed: {
     values: ["failed", "offline", "missing", "closed", "disabled", "not configured", "unhealthy", "rolled_back"],
     icon: XCircle,
-    tone: "bg-red-50 text-red-900 ring-red-300",
+    tone: "bg-danger-bg text-danger-fg ring-danger-border",
   },
   warning: {
     values: ["needs attention", "not deployed", "degraded"],
     icon: AlertTriangle,
-    tone: "bg-amber-50 text-amber-900 ring-amber-300",
+    tone: "bg-warning-bg text-warning-fg ring-warning-border",
   },
 };
 
@@ -109,20 +109,14 @@ export function Notice({
 }) {
   const toneClass = {
     neutral: "border-line bg-surface text-ink",
-    success: "border-emerald-200 bg-emerald-50 text-emerald-900",
-    warning: "border-amber-300 bg-amber-50 text-amber-950",
-    danger: "border-red-200 bg-red-50 text-red-900",
-  }[tone];
-  const titleClass = {
-    neutral: "text-ink",
-    success: "text-emerald-950",
-    warning: "text-amber-950",
-    danger: "text-red-950",
+    success: "border-success-border bg-success-bg text-success-fg",
+    warning: "border-warning-border bg-warning-bg text-warning-fg",
+    danger: "border-danger-border bg-danger-bg text-danger-fg",
   }[tone];
 
   return (
     <div className={cx("rounded-lg border p-4 text-sm", toneClass, className)}>
-      {title && <div className={cx("font-medium", titleClass)}>{title}</div>}
+      {title && <div className="font-medium">{title}</div>}
       <div className={title ? "mt-1" : ""}>{description}</div>
       {action && <div className="mt-4 flex flex-wrap gap-2">{action}</div>}
     </div>

@@ -50,9 +50,9 @@ function Toaster({ toasts, dismissToast }: { toasts: Toast[]; dismissToast: (id:
         const Icon = toast.tone === "success" ? CheckCircle2 : toast.tone === "warning" ? AlertTriangle : toast.tone === "danger" ? XCircle : Info;
         const tone = {
           neutral: "border-line bg-surface text-ink",
-          success: "border-emerald-300 bg-emerald-50 text-emerald-950",
-          warning: "border-amber-300 bg-amber-50 text-amber-950",
-          danger: "border-red-300 bg-red-50 text-red-950",
+          success: "border-success-border bg-success-bg text-success-fg",
+          warning: "border-warning-border bg-warning-bg text-warning-fg",
+          danger: "border-danger-border bg-danger-bg text-danger-fg",
         }[toast.tone];
         return (
           <div key={toast.id} className={cx("flex items-start gap-3 rounded-lg border p-3 text-sm shadow-lg", tone)}>

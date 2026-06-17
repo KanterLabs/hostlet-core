@@ -8,18 +8,18 @@ import { StatusPill } from "@/components/ui";
 const COPY_IDLE_LABEL = "Copy payload URL";
 const COPY_RESET_MS = 1400;
 
-/** Tailwind classes for the ready (public webhook) vs not-ready (LAN/manual) variants. */
+/** Semantic tone tokens for the ready (public webhook) vs not-ready (LAN/manual) variants. */
 const READY_TONE = {
-  card: "border-emerald-200 bg-emerald-50",
-  icon: "text-emerald-700",
-  heading: "font-semibold text-emerald-950",
-  body: "text-emerald-900",
+  card: "border-success-border bg-success-bg",
+  icon: "text-success-fg",
+  heading: "font-semibold text-success-fg",
+  body: "text-success-fg",
 };
 const NOT_READY_TONE = {
-  card: "border-amber-200 bg-amber-50",
-  icon: "text-amber-700",
-  heading: "font-semibold text-amber-950",
-  body: "text-amber-900",
+  card: "border-warning-border bg-warning-bg",
+  icon: "text-warning-fg",
+  heading: "font-semibold text-warning-fg",
+  body: "text-warning-fg",
 };
 
 export function WebhookNotice({
@@ -65,7 +65,7 @@ export function WebhookNotice({
             <StatusPill status={ready ? "connected" : "needs attention"} label={statusLabel} />
           </div>
           <p className={`mt-2 max-w-2xl text-sm ${tone.body}`}>{description}</p>
-          {autoDeployWarning && <p className="mt-2 max-w-2xl text-sm font-medium text-amber-950">{autoDeployWarning}</p>}
+          {autoDeployWarning && <p className="mt-2 max-w-2xl text-sm font-medium text-warning-fg">{autoDeployWarning}</p>}
           <div className="mt-3 break-all rounded-md bg-white/70 px-3 py-2 font-mono text-xs text-neutral-800 ring-1 ring-black/5">
             {readiness.webhookUrl}
           </div>

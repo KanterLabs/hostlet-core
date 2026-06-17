@@ -25,6 +25,73 @@
   --font-mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
+/* shadcn semantic token layer — HSL channels derived from the brand vars above.
+   Light is the active theme; the .dark block keeps the system theme-ready
+   (no toggle is shipped yet). New primitives consume these through Tailwind
+   (bg-primary, text-foreground, border-border, …) rather than raw palette
+   literals, so the brand lives in one place. */
+:root {
+  --background: 180 6% 97%;
+  --foreground: 160 9% 6%;
+  --card: 0 0% 100%;
+  --card-foreground: 160 9% 6%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 160 9% 6%;
+  --primary: 161 94% 30%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 180 6% 96%;
+  --secondary-foreground: 160 9% 6%;
+  --accent: 180 6% 96%;
+  --accent-foreground: 160 9% 6%;
+  --destructive: 0 74% 42%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 13% 91%;
+  --input: 220 13% 91%;
+  --ring: 161 94% 30%;
+  --radius: 0.5rem;
+
+  /* Soft status tones (success / warning / danger) for Badge + Alert variants. */
+  --success-bg: 152 81% 96%;
+  --success-fg: 164 86% 16%;
+  --success-border: 156 72% 67%;
+  --warning-bg: 48 100% 96%;
+  --warning-fg: 26 78% 27%;
+  --warning-border: 46 96% 64%;
+  --danger-bg: 0 86% 97%;
+  --danger-fg: 0 63% 31%;
+  --danger-border: 0 94% 82%;
+}
+
+.dark {
+  --background: 160 12% 4%;
+  --foreground: 0 0% 98%;
+  --card: 160 10% 6%;
+  --card-foreground: 0 0% 98%;
+  --popover: 160 10% 6%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 161 84% 41%;
+  --primary-foreground: 160 40% 6%;
+  --secondary: 160 8% 13%;
+  --secondary-foreground: 0 0% 98%;
+  --accent: 160 8% 15%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 70% 45%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 160 8% 17%;
+  --input: 160 8% 17%;
+  --ring: 161 84% 41%;
+
+  --success-bg: 161 45% 12%;
+  --success-fg: 156 72% 76%;
+  --success-border: 161 35% 26%;
+  --warning-bg: 36 45% 12%;
+  --warning-fg: 46 96% 72%;
+  --warning-border: 36 38% 28%;
+  --danger-bg: 0 42% 14%;
+  --danger-fg: 0 90% 82%;
+  --danger-border: 0 38% 30%;
+}
+
 html {
   background: var(--panel);
 }

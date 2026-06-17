@@ -37,8 +37,8 @@ export function GitHubStatus({ compact = false, showConnect = true }: { compact?
   const tone = !status
     ? "border-line bg-surface-alt text-muted"
     : healthy
-      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-      : "border-red-200 bg-red-50 text-red-900";
+      ? "border-success-border bg-success-bg text-success-fg"
+      : "border-danger-border bg-danger-bg text-danger-fg";
 
   let headline = "GitHub setup needed";
   if (status?.tokenValid) headline = `GitHub connected as ${status.login}`;
