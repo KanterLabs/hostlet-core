@@ -6,12 +6,44 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${HOSTLET_COMPOSE_FILE:-$ROOT_DIR/infra/docker-compose.yml}"
 BACKUP_ROOT="${HOSTLET_BACKUP_ROOT:-$ROOT_DIR/backups}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-BACKUP_DIR="${1:-$BACKUP_ROOT/hostlet-$STAMP}"
 POSTGRES_USER="${POSTGRES_USER:-hostlet}"
 POSTGRES_DB="${POSTGRES_DB:-hostlet}"
 AGENT_VOLUME="${HOSTLET_AGENT_VOLUME:-infra_hostlet-agent}"
 SCHEDULED="${HOSTLET_BACKUP_SCHEDULED:-false}"
 AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-alpine:3.22}"
+# Explicit env file for compose resolution.  Standalone runs against prod need
+# this because compose does not auto-load the project .env when invoked via SSH.
+# Accepted via --env-file <path> flag or HOSTLET_COMPOSE_ENV_FILE env var.
+COMPOSE_ENV_FILE="${HOSTLET_COMPOSE_ENV_FILE:-}"
+
+# Parse flags; positional arg (if any) is the backup destination dir.
+BACKUP_DIR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env-file)
+      COMPOSE_ENV_FILE="$2"
+      shift 2
+      ;;
+    --env-file=*)
+      COMPOSE_ENV_FILE="${1#*=}"
+      shift
+      ;;
+    *)
+      BACKUP_DIR="$1"
+      shift
+      ;;
+  esac
+done
+BACKUP_DIR="${BACKUP_DIR:-$BACKUP_ROOT/hostlet-$STAMP}"
+
+# Build the docker compose base command, optionally injecting --env-file.
+compose_cmd() {
+  if [[ -n "$COMPOSE_ENV_FILE" ]]; then
+    docker compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" "$@"
+  else
+    docker compose -f "$COMPOSE_FILE" "$@"
+  fi
+}
 
 # Emit a JSON string literal (with surrounding quotes) for an arbitrary value,
 # escaping backslashes and double quotes so paths with such characters stay valid.
@@ -36,7 +68,7 @@ trap 'exit 143' TERM
 
 mkdir -p "$BACKUP_DIR"
 
-docker compose -f "$COMPOSE_FILE" exec -T postgres \
+compose_cmd exec -T postgres \
   pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > "$BACKUP_DIR/postgres.sql"
 
 cat > "$BACKUP_DIR/ENVIRONMENT_REQUIRED.txt" <<'TXT'
