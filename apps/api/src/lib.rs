@@ -12,6 +12,7 @@ pub mod rate_limit;
 pub mod screenshots;
 pub mod server_capacity;
 pub mod state;
+pub mod storage;
 pub mod web;
 
 use axum::{

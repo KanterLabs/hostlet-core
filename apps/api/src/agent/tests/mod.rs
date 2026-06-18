@@ -77,6 +77,47 @@ async fn db_agent_jobs_claim_complete_and_ingest_events() {
     assert_resource_stats_record_numeric_metrics(&state, user_id, app_id).await;
     assert_resource_stats_reject_invalid_numeric_metrics(&state, app_id).await;
     assert_health_status_is_recorded(&state, app_id, deployment_id).await;
+    // A fresh app (no active deployment) so the storage gate, not the
+    // active-deployment guard, is what blocks the over-quota deploy.
+    let storage_app_id = insert_app(&state, user_id).await;
+    assert_storage_stats_recorded_and_gate_blocks_over_quota(&state, user_id, storage_app_id).await;
+}
+
+async fn assert_storage_stats_recorded_and_gate_blocks_over_quota(
+    state: &AppState,
+    user_id: Uuid,
+    app_id: Uuid,
+) {
+    // The latest per-app usage sample is upserted into app_storage_usage.
+    handle_agent_message(
+        state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "storage_stats",
+            "appId": app_id,
+            // 6 GB — over the 5 GB self-hosted default limit.
+            "usedBytes": 6_000_000_000_i64,
+            "volumes": [{ "name": "data", "usedBytes": 6_000_000_000_i64 }],
+        }),
+    )
+    .await;
+    let row = sqlx::query("SELECT used_bytes, volumes FROM app_storage_usage WHERE app_id=$1")
+        .bind(app_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("used_bytes"), 6_000_000_000);
+    let volumes: serde_json::Value = row.get("volumes");
+    assert_eq!(volumes[0]["name"], "data");
+
+    // Over the limit, a new deploy is refused before any deployment row is made.
+    let err = crate::deploy::create_and_send_deploy(state, user_id, app_id, "HEAD")
+        .await
+        .expect_err("deploy should be blocked when over the storage limit");
+    assert!(
+        err.to_string().contains("storage limit"),
+        "unexpected error: {err}"
+    );
 }
 
 async fn assert_claim_marks_job_claimed(state: &AppState, headers: &HeaderMap, job_id: Uuid) {

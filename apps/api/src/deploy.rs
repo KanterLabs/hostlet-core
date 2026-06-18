@@ -285,6 +285,25 @@ pub async fn create_and_send_deploy(
     .fetch_one(&state.db)
     .await?;
     let app = DeployApp::from_row(&app_row);
+    // Storage quota gate (soft): refuse to start a new deploy when the app is
+    // already over its managed-volume storage limit, using the last sampled
+    // usage. Running data is untouched — the user frees space or raises the
+    // limit. Self-hosted uses the default limit; Cloud injects a per-plan cap.
+    let used_bytes: i64 =
+        sqlx::query_scalar("SELECT used_bytes FROM app_storage_usage WHERE app_id=$1")
+            .bind(app_id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0);
+    let limit_bytes = crate::storage::volume_storage_limit_bytes(&app.runtime_config);
+    if used_bytes >= limit_bytes {
+        anyhow::bail!(
+            "This app is over its {} MB managed-storage limit ({} MB used). Free space in its \
+             volumes or raise the limit before deploying.",
+            limit_bytes / (1024 * 1024),
+            used_bytes / (1024 * 1024),
+        );
+    }
     let server_id = app.server_id;
     let insert_deployment = sqlx::query(
         "INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,runtime_kind) \

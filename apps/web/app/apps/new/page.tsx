@@ -297,6 +297,7 @@ export default function CreateApp() {
                   <SummaryItem label="Machine" value={selectedServer ? `${selectedServer.name} · local · ${selectedServer.status}` : "This machine"} />
                   <SummaryItem label="Route" value={routePreview} />
                   <SummaryItem label="Build" value={inspection?.deployable ? "Auto generated" : "Inspect repo"} />
+                  <SummaryItem label="Storage" value="5 GB managed volume · soft limit" />
                   <SummaryItem label="Automation" value={`${form.auto_deploy ? "Auto deploy" : "Manual deploy"} · ${form.public_exposure ? "public" : "private"}`} />
                 </DataList>
                 <button className="button mt-4 w-full" disabled={creating || !canCreate} onClick={submit}>

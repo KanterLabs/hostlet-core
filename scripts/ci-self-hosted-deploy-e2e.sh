@@ -843,6 +843,29 @@ if [ "${compose_web_mount_type}" != "volume" ]; then
 fi
 curl -fsS "http://127.0.0.1:${compose_published_port}/data" | grep -q '^persisted-ok$'
 
+# Storage quota: the agent measures managed-volume usage (docker system df -v) on
+# its slow loop and the API serves it on the app JSON. The web service wrote a
+# ~1 MB blob to /app/data, so poll for the first post-deploy sample, then assert
+# the meter's used (>0) and the default 5 GB limit (5368709120 bytes).
+compose_storage_used=0
+for _ in $(seq 1 18); do
+  compose_storage_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${compose_app_id}")"
+  compose_storage_used="$(printf '%s' "${compose_storage_detail}" | json_get storageUsedBytes)"
+  if [ "${compose_storage_used:-0}" -gt 0 ] 2>/dev/null; then
+    break
+  fi
+  sleep 5
+done
+if ! [ "${compose_storage_used:-0}" -gt 0 ] 2>/dev/null; then
+  echo "agent did not report managed-volume storage usage for the compose app (got '${compose_storage_used}')" >&2
+  exit 1
+fi
+compose_storage_limit="$(printf '%s' "${compose_storage_detail}" | json_get storageLimitBytes)"
+if [ "${compose_storage_limit}" != "5368709120" ]; then
+  echo "expected the default 5 GB storage limit (5368709120), got '${compose_storage_limit}'" >&2
+  exit 1
+fi
+
 record_deployment_metric "e2e-compose-fullstack" "selfHostedDeployE2e" "${compose_detail}"
 
 compose_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${compose_app_id}")"

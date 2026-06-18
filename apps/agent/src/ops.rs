@@ -8,6 +8,7 @@ mod resource_stats;
 mod screenshot_tests;
 #[cfg(test)]
 mod status_tests;
+mod storage_stats;
 
 use capture_url::validate_capture_url;
 pub(crate) use health::CONTAINER_STATE_INSPECT_FORMAT;
@@ -18,7 +19,8 @@ use health::{
 use reconcile::{
     container_actual_from_state, decide_reconcile, ContainerActual, ReconcileDecision,
 };
-pub(crate) use resource_stats::publish_resource_stats;
+pub(crate) use resource_stats::{parse_docker_bytes, publish_resource_stats};
+pub(crate) use storage_stats::publish_storage_stats;
 
 pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
     let tmp = target.with_extension(format!("caddy.tmp-{}", std::process::id()));

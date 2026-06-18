@@ -97,6 +97,8 @@ export type App = {
   startCommand?: string | null;
   memoryLimitMb?: number | null;
   cpuLimit?: number | null;
+  storageUsedBytes?: number | null;
+  storageLimitBytes?: number | null;
   currentDeploymentId?: string | null;
   publicExposure?: boolean | null;
   autoDeploy?: boolean | null;

@@ -97,7 +97,7 @@ fn parse_metric_count(value: &str) -> Option<i64> {
         .then_some(count)
 }
 
-fn parse_docker_bytes(value: &str) -> Option<i64> {
+pub(crate) fn parse_docker_bytes(value: &str) -> Option<i64> {
     let value = value.trim();
     if value.is_empty() {
         return None;

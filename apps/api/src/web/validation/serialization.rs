@@ -35,6 +35,9 @@ where
 }
 
 pub(in crate::web) fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
+    let runtime_config: serde_json::Value = or_default(&r, "runtime_config", serde_json::json!({}));
+    let storage_used_bytes = opt::<i64>(&r, "storage_used_bytes").unwrap_or(0);
+    let storage_limit_bytes = crate::storage::volume_storage_limit_bytes(&runtime_config);
     serde_json::json!({
         "id": req::<Uuid>(&r, "id"),
         "name": req::<String>(&r, "name"),
@@ -45,8 +48,10 @@ pub(in crate::web) fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
         "runtimeKind": or_default(&r, "runtime_kind", "single".to_string()),
         "services": or_default::<serde_json::Value>(&r, "services", serde_json::json!([])),
         "hostletConfigPath": or_default(&r, "hostlet_config_path", "hostlet.yml".to_string()),
-        "runtimeConfig": or_default(&r, "runtime_config", serde_json::json!({})),
+        "runtimeConfig": runtime_config,
         "packagingStrategy": or_default(&r, "packaging_strategy", "auto".to_string()),
+        "storageUsedBytes": storage_used_bytes,
+        "storageLimitBytes": storage_limit_bytes,
         "rootDirectory": or_default(&r, "root_directory", ".".to_string()),
         "installCommand": or_default::<Option<String>>(&r, "install_command", None),
         "buildCommand": or_default::<Option<String>>(&r, "build_command", None),

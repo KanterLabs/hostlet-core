@@ -37,6 +37,7 @@ import {
   SelectField,
   ServiceStack,
   StatusPill,
+  StorageMeter,
   SummaryItem,
   ToggleCard,
 } from "@/components/ui";
@@ -331,6 +332,14 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   </MetricsGrid>
                 ) : (
                   <Notice tone="neutral" description={resourceMessage} />
+                )}
+                {typeof app?.storageLimitBytes === "number" && app.storageLimitBytes > 0 && (
+                  <StorageMeter
+                    className="mt-3"
+                    label="Managed storage"
+                    usedBytes={app.storageUsedBytes}
+                    limitBytes={app.storageLimitBytes}
+                  />
                 )}
               </section>
 

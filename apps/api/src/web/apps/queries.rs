@@ -77,7 +77,8 @@ const APP_SELECT_BODY: &str = r#"
             ) ORDER BY (ds.role <> 'web'), ds.service_name)
             FROM deployment_services ds
             WHERE ds.deployment_id = a.current_deployment_id
-          ), '[]'::jsonb) AS services
+          ), '[]'::jsonb) AS services,
+          su.used_bytes AS storage_used_bytes
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN LATERAL (
@@ -96,6 +97,7 @@ const APP_SELECT_BODY: &str = r#"
           LIMIT 1
         ) latest_webhook ON true
         LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        LEFT JOIN app_storage_usage su ON su.app_id = a.id
 "#;
 
 /// All apps owned by `$1`, newest first.

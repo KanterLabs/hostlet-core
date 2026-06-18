@@ -25,6 +25,8 @@ const RESOURCE_PERCENT_MAX: f64 = 1_000_000.0;
 const RESOURCE_STAT_MAX_CHARS: usize = 128;
 /// Max characters kept from free-form health text (checked URL, error).
 const HEALTH_TEXT_MAX_CHARS: usize = 512;
+/// Sanity cap on the per-app volume breakdown stored from a storage_stats event.
+const STORAGE_MAX_VOLUMES: usize = 32;
 
 /// Parse a UUID-valued field from an agent message.
 fn msg_uuid(msg: &serde_json::Value, key: &str) -> Option<Uuid> {
@@ -78,6 +80,7 @@ pub(in crate::agent) async fn handle_agent_message(
         Some("deployment_status") => handle_deployment_status(state, server_id, &msg).await,
         Some("log") => handle_log(state, server_id, &msg).await,
         Some("resource_stats") => handle_resource_stats(state, &msg).await,
+        Some("storage_stats") => handle_storage_stats(state, server_id, &msg).await,
         Some("health_status") => handle_health_status(state, server_id, &msg).await,
         Some("job_status") => handle_job_status(state, server_id, &msg).await,
         Some("reconcile_request") => handle_reconcile_request(state, server_id, &msg).await,
@@ -250,6 +253,47 @@ async fn persist_deployment_services(
         .execute(&state.db)
         .await;
     }
+}
+
+async fn handle_storage_stats(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+    let Some(app_id) = msg_uuid(msg, "appId") else {
+        return;
+    };
+    let Some(used_bytes) = bounded_i64(msg, "usedBytes", RESOURCE_BYTES_RANGE) else {
+        return;
+    };
+    // Sanitize the per-volume breakdown: cap the count and validate each entry
+    // before storing it as jsonb.
+    let volumes: Vec<serde_json::Value> = msg
+        .get("volumes")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .take(STORAGE_MAX_VOLUMES)
+                .filter_map(|vol| {
+                    let name = capped_str(vol, "name", 64)?;
+                    let bytes = bounded_i64(vol, "usedBytes", RESOURCE_BYTES_RANGE)?;
+                    Some(serde_json::json!({ "name": name, "usedBytes": bytes }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Keep the latest sample per app; the apps/server_id guard ensures an agent
+    // only reports usage for apps assigned to its own server.
+    let _ = sqlx::query(
+        "INSERT INTO app_storage_usage (app_id, used_bytes, volumes, sampled_at) \
+         SELECT $1, $2, $3, now() FROM apps WHERE id = $1 AND server_id = $4 \
+         ON CONFLICT (app_id) DO UPDATE SET \
+           used_bytes = EXCLUDED.used_bytes, \
+           volumes = EXCLUDED.volumes, \
+           sampled_at = now()",
+    )
+    .bind(app_id)
+    .bind(used_bytes)
+    .bind(serde_json::Value::Array(volumes))
+    .bind(server_id)
+    .execute(&state.db)
+    .await;
 }
 
 async fn handle_log(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {

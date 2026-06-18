@@ -122,6 +122,7 @@ pub(crate) async fn connect_loop(cfg: Config, job_slot: Arc<AtomicBool>) -> anyh
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let mut job_claim = tokio::time::interval(Duration::from_secs(3));
     let mut resource_stats = tokio::time::interval(Duration::from_secs(5));
+    let mut storage_stats = tokio::time::interval(Duration::from_secs(60));
     let mut runtime_health = tokio::time::interval(runtime_health_interval());
     let mut health_counts: HashMap<Uuid, HealthCounts> = HashMap::new();
     loop {
@@ -140,6 +141,12 @@ pub(crate) async fn connect_loop(cfg: Config, job_slot: Arc<AtomicBool>) -> anyh
                 }
             }
             _ = resource_stats.tick() => publish_resource_stats(&cfg).await,
+            _ = storage_stats.tick() => {
+                // `docker system df -v` scans every volume's size, so measure off
+                // the select loop to keep heartbeat/job-claim responsive.
+                let cfg = cfg.clone();
+                tokio::spawn(async move { publish_storage_stats(&cfg).await; });
+            }
             _ = runtime_health.tick() => publish_runtime_health(&cfg, &mut health_counts).await,
             msg = ws.next() => {
                 match msg {

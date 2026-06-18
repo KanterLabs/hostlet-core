@@ -689,7 +689,13 @@ pub enum AgentEvent {
     ResourceStats(ResourceStatsEvent),
     HealthStatus(HealthStatusEvent),
     JobStatus(JobStatusEvent),
+    StorageStats(StorageStatsEvent),
 }
+
+/// The self-hosted default per-app managed-volume storage limit (MB). Hostlet
+/// Cloud overrides this per plan via `runtime_config.compose.volumeStorageLimitMb`;
+/// self-hosted apps fall back to this. Env-overridable by the API.
+pub const DEFAULT_VOLUME_STORAGE_LIMIT_MB: i64 = 5120;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DeploymentStatusEvent {
@@ -726,6 +732,29 @@ pub struct DeploymentServiceReport {
     pub status: Option<String>,
     /// HTTP health classification; only meaningful for the web service.
     pub health_status: Option<String>,
+}
+
+/// One managed volume's measured disk usage, reported by the agent for the
+/// per-service storage breakdown. `name` is the logical compose volume name
+/// (e.g. `pgdata`) or the single-service data volume.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeUsage {
+    pub name: String,
+    pub used_bytes: i64,
+}
+
+/// Per-app managed-volume storage usage, sampled periodically by the agent
+/// (`docker system df -v`) and persisted by the API for the quota meter + the
+/// deploy gate. `used_bytes` is the combined size of all the app's managed
+/// volumes (the web/data volume plus each add-on volume).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStatsEvent {
+    pub app_id: Uuid,
+    pub used_bytes: i64,
+    #[serde(default)]
+    pub volumes: Vec<VolumeUsage>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -824,6 +853,25 @@ mod tests {
         let event = AgentEvent::Heartbeat;
         let value = serde_json::to_value(event).unwrap();
         assert_eq!(value["type"], "heartbeat");
+    }
+
+    #[test]
+    fn storage_stats_event_uses_camelcase_and_round_trips() {
+        let event = AgentEvent::StorageStats(StorageStatsEvent {
+            app_id: Uuid::from_u128(1),
+            used_bytes: 1_572_864,
+            volumes: vec![VolumeUsage {
+                name: "pgdata".into(),
+                used_bytes: 1_048_576,
+            }],
+        });
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "storage_stats");
+        assert_eq!(value["appId"], Uuid::from_u128(1).to_string());
+        assert_eq!(value["usedBytes"], 1_572_864);
+        assert_eq!(value["volumes"][0]["name"], "pgdata");
+        assert_eq!(value["volumes"][0]["usedBytes"], 1_048_576);
+        assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
     }
 
     #[test]
