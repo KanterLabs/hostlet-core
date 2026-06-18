@@ -131,11 +131,12 @@ pub async fn create_app(
     // secrets land in the app's encrypted env; the generated compose references
     // them via `${VAR}` interpolation, so nothing secret is stored in
     // runtime_config. The added env vars are validated alongside the rest below.
-    match super::addons::resolve_managed_addons(
+    match hostlet_contracts::compose::resolve_managed_addons(
         &runtime_config,
         "web",
         body.container_port as u16,
         &health_path,
+        || crate::crypto::random_token(32),
     ) {
         Ok(Some(resolved)) => {
             runtime_kind = "compose".to_string();

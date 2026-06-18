@@ -411,6 +411,104 @@ pub fn generate_compose(
     }
 }
 
+/// The outcome of resolving requested add-ons: the `runtime_config` with
+/// `generatedCompose` filled in, and the `(key, value)` env pairs to persist
+/// (encrypted by the caller).
+pub struct ResolvedAddons {
+    pub runtime_config: serde_json::Value,
+    pub env: Vec<(String, String)>,
+}
+
+/// Resolves `runtime_config.compose.addOns` (selected at app-create time) into a
+/// generated multi-service Compose runtime plus the env to persist. Shared by
+/// the self-hosted and Hostlet Cloud create handlers so the secret +
+/// compose-generation logic lives in one place.
+///
+/// `secret_gen` mints a strong random value for each `generate`-flagged add-on
+/// env key (the caller supplies its own CSPRNG; contracts stays dependency
+/// light). The generated secrets land only in the returned `env`; the compose
+/// references them via `${VAR}` interpolation, never plaintext in
+/// `runtime_config`. Returns `Ok(None)` when no add-ons are requested.
+pub fn resolve_managed_addons(
+    runtime_config: &serde_json::Value,
+    web_service: &str,
+    port: u16,
+    health_path: &str,
+    mut secret_gen: impl FnMut() -> String,
+) -> Result<Option<ResolvedAddons>, String> {
+    let Some(requested) = runtime_config
+        .pointer("/compose/addOns")
+        .and_then(|value| value.as_array())
+        .filter(|list| !list.is_empty())
+    else {
+        return Ok(None);
+    };
+    let catalog = add_on_catalog();
+    let mut chosen: Vec<AddOn> = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
+    for item in requested {
+        let key = item
+            .get("key")
+            .and_then(|value| value.as_str())
+            .ok_or("each add-on requires a key")?;
+        let addon = catalog
+            .iter()
+            .find(|candidate| candidate.key == key)
+            .ok_or_else(|| format!("unknown add-on {key}"))?;
+        if chosen
+            .iter()
+            .any(|existing| existing.service_name == addon.service_name)
+        {
+            return Err(format!("add-on {key} was requested more than once"));
+        }
+        for entry in &addon.env {
+            let value = if entry.generate {
+                secret_gen()
+            } else {
+                entry.default.clone().unwrap_or_default()
+            };
+            addon_env_upsert(&mut env, &entry.key, value);
+        }
+        for inject in &addon.inject {
+            let rendered = render_addon_template(&inject.template, &env);
+            addon_env_upsert(&mut env, &inject.key, rendered);
+        }
+        chosen.push(addon.clone());
+    }
+    let generated = generate_compose(web_service, port, health_path, &chosen);
+    let mut runtime_config = runtime_config.clone();
+    let object = runtime_config
+        .as_object_mut()
+        .ok_or("runtime config must be an object")?;
+    object.insert(
+        "generatedCompose".to_string(),
+        serde_json::to_value(&generated).map_err(|_| "failed to encode generated compose")?,
+    );
+    Ok(Some(ResolvedAddons {
+        runtime_config,
+        env,
+    }))
+}
+
+/// Inserts or replaces `key`, keeping the env list free of duplicates (a later
+/// add-on reusing a var name wins, matching compose's last-write semantics).
+fn addon_env_upsert(env: &mut Vec<(String, String)>, key: &str, value: String) {
+    match env.iter_mut().find(|(existing, _)| existing == key) {
+        Some(slot) => slot.1 = value,
+        None => env.push((key.to_string(), value)),
+    }
+}
+
+/// Substitutes `${VAR}` references in a connection-string template with the
+/// already-resolved env values.
+fn render_addon_template(template: &str, env: &[(String, String)]) -> String {
+    let mut rendered = template.to_string();
+    for (key, value) in env {
+        rendered = rendered.replace(&format!("${{{key}}}"), value);
+    }
+    rendered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +652,76 @@ services:
             services.iter().find(|s| s.name == "postgres").unwrap().role,
             "backing"
         );
+    }
+
+    #[test]
+    fn resolve_no_addons_returns_none() {
+        assert!(
+            resolve_managed_addons(&serde_json::json!({}), "web", 3000, "/", || "x".into())
+                .unwrap()
+                .is_none()
+        );
+        assert!(resolve_managed_addons(
+            &serde_json::json!({"compose":{"addOns":[]}}),
+            "web",
+            3000,
+            "/",
+            || "x".into()
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn resolve_postgres_generates_secret_and_connection_string() {
+        let resolved = resolve_managed_addons(
+            &serde_json::json!({"compose":{"addOns":[{"key":"postgres"}]}}),
+            "web",
+            3000,
+            "/",
+            || "s3cret".into(),
+        )
+        .unwrap()
+        .unwrap();
+        let env: std::collections::HashMap<_, _> = resolved.env.iter().cloned().collect();
+        assert_eq!(
+            env.get("POSTGRES_PASSWORD").map(String::as_str),
+            Some("s3cret")
+        );
+        assert_eq!(env.get("POSTGRES_DB").map(String::as_str), Some("app"));
+        assert_eq!(
+            env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://postgres:s3cret@postgres:5432/app")
+        );
+        let compose = resolved
+            .runtime_config
+            .pointer("/generatedCompose/compose")
+            .and_then(|value| value.as_str())
+            .unwrap();
+        assert!(compose_subset_warnings(compose, "web").is_empty());
+        // The secret lives only in env; the stored compose keeps the ${VAR} ref.
+        assert!(compose.contains("${POSTGRES_PASSWORD}"));
+        assert!(!compose.contains("s3cret"));
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_and_duplicate_addons() {
+        assert!(resolve_managed_addons(
+            &serde_json::json!({"compose":{"addOns":[{"key":"mongo"}]}}),
+            "web",
+            3000,
+            "/",
+            || "x".into()
+        )
+        .is_err());
+        assert!(resolve_managed_addons(
+            &serde_json::json!({"compose":{"addOns":[{"key":"postgres"},{"key":"postgres"}]}}),
+            "web",
+            3000,
+            "/",
+            || "x".into()
+        )
+        .is_err());
     }
 
     #[test]

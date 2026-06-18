@@ -1,6 +1,5 @@
 use super::*;
 
-pub(crate) mod addons;
 mod create;
 mod queries;
 mod request_auth;
