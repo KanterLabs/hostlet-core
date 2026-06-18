@@ -118,6 +118,25 @@ pub(crate) fn compose_override_yaml(
             "    pids_limit: {}\n",
             if is_web { 256 } else { 512 }
         ));
+        // Backing services may carry per-service memory/CPU caps (e.g. Hostlet
+        // Cloud applies its plan's backing limits so add-ons can't crowd the
+        // shared host). The web service keeps its own per-app `--memory`/`--cpus`
+        // applied by the single-service runtime. Absent caps (self-hosted
+        // default) leave the backing service uncapped.
+        if !is_web {
+            if let Some(mb) = payload
+                .pointer("/runtime_config/compose/backingMemoryLimitMb")
+                .and_then(|value| value.as_i64())
+            {
+                out.push_str(&format!("    mem_limit: {mb}m\n"));
+            }
+            if let Some(cpus) = payload
+                .pointer("/runtime_config/compose/backingCpuLimit")
+                .and_then(|value| value.as_f64())
+            {
+                out.push_str(&format!("    cpus: \"{cpus:.2}\"\n"));
+            }
+        }
         if is_web {
             out.push_str(&format!(
                 "    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
@@ -409,6 +428,40 @@ mod tests {
         let args = runtime_env_args(&serde_json::json!({"env":{"PORT":"9000"}}), 4173);
         assert!(args.contains(&"PORT=9000".to_string()));
         assert!(!args.contains(&"PORT=4173".to_string()));
+    }
+
+    #[test]
+    fn backing_services_get_caps_when_runtime_config_provides_them() {
+        let override_yaml = compose_override_yaml(
+            "services:\n  web:\n    build: .\n  db:\n    image: postgres:16\n",
+            "web",
+            3000,
+            Uuid::nil(),
+            Uuid::nil(),
+            &serde_json::json!({
+                "runtime_config": {"compose": {"backingMemoryLimitMb": 256, "backingCpuLimit": 0.25}}
+            }),
+        );
+        // The backing service is capped; the web service is not (it gets its own
+        // per-app --memory/--cpus from the single-service runtime).
+        assert!(override_yaml.contains("mem_limit: 256m"));
+        assert!(override_yaml.contains("cpus: \"0.25\""));
+        assert_eq!(override_yaml.matches("mem_limit:").count(), 1);
+        assert_eq!(override_yaml.matches("cpus:").count(), 1);
+    }
+
+    #[test]
+    fn backing_services_have_no_caps_without_runtime_config() {
+        let override_yaml = compose_override_yaml(
+            "services:\n  web:\n    build: .\n  db:\n    image: postgres:16\n",
+            "web",
+            3000,
+            Uuid::nil(),
+            Uuid::nil(),
+            &serde_json::json!({}),
+        );
+        assert!(!override_yaml.contains("mem_limit:"));
+        assert!(!override_yaml.contains("cpus:"));
     }
 
     #[test]

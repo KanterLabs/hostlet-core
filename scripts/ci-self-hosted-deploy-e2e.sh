@@ -484,7 +484,7 @@ deploy_managed_addons_app() {
   "domain":"",
   "runtime_kind":"single",
   "hostlet_config_path":"hostlet.yml",
-  "runtime_config":{"compose":{"addOns":[{"key":"postgres"}]}},
+  "runtime_config":{"compose":{"addOns":[{"key":"postgres"}],"backingMemoryLimitMb":256,"backingCpuLimit":0.25}},
   "root_directory":".",
   "memory_limit_mb":512,
   "cpu_limit":0.5,
@@ -527,6 +527,16 @@ assert roles.get("postgres") == "backing", roles
     exit 1
   fi
   docker ps --filter "label=com.docker.compose.project=${project}" --filter "label=hostlet.role=web" --format '{{.Ports}}' | grep -q '127.0.0.1'
+
+  # The backing Postgres carries the per-service caps from runtime_config
+  # (256 MB = 268435456 bytes; 0.25 CPU = 250000000 NanoCpus).
+  backing_container="$(docker ps --filter "label=com.docker.compose.project=${project}" --filter "label=hostlet.role=backing" --format '{{.Names}}' | head -1)"
+  backing_mem="$(docker inspect --format '{{.HostConfig.Memory}}' "${backing_container}")"
+  backing_cpus="$(docker inspect --format '{{.HostConfig.NanoCpus}}' "${backing_container}")"
+  if [ "${backing_mem}" != "268435456" ] || [ "${backing_cpus}" != "250000000" ]; then
+    echo "backing service caps not applied (mem=${backing_mem} nanocpus=${backing_cpus})" >&2
+    exit 1
+  fi
 
   # The web app reaches Postgres via the injected DATABASE_URL (give PG time to accept).
   db_status=""
