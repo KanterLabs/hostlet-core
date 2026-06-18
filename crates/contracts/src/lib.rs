@@ -8,9 +8,11 @@ pub mod crypto;
 mod inference;
 
 pub use inference::{
-    compose_inspection, dockerfile_inspection, gitea_inspection, infer_dockerfile,
-    infer_package_json, infer_package_manager, node_inspection, railpack_inspection,
-    unknown_inspection, DockerfileInference, PackageInference,
+    compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
+    infer_dockerfile, infer_package_json, infer_package_manager, infer_service_addons,
+    manifest_dependency_tokens, node_inspection, package_json_dependencies, railpack_inspection,
+    unknown_inspection, with_detected_services, DetectedServices, DockerfileInference,
+    PackageInference,
 };
 
 /// Defines a `snake_case` status enum whose wire string is shared by serde, the

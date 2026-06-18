@@ -826,6 +826,23 @@ if printf '%s' "${compose_logs}" | grep -q 'compose-secret-value-for-redaction';
   exit 1
 fi
 docker ps --filter "label=com.docker.compose.project=hostlet-app-${compose_app_id//-/}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+
+# The fixture's web service persists to a relative host bind (./data:/app/data).
+# The agent must auto-map that to a managed *named* volume — never a host bind —
+# so assert the running web container mounts a volume (not a bind) at /app/data
+# and that the app can actually read back what it wrote there.
+compose_web_container="$(docker ps \
+  --filter "label=com.docker.compose.project=hostlet-app-${compose_app_id//-/}" \
+  --filter "label=com.docker.compose.service=web" --format '{{.ID}}' | head -1)"
+compose_web_mount_type="$(docker inspect -f \
+  '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Type}}{{end}}{{end}}' \
+  "${compose_web_container}")"
+if [ "${compose_web_mount_type}" != "volume" ]; then
+  echo "expected ./data to be auto-mapped to a managed named volume at /app/data, got mount type '${compose_web_mount_type}'" >&2
+  exit 1
+fi
+curl -fsS "http://127.0.0.1:${compose_published_port}/data" | grep -q '^persisted-ok$'
+
 record_deployment_metric "e2e-compose-fullstack" "selfHostedDeployE2e" "${compose_detail}"
 
 compose_delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${compose_app_id}")"

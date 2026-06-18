@@ -24,7 +24,6 @@ type CloudflareStatus = {
   baseDomain?: string | null;
   defaultDomainPattern?: string | null;
 };
-type AddOnCatalogItem = { key: string; name: string; category: string; icon: string };
 
 export default function CreateApp() {
   const router = useRouter();
@@ -47,14 +46,6 @@ export default function CreateApp() {
   const [cloudflare, setCloudflare] = useState<CloudflareStatus | null>(null);
   const [message, setMessage] = useState("");
   const [creating, setCreating] = useState(false);
-  const [catalog, setCatalog] = useState<AddOnCatalogItem[]>([]);
-  const [selectedAddons, setSelectedAddons] = useState<string[]>([]);
-
-  useEffect(() => {
-    api<AddOnCatalogItem[]>("/api/addons")
-      .then((rows) => setCatalog(Array.isArray(rows) ? rows : []))
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     api<ServerRow[]>("/api/servers")
@@ -142,17 +133,9 @@ export default function CreateApp() {
         env,
         deploy_after_create: !!inspection?.deployable,
       };
-      if (selectedAddons.length > 0) {
-        // Attach managed add-ons: the backend resolves these into a generated
-        // multi-service compose runtime + encrypted connection env.
-        const baseConfig =
-          form.runtime_config && typeof form.runtime_config === "object" ? form.runtime_config : {};
-        payload.runtime_kind = "compose";
-        payload.runtime_config = {
-          ...baseConfig,
-          compose: { addOns: selectedAddons.map((key) => ({ key })) },
-        };
-      }
+      // Managed services are auto-detected during inspection and ride along in
+      // `form.runtime_config` (runtimeKind "compose" + compose.addOns), which the
+      // backend resolves into a generated multi-service runtime — no manual picking.
       const res = await api<{ id: string; deploymentId?: string | null }>("/api/apps", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -273,44 +256,6 @@ export default function CreateApp() {
                             placeholder={item.source || "Environment value"}
                           />
                         ))}
-                      </div>
-                    )}
-                    {inspection.deployable && inspection.runtimeKind !== "compose" && catalog.length > 0 && (
-                      <div className="mt-4">
-                        <div className="eyebrow mb-2">Add managed services</div>
-                        <div className="flex flex-wrap gap-2">
-                          {catalog.map((addon) => {
-                            const selected = selectedAddons.includes(addon.key);
-                            return (
-                              <button
-                                key={addon.key}
-                                type="button"
-                                onClick={() =>
-                                  setSelectedAddons((current) =>
-                                    selected
-                                      ? current.filter((key) => key !== addon.key)
-                                      : [...current, addon.key],
-                                  )
-                                }
-                                className={cx(
-                                  "rounded-full border px-3 py-1.5 text-sm transition",
-                                  selected
-                                    ? "border-action bg-emerald-50 text-action"
-                                    : "border-line bg-surface text-ink hover:border-action",
-                                )}
-                              >
-                                {selected ? "✓ " : "+ "}
-                                {addon.name}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        {selectedAddons.length > 0 && (
-                          <p className="muted mt-2 text-xs">
-                            Hostlet runs these as managed services alongside your app and injects
-                            connection details (e.g. DATABASE_URL) into its environment.
-                          </p>
-                        )}
                       </div>
                     )}
                   </div>

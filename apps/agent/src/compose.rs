@@ -163,6 +163,13 @@ pub(crate) async fn deploy_compose(
     let web_service = &manifest.compose.web_service;
 
     let compose_text = tokio::fs::read_to_string(compose_file).await?;
+    // Auto-map relative host bind mounts (e.g. ./data:/app/data) onto managed
+    // named volumes so a repo that persists to a project-relative directory
+    // deploys unchanged while the host filesystem stays isolated. Absolute binds
+    // and the Docker socket are left intact for validate_compose_subset to
+    // reject. The rewritten file is what `docker compose` actually reads.
+    let compose_text = remap_host_binds_to_named_volumes(&compose_text)?;
+    tokio::fs::write(compose_file, &compose_text).await?;
     validate_compose_subset(&compose_text, web_service)?;
     let port = manifest.compose.port.unwrap_or(fallback_port as u16);
     validate_port(port as i64)?;

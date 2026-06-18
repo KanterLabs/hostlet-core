@@ -190,6 +190,107 @@ fn is_host_bind_source(value: &str) -> bool {
     value.starts_with('/') || value.starts_with('.') || value.contains('/') || value.contains('\\')
 }
 
+fn yaml_get_mut<'a>(
+    mapping: &'a mut serde_yaml::Mapping,
+    key: &str,
+) -> Option<&'a mut serde_yaml::Value> {
+    mapping.get_mut(serde_yaml::Value::String(key.to_string()))
+}
+
+/// A relative, within-repo host bind (`./data`, `cache/x`) that Hostlet can move
+/// onto a managed named volume. Absolute paths, parent-escaping (`..`) paths, and
+/// the Docker socket are deliberately excluded so they keep failing the subset.
+fn is_mappable_relative_bind(source: &str) -> bool {
+    is_host_bind_source(source)
+        && !source.starts_with('/')
+        && !source.split('/').any(|part| part == "..")
+}
+
+/// A stable managed volume name derived from the container mount target, so the
+/// same path keeps the same volume (and thus its data) across redeploys.
+fn managed_volume_name(target: &str) -> String {
+    let slug: String = target
+        .trim_start_matches('/')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "hostlet-data".to_string()
+    } else {
+        format!("hostlet-{slug}")
+    }
+}
+
+/// Rewrites relative host bind mounts (e.g. `./data:/app/data`) to Hostlet-managed
+/// named volumes mounted at the same container path, registering each under the
+/// top-level `volumes:`. Repos that persist to a project-relative directory then
+/// deploy unchanged while the host filesystem stays isolated. Absolute binds,
+/// `..`-escaping paths, and the Docker socket are left intact so
+/// [`validate_compose_subset`] still rejects them. Returns the input untouched
+/// when there is nothing to remap.
+pub(crate) fn remap_host_binds_to_named_volumes(contents: &str) -> anyhow::Result<String> {
+    let mut value: serde_yaml::Value =
+        serde_yaml::from_str(contents).context("compose file is not valid YAML")?;
+    let mut added: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    {
+        let Some(root) = value.as_mapping_mut() else {
+            return Ok(contents.to_string());
+        };
+        if let Some(services) = yaml_get_mut(root, "services").and_then(|v| v.as_mapping_mut()) {
+            for (_, service) in services.iter_mut() {
+                let Some(service) = service.as_mapping_mut() else {
+                    continue;
+                };
+                let Some(volumes) =
+                    yaml_get_mut(service, "volumes").and_then(|v| v.as_sequence_mut())
+                else {
+                    continue;
+                };
+                for volume in volumes.iter_mut() {
+                    let Some(text) = volume.as_str() else {
+                        continue;
+                    };
+                    let mut parts = text.splitn(3, ':');
+                    let source = parts.next().unwrap_or("");
+                    let Some(target) = parts.next() else {
+                        continue;
+                    };
+                    if !is_mappable_relative_bind(source) {
+                        continue;
+                    }
+                    let name = managed_volume_name(target);
+                    let replacement = match parts.next() {
+                        Some(mode) => format!("{name}:{target}:{mode}"),
+                        None => format!("{name}:{target}"),
+                    };
+                    *volume = serde_yaml::Value::String(replacement);
+                    added.insert(name);
+                }
+            }
+        }
+    }
+    if added.is_empty() {
+        return Ok(contents.to_string());
+    }
+    let root = value
+        .as_mapping_mut()
+        .context("compose file must be a mapping")?;
+    let volumes = root
+        .entry(serde_yaml::Value::String("volumes".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    let volumes = volumes
+        .as_mapping_mut()
+        .context("compose top-level volumes must be a mapping")?;
+    for name in added {
+        let key = serde_yaml::Value::String(name);
+        if !volumes.contains_key(&key) {
+            volumes.insert(key, serde_yaml::Value::Null);
+        }
+    }
+    serde_yaml::to_string(&value).context("failed to serialize remapped compose")
+}
+
 pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
     let value: serde_yaml::Value =
         serde_yaml::from_str(contents).context("compose file is not valid YAML")?;
@@ -714,5 +815,73 @@ volumes:
   docker-sock:
 "#;
         assert!(validate_compose_subset(long_socket_target, "web").is_err());
+    }
+
+    #[test]
+    fn remap_moves_relative_bind_to_named_volume_and_passes_subset() {
+        // Mirrors homebase: a single web service persisting to ./data.
+        let compose = r#"
+services:
+  web:
+    build: .
+    volumes:
+      - ./data:/app/data
+"#;
+        let remapped = remap_host_binds_to_named_volumes(compose).unwrap();
+        // The relative host bind is gone; a managed named volume took its place.
+        assert!(!remapped.contains("./data"));
+        assert!(remapped.contains("hostlet-app-data:/app/data"));
+        // The named volume is registered at the top level...
+        let value: serde_yaml::Value = serde_yaml::from_str(&remapped).unwrap();
+        assert!(value
+            .get("volumes")
+            .and_then(|v| v.as_mapping())
+            .is_some_and(|m| yaml_contains_key(m, "hostlet-app-data")));
+        // ...and the result now satisfies the very gate that rejected the bind.
+        validate_compose_subset(&remapped, "web").unwrap();
+    }
+
+    #[test]
+    fn remap_preserves_the_mode_suffix() {
+        let compose = "services:\n  web:\n    build: .\n    volumes:\n      - ./cache:/app/cache:ro\n";
+        let remapped = remap_host_binds_to_named_volumes(compose).unwrap();
+        assert!(remapped.contains("hostlet-app-cache:/app/cache:ro"));
+    }
+
+    #[test]
+    fn remap_leaves_absolute_binds_and_socket_for_the_subset_to_reject() {
+        let absolute = "services:\n  web:\n    build: .\n    volumes:\n      - /etc:/host-etc\n";
+        let remapped = remap_host_binds_to_named_volumes(absolute).unwrap();
+        // Untouched, so the subset gate still rejects it.
+        assert!(remapped.contains("/etc:/host-etc"));
+        assert!(validate_compose_subset(&remapped, "web").is_err());
+
+        let escaping = "services:\n  web:\n    build: .\n    volumes:\n      - ../secrets:/app/s\n";
+        let remapped = remap_host_binds_to_named_volumes(escaping).unwrap();
+        assert!(remapped.contains("../secrets"));
+        assert!(validate_compose_subset(&remapped, "web").is_err());
+    }
+
+    #[test]
+    fn remap_is_a_noop_for_named_volumes() {
+        let compose = "services:\n  web:\n    build: .\n    volumes:\n      - app-data:/data\nvolumes:\n  app-data:\n";
+        let remapped = remap_host_binds_to_named_volumes(compose).unwrap();
+        assert_eq!(remapped, compose);
+    }
+
+    #[test]
+    fn remap_volume_name_is_stable_for_the_same_target() {
+        // Persistence depends on the same mount target always yielding the same
+        // managed volume name across redeploys.
+        let a = remap_host_binds_to_named_volumes(
+            "services:\n  web:\n    build: .\n    volumes:\n      - ./data:/app/data\n",
+        )
+        .unwrap();
+        let b = remap_host_binds_to_named_volumes(
+            "services:\n  web:\n    build: .\n    volumes:\n      - ./data:/app/data\n",
+        )
+        .unwrap();
+        assert!(a.contains("hostlet-app-data"));
+        assert_eq!(a, b);
     }
 }

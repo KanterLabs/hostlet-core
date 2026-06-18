@@ -2,11 +2,16 @@ services:
   web:
     image: node:22-alpine
     command: >
-      node -e "const http=require('http'); const port=Number(process.env.PORT||3000);
+      node -e "const http=require('http'),fs=require('fs');
+      const port=Number(process.env.PORT||3000);
+      try{fs.mkdirSync('/app/data',{recursive:true});fs.writeFileSync('/app/data/marker','persisted-ok');}catch(e){}
+      const read=()=>{try{return fs.readFileSync('/app/data/marker','utf8');}catch(e){return 'no-data';}};
       http.createServer((req,res)=>{res.writeHead(200,{'content-type':'text/plain'});
-      res.end(req.url==='/health'?'ok':'hostlet-compose-fullstack');}).listen(port,'0.0.0.0');"
+      res.end(req.url==='/health'?'ok':req.url==='/data'?read():'hostlet-compose-fullstack');}).listen(port,'0.0.0.0');"
     environment:
       PORT: "3000"
+    volumes:
+      - ./data:/app/data
     depends_on:
       - cache
   cache:

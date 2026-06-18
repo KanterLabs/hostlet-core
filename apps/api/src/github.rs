@@ -16,8 +16,10 @@ use axum::{
 };
 use hostlet_contracts::{parse_github_repo, valid_commit_sha};
 use inference::{
-    compose_inspection, dockerfile_inspection, gitea_inspection, infer_dockerfile,
-    infer_package_json, node_inspection, railpack_inspection, unknown_inspection,
+    compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
+    infer_dockerfile, infer_package_json, infer_service_addons, manifest_dependency_tokens,
+    node_inspection, package_json_dependencies, railpack_inspection, unknown_inspection,
+    with_detected_services, DetectedServices,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -316,6 +318,14 @@ async fn inspect_repo(
     }
 
     let dockerfile = github_file_text(state, repo, branch, "Dockerfile", token).await?;
+    // Auto-detected backing services come from two complementary signals: the
+    // repo's dependency manifests (per language, below) and a bare compose file's
+    // service images (one without a `hostlet.yml` — that explicit form already
+    // returned above). Both map to the vetted managed catalog (the repo's own
+    // images are never run on a shared host) and feed the same
+    // `runtime_config.compose.addOns` the create handler resolves into a
+    // generated multi-service stack.
+    let compose_addons = detect_compose_addons(state, repo, branch, token).await?;
 
     if let Some(package_text) = github_file_text(state, repo, branch, "package.json", token).await?
     {
@@ -334,41 +344,57 @@ async fn inspect_repo(
                 .await?
                 .is_some(),
         );
-        return Ok(node_inspection(
-            repo,
-            branch,
-            default_branch,
-            inference,
-            dockerfile.is_some(),
-        ));
+        let base = node_inspection(repo, branch, default_branch, inference, dockerfile.is_some());
+        let mut detected = infer_service_addons(&package_json_dependencies(&package_text));
+        detected.merge(&compose_addons);
+        return Ok(with_detected_services(base, &detected));
     }
 
     if let Some(contents) = dockerfile {
         let inference = infer_dockerfile(&contents);
-        return Ok(dockerfile_inspection(
-            repo,
-            branch,
-            default_branch,
-            inference,
-        ));
+        let base = dockerfile_inspection(repo, branch, default_branch, inference);
+        return Ok(with_detected_services(base, &compose_addons));
     }
 
-    for (path, language) in [
-        ("requirements.txt", "Python"),
-        ("pyproject.toml", "Python"),
-        ("go.mod", "Go"),
-        ("Cargo.toml", "Rust"),
-        ("index.html", "static"),
+    for (path, language, is_manifest) in [
+        ("requirements.txt", "Python", true),
+        ("pyproject.toml", "Python", true),
+        ("go.mod", "Go", true),
+        ("Cargo.toml", "Rust", true),
+        ("index.html", "static", false),
     ] {
-        if github_file_text(state, repo, branch, path, token)
-            .await?
-            .is_some()
-        {
-            return Ok(railpack_inspection(repo, branch, default_branch, language));
+        if let Some(contents) = github_file_text(state, repo, branch, path, token).await? {
+            let base = railpack_inspection(repo, branch, default_branch, language);
+            let mut detected = if is_manifest {
+                infer_service_addons(&manifest_dependency_tokens(&contents))
+            } else {
+                DetectedServices::default()
+            };
+            detected.merge(&compose_addons);
+            return Ok(with_detected_services(base, &detected));
         }
     }
 
     Ok(unknown_inspection(repo, branch, default_branch))
+}
+
+/// Reads a repo's bare docker-compose file (one without a `hostlet.yml`) as a
+/// signal of which managed backing services the app needs, returning the catalog
+/// add-ons its service images map to. An absent file yields no add-ons. The
+/// repo's compose is never run on a shared host — only its declared service
+/// images inform which vetted catalog services to provision.
+async fn detect_compose_addons(
+    state: &AppState,
+    repo: &str,
+    branch: &str,
+    token: Option<&str>,
+) -> anyhow::Result<DetectedServices> {
+    for path in ["compose.yaml", "docker-compose.yml"] {
+        if let Some(compose_text) = github_file_text(state, repo, branch, path, token).await? {
+            return Ok(infer_addons_from_compose(&compose_text));
+        }
+    }
+    Ok(DetectedServices::default())
 }
 
 async fn github_file_text(

@@ -105,6 +105,16 @@ pub fn is_host_bind_source(value: &str) -> bool {
     value.starts_with('/') || value.starts_with('.') || value.contains('/') || value.contains('\\')
 }
 
+/// A relative, within-repo host bind (`./data`, `cache/x`) the agent auto-maps
+/// onto a managed named volume at deploy time. Mirrors the agent's
+/// `is_mappable_relative_bind`, so the inspection preview does not flag something
+/// the agent will silently handle. Absolute and `..`-escaping paths are excluded.
+pub fn is_mappable_relative_bind(source: &str) -> bool {
+    is_host_bind_source(source)
+        && !source.starts_with('/')
+        && !source.split('/').any(|part| part == "..")
+}
+
 /// Parses a Compose file into display summaries, tagging `web_service` as the
 /// web role. Returns an empty vec for unparseable YAML or a missing `services:`
 /// block — callers treat that as "no preview available", not an error.
@@ -194,7 +204,9 @@ pub fn compose_subset_warnings(compose_yaml: &str, web_service: &str) -> Vec<Str
         }
         for volume in string_seq(mapping, "volumes") {
             let source = volume.split(':').next().unwrap_or("");
-            if is_host_bind_source(source) {
+            if is_host_bind_source(source) && !is_mappable_relative_bind(source) {
+                // Relative, within-repo binds are auto-mapped to a managed volume
+                // at deploy time, so only absolute/escaping binds block here.
                 warnings.push(format!(
                     "Service {name} uses a host bind mount ({volume}); only named volumes are allowed."
                 ));
@@ -570,6 +582,20 @@ services:
             .iter()
             .any(|w| w.contains("db") && w.contains("privileged")));
         assert!(warnings.iter().any(|w| w.contains("host bind mount")));
+    }
+
+    #[test]
+    fn relative_host_bind_is_auto_mapped_not_a_blocking_warning() {
+        // Mirrors homebase: a single web service persisting to ./data. The agent
+        // auto-maps this to a managed volume, so the preview must not flag it
+        // (which would render the app undeployable).
+        let compose = "services:\n  web:\n    build: .\n    volumes:\n      - ./data:/app/data\n";
+        assert!(compose_subset_warnings(compose, "web").is_empty());
+        // Absolute and escaping binds are still blocking.
+        let absolute = "services:\n  web:\n    build: .\n    volumes:\n      - /etc:/host-etc\n";
+        assert!(compose_subset_warnings(absolute, "web")
+            .iter()
+            .any(|w| w.contains("host bind mount")));
     }
 
     #[test]

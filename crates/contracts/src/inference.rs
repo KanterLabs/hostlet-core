@@ -87,6 +87,241 @@ fn package_manager_from_field(value: &str) -> Option<&'static str> {
     }
 }
 
+/// The backing services inferred from a repo (its dependency manifests, or a bare
+/// compose file's images): the managed catalog add-ons Hostlet will provision,
+/// plus notes for services it detected but has no managed offering for yet.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DetectedServices {
+    /// Catalog add-on keys to provision, deduped and in catalog order.
+    pub addons: Vec<String>,
+    /// Skip notes for detected services with no managed catalog entry.
+    pub warnings: Vec<String>,
+}
+
+impl DetectedServices {
+    /// Unions another detection result in (e.g. dependency signals plus compose
+    /// image signals), keeping add-ons deduped and in catalog order.
+    pub fn merge(&mut self, other: &DetectedServices) {
+        for addon in &other.addons {
+            if !self.addons.contains(addon) {
+                self.addons.push(addon.clone());
+            }
+        }
+        for warning in &other.warnings {
+            if !self.warnings.contains(warning) {
+                self.warnings.push(warning.clone());
+            }
+        }
+        self.sort_to_catalog_order();
+    }
+
+    fn sort_to_catalog_order(&mut self) {
+        let catalog = crate::compose::add_on_catalog();
+        self.addons.sort_by_key(|key| {
+            catalog
+                .iter()
+                .position(|addon| &addon.key == key)
+                .unwrap_or(usize::MAX)
+        });
+    }
+}
+
+/// A dependency identifier or image base-name (lowercased) that implies a
+/// backing service. `exact` requires the whole identifier to equal the needle
+/// (for short, ambiguous names like `pg`); otherwise the needle is matched as a
+/// substring, so versioned module paths (`github.com/jackc/pgx/v5`), scoped
+/// packages (`@prisma/client`), and tag-stripped images (`postgres`) still match.
+struct ServiceSignal {
+    needle: &'static str,
+    service: &'static str,
+    exact: bool,
+}
+
+/// Dependency/image → backing-service signals.
+///
+/// Heuristic note: the generic SQL ORMs (Prisma/Sequelize/TypeORM/Drizzle/Knex)
+/// can target several engines, but Hostlet maps them to managed Postgres — the
+/// catalog's SQL default and by far the most common choice. Detection only ever
+/// *suggests*; the create preview shows exactly what was found so the user can
+/// confirm (or change the repo) before deploying.
+const SERVICE_SIGNALS: &[ServiceSignal] = &[
+    ServiceSignal { needle: "pg", service: "postgres", exact: true },
+    ServiceSignal { needle: "pg-promise", service: "postgres", exact: true },
+    ServiceSignal { needle: "postgres", service: "postgres", exact: false },
+    ServiceSignal { needle: "postgresql", service: "postgres", exact: false },
+    ServiceSignal { needle: "psycopg", service: "postgres", exact: false },
+    ServiceSignal { needle: "asyncpg", service: "postgres", exact: false },
+    ServiceSignal { needle: "tokio-postgres", service: "postgres", exact: false },
+    ServiceSignal { needle: "lib/pq", service: "postgres", exact: false },
+    ServiceSignal { needle: "pgx", service: "postgres", exact: false },
+    ServiceSignal { needle: "prisma", service: "postgres", exact: false },
+    ServiceSignal { needle: "sequelize", service: "postgres", exact: false },
+    ServiceSignal { needle: "typeorm", service: "postgres", exact: false },
+    ServiceSignal { needle: "drizzle-orm", service: "postgres", exact: false },
+    ServiceSignal { needle: "knex", service: "postgres", exact: false },
+    ServiceSignal { needle: "redis", service: "redis", exact: false },
+    ServiceSignal { needle: "bull", service: "redis", exact: true },
+    ServiceSignal { needle: "bullmq", service: "redis", exact: true },
+    // Detected, but Hostlet has no managed catalog add-on yet → skip + warn.
+    ServiceSignal { needle: "mongoose", service: "mongodb", exact: false },
+    ServiceSignal { needle: "mongodb", service: "mongodb", exact: false },
+    ServiceSignal { needle: "mongo", service: "mongodb", exact: false },
+    ServiceSignal { needle: "mysql", service: "mysql", exact: false },
+    ServiceSignal { needle: "mariadb", service: "mysql", exact: false },
+];
+
+/// Lowercased `dependencies` + `devDependencies` names from a `package.json`.
+/// Returns an empty set for unparseable JSON — detection treats "no manifest" and
+/// "no deps" the same (no services inferred).
+pub fn package_json_dependencies(contents: &str) -> std::collections::HashSet<String> {
+    let package: Value = serde_json::from_str(contents).unwrap_or_else(|_| serde_json::json!({}));
+    let mut names = std::collections::HashSet::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(map) = package.get(key).and_then(Value::as_object) {
+            names.extend(map.keys().map(|name| name.to_ascii_lowercase()));
+        }
+    }
+    names
+}
+
+/// Lowercased dependency-ish tokens from a free-text manifest (requirements.txt,
+/// go.mod, Cargo.toml, pyproject.toml, Gemfile). Splits on characters that never
+/// occur inside a package name or module path, keeping `/ . - _ @` so versioned
+/// module paths and scoped packages survive intact for substring matching.
+pub fn manifest_dependency_tokens(contents: &str) -> std::collections::HashSet<String> {
+    contents
+        .to_ascii_lowercase()
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '@')))
+        .filter(|token| token.len() >= 2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Infers the managed backing services a repo needs from a set of dependency
+/// identifiers (package.json deps, manifest tokens, or compose image names).
+/// Emits only catalog add-on keys, in catalog order; services with no managed
+/// catalog entry become skip warnings, so the create resolver never sees an
+/// unknown add-on key.
+pub fn infer_service_addons(identifiers: &std::collections::HashSet<String>) -> DetectedServices {
+    let mut services: Vec<&'static str> = Vec::new();
+    for signal in SERVICE_SIGNALS {
+        let matched = identifiers.iter().any(|id| {
+            if signal.exact {
+                id == signal.needle
+            } else {
+                id.contains(signal.needle)
+            }
+        });
+        if matched && !services.contains(&signal.service) {
+            services.push(signal.service);
+        }
+    }
+    let catalog = crate::compose::add_on_catalog();
+    let mut detected = DetectedServices::default();
+    for service in services {
+        if catalog.iter().any(|addon| addon.key == service) {
+            detected.addons.push(service.to_string());
+        } else {
+            detected.warnings.push(format!(
+                "Detected a {service} dependency, but Hostlet has no managed {service} add-on yet, so it was skipped. Bring your own compose to run it yourself."
+            ));
+        }
+    }
+    detected.sort_to_catalog_order();
+    detected
+}
+
+/// Infers managed add-ons from the service images declared in a bare
+/// docker-compose file (one without a `hostlet.yml`). The repo's own images are
+/// never run on a shared host — the file is read only as a signal of which
+/// backing services the app needs; the web service is always rebuilt from the
+/// repo via Railpack and its backing services come from the vetted catalog.
+pub fn infer_addons_from_compose(compose_yaml: &str) -> DetectedServices {
+    let services = crate::compose::parse_compose_services(compose_yaml, "");
+    let identifiers: std::collections::HashSet<String> = services
+        .iter()
+        .filter_map(|service| service.image.as_deref())
+        .map(|image| image.split(':').next().unwrap_or(image).to_ascii_lowercase())
+        .collect();
+    infer_service_addons(&identifiers)
+}
+
+/// Overlays auto-detected managed services onto a single-runtime inspection
+/// (Node/Dockerfile/Railpack): flips it to a Compose runtime, attaches the
+/// catalog add-ons to `runtimeConfig.compose.addOns` (so the create handler
+/// provisions them via `resolve_managed_addons`), and builds a service preview
+/// (the repo-built web service plus each managed add-on) for the create UI. Skip
+/// notes for unsupported services are surfaced even when no add-on is added.
+pub fn with_detected_services(inspection: Value, detected: &DetectedServices) -> Value {
+    let Value::Object(mut map) = inspection else {
+        return inspection;
+    };
+    let mut notes = detected.warnings.clone();
+    if !detected.addons.is_empty() {
+        let catalog = crate::compose::add_on_catalog();
+        let chosen: Vec<crate::compose::AddOn> = detected
+            .addons
+            .iter()
+            .filter_map(|key| catalog.iter().find(|addon| &addon.key == key).cloned())
+            .collect();
+        let mut services = vec![crate::compose::ServiceSummary {
+            name: "web".to_string(),
+            role: "web".to_string(),
+            image: None,
+            build: true,
+            ports: Vec::new(),
+            volumes: Vec::new(),
+        }];
+        for addon in &chosen {
+            services.push(crate::compose::ServiceSummary {
+                name: addon.service_name.clone(),
+                role: "backing".to_string(),
+                image: Some(addon.image.clone()),
+                build: false,
+                ports: Vec::new(),
+                volumes: addon.volumes.clone(),
+            });
+        }
+        let names = chosen
+            .iter()
+            .map(|addon| addon.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let add_ons: Vec<Value> = detected
+            .addons
+            .iter()
+            .map(|key| serde_json::json!({ "key": key }))
+            .collect();
+        map.insert("runtimeKind".to_string(), serde_json::json!("compose"));
+        map.insert("webService".to_string(), serde_json::json!("web"));
+        map.insert(
+            "services".to_string(),
+            serde_json::to_value(&services).unwrap_or_else(|_| serde_json::json!([])),
+        );
+        map.insert(
+            "runtimeConfig".to_string(),
+            serde_json::json!({ "compose": { "addOns": add_ons } }),
+        );
+        let one = chosen.len() == 1;
+        notes.insert(
+            0,
+            format!(
+                "Hostlet auto-detected {names} from your dependencies and will run {} as a managed service{}, injecting connection details (e.g. DATABASE_URL) into your app.",
+                if one { "it" } else { "them" },
+                if one { "" } else { "s" },
+            ),
+        );
+    }
+    if !notes.is_empty() {
+        if let Some(Value::Array(warnings)) = map.get_mut("warnings") {
+            for note in notes {
+                warnings.push(serde_json::json!(note));
+            }
+        }
+    }
+    Value::Object(map)
+}
+
 pub fn infer_dockerfile(contents: &str) -> DockerfileInference {
     let mut ports = Vec::new();
     let mut env = Vec::new();
@@ -391,4 +626,164 @@ fn object_map(value: Value) -> serde_json::Map<String, Value> {
         unreachable!("inspection_base always returns an object")
     };
     map
+}
+
+#[cfg(test)]
+mod service_detection_tests {
+    use super::*;
+
+    fn set(items: &[&str]) -> std::collections::HashSet<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn package_json_dependencies_lowercases_deps_and_dev_deps() {
+        let deps = package_json_dependencies(
+            r#"{"dependencies":{"PG":"^8","ioredis":"^5"},"devDependencies":{"Vitest":"^1"}}"#,
+        );
+        assert!(deps.contains("pg"));
+        assert!(deps.contains("ioredis"));
+        assert!(deps.contains("vitest"));
+    }
+
+    #[test]
+    fn node_postgres_and_redis_deps_map_to_catalog_addons() {
+        let detected = infer_service_addons(&set(&["pg", "ioredis", "react"]));
+        // Catalog order: postgres before redis.
+        assert_eq!(detected.addons, vec!["postgres", "redis"]);
+        assert!(detected.warnings.is_empty());
+    }
+
+    #[test]
+    fn no_data_deps_detect_nothing() {
+        let detected = infer_service_addons(&set(&["react", "next", "lodash"]));
+        assert!(detected.addons.is_empty());
+        assert!(detected.warnings.is_empty());
+    }
+
+    #[test]
+    fn bare_pg_matches_only_exactly_not_as_substring() {
+        // `pg` is exact-match: a package that merely contains "pg" must not trip it.
+        assert!(infer_service_addons(&set(&["imagepg-tools"])).addons.is_empty());
+        assert_eq!(infer_service_addons(&set(&["pg"])).addons, vec!["postgres"]);
+    }
+
+    #[test]
+    fn orm_dependency_infers_postgres_default() {
+        assert_eq!(infer_service_addons(&set(&["prisma"])).addons, vec!["postgres"]);
+        assert_eq!(
+            infer_service_addons(&set(&["@prisma/client"])).addons,
+            vec!["postgres"]
+        );
+    }
+
+    #[test]
+    fn unsupported_service_is_skipped_with_a_warning_not_an_addon() {
+        let detected = infer_service_addons(&set(&["mongoose"]));
+        assert!(detected.addons.is_empty());
+        assert_eq!(detected.warnings.len(), 1);
+        assert!(detected.warnings[0].contains("mongodb"));
+    }
+
+    #[test]
+    fn python_manifest_tokens_detect_postgres_and_redis() {
+        let tokens = manifest_dependency_tokens("psycopg2-binary==2.9.9\nredis>=5.0\nflask\n");
+        let detected = infer_service_addons(&tokens);
+        assert_eq!(detected.addons, vec!["postgres", "redis"]);
+    }
+
+    #[test]
+    fn go_mod_module_paths_detect_postgres() {
+        let tokens = manifest_dependency_tokens(
+            "module example.com/app\n\nrequire (\n\tgithub.com/lib/pq v1.10.9\n)\n",
+        );
+        assert_eq!(infer_service_addons(&tokens).addons, vec!["postgres"]);
+    }
+
+    #[test]
+    fn cargo_toml_crate_names_detect_postgres() {
+        let tokens =
+            manifest_dependency_tokens("[dependencies]\ntokio-postgres = \"0.7\"\nserde = \"1\"\n");
+        assert_eq!(infer_service_addons(&tokens).addons, vec!["postgres"]);
+    }
+
+    #[test]
+    fn compose_service_images_map_to_catalog_addons() {
+        let compose = "\
+services:
+  api:
+    build: .
+  db:
+    image: postgres:16-alpine
+  cache:
+    image: redis:7-alpine
+  search:
+    image: elasticsearch:8.0
+";
+        let detected = infer_addons_from_compose(compose);
+        // postgres + redis map to the catalog; elasticsearch has no catalog
+        // entry and no signal, so it is silently ignored (not warned).
+        assert_eq!(detected.addons, vec!["postgres", "redis"]);
+    }
+
+    #[test]
+    fn merge_unions_and_keeps_catalog_order() {
+        let mut a = infer_service_addons(&set(&["ioredis"]));
+        let b = infer_service_addons(&set(&["pg"]));
+        a.merge(&b);
+        assert_eq!(a.addons, vec!["postgres", "redis"]);
+    }
+
+    #[test]
+    fn with_detected_services_flips_node_app_to_compose_runtime() {
+        let base = node_inspection(
+            "owner/shop-api",
+            "main",
+            "main",
+            PackageInference { framework: "Next.js", package_manager: "pnpm" },
+            false,
+        );
+        let detected = infer_service_addons(&set(&["pg", "ioredis"]));
+        let value = with_detected_services(base, &detected);
+
+        assert_eq!(value["runtimeKind"], "compose");
+        assert_eq!(value["webService"], "web");
+        assert_eq!(value["deployable"], true);
+        // Detected framework metadata is preserved through the overlay.
+        assert_eq!(value["detectedFramework"], "Next.js");
+        // The create handler resolves these into a generated compose stack.
+        assert_eq!(
+            value.pointer("/runtimeConfig/compose/addOns"),
+            Some(&serde_json::json!([{"key":"postgres"},{"key":"redis"}]))
+        );
+        // Preview: the repo-built web service plus the managed backing services.
+        let services = value["services"].as_array().unwrap();
+        assert_eq!(services.len(), 3);
+        assert_eq!(services[0]["role"], "web");
+        assert_eq!(services[0]["build"], true);
+        assert!(services.iter().any(|s| s["name"] == "postgres" && s["role"] == "backing"));
+    }
+
+    #[test]
+    fn with_detected_services_leaves_single_apps_single_but_surfaces_skip_notes() {
+        let base = node_inspection(
+            "owner/app",
+            "main",
+            "main",
+            PackageInference { framework: "Node", package_manager: "npm" },
+            false,
+        );
+        let detected = infer_service_addons(&set(&["mongoose"]));
+        let value = with_detected_services(base, &detected);
+
+        // No managed add-on → still a single-runtime app, but the user is told
+        // their Mongo dependency was skipped.
+        assert_eq!(value["runtimeKind"], "single");
+        assert!(value.get("services").is_none());
+        assert!(value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("mongodb")));
+    }
 }
