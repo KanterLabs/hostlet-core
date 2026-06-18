@@ -344,7 +344,13 @@ async fn inspect_repo(
                 .await?
                 .is_some(),
         );
-        let base = node_inspection(repo, branch, default_branch, inference, dockerfile.is_some());
+        let base = node_inspection(
+            repo,
+            branch,
+            default_branch,
+            inference,
+            dockerfile.is_some(),
+        );
         let mut detected = infer_service_addons(&package_json_dependencies(&package_text));
         detected.merge(&compose_addons);
         return Ok(with_detected_services(base, &detected));

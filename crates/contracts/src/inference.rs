@@ -145,29 +145,117 @@ struct ServiceSignal {
 /// *suggests*; the create preview shows exactly what was found so the user can
 /// confirm (or change the repo) before deploying.
 const SERVICE_SIGNALS: &[ServiceSignal] = &[
-    ServiceSignal { needle: "pg", service: "postgres", exact: true },
-    ServiceSignal { needle: "pg-promise", service: "postgres", exact: true },
-    ServiceSignal { needle: "postgres", service: "postgres", exact: false },
-    ServiceSignal { needle: "postgresql", service: "postgres", exact: false },
-    ServiceSignal { needle: "psycopg", service: "postgres", exact: false },
-    ServiceSignal { needle: "asyncpg", service: "postgres", exact: false },
-    ServiceSignal { needle: "tokio-postgres", service: "postgres", exact: false },
-    ServiceSignal { needle: "lib/pq", service: "postgres", exact: false },
-    ServiceSignal { needle: "pgx", service: "postgres", exact: false },
-    ServiceSignal { needle: "prisma", service: "postgres", exact: false },
-    ServiceSignal { needle: "sequelize", service: "postgres", exact: false },
-    ServiceSignal { needle: "typeorm", service: "postgres", exact: false },
-    ServiceSignal { needle: "drizzle-orm", service: "postgres", exact: false },
-    ServiceSignal { needle: "knex", service: "postgres", exact: false },
-    ServiceSignal { needle: "redis", service: "redis", exact: false },
-    ServiceSignal { needle: "bull", service: "redis", exact: true },
-    ServiceSignal { needle: "bullmq", service: "redis", exact: true },
+    ServiceSignal {
+        needle: "pg",
+        service: "postgres",
+        exact: true,
+    },
+    ServiceSignal {
+        needle: "pg-promise",
+        service: "postgres",
+        exact: true,
+    },
+    ServiceSignal {
+        needle: "postgres",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "postgresql",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "psycopg",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "asyncpg",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "tokio-postgres",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "lib/pq",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "pgx",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "prisma",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "sequelize",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "typeorm",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "drizzle-orm",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "knex",
+        service: "postgres",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "redis",
+        service: "redis",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "bull",
+        service: "redis",
+        exact: true,
+    },
+    ServiceSignal {
+        needle: "bullmq",
+        service: "redis",
+        exact: true,
+    },
     // Detected, but Hostlet has no managed catalog add-on yet → skip + warn.
-    ServiceSignal { needle: "mongoose", service: "mongodb", exact: false },
-    ServiceSignal { needle: "mongodb", service: "mongodb", exact: false },
-    ServiceSignal { needle: "mongo", service: "mongodb", exact: false },
-    ServiceSignal { needle: "mysql", service: "mysql", exact: false },
-    ServiceSignal { needle: "mariadb", service: "mysql", exact: false },
+    ServiceSignal {
+        needle: "mongoose",
+        service: "mongodb",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "mongodb",
+        service: "mongodb",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "mongo",
+        service: "mongodb",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "mysql",
+        service: "mysql",
+        exact: false,
+    },
+    ServiceSignal {
+        needle: "mariadb",
+        service: "mysql",
+        exact: false,
+    },
 ];
 
 /// Lowercased `dependencies` + `devDependencies` names from a `package.json`.
@@ -241,7 +329,13 @@ pub fn infer_addons_from_compose(compose_yaml: &str) -> DetectedServices {
     let identifiers: std::collections::HashSet<String> = services
         .iter()
         .filter_map(|service| service.image.as_deref())
-        .map(|image| image.split(':').next().unwrap_or(image).to_ascii_lowercase())
+        .map(|image| {
+            image
+                .split(':')
+                .next()
+                .unwrap_or(image)
+                .to_ascii_lowercase()
+        })
         .collect();
     infer_service_addons(&identifiers)
 }
@@ -664,13 +758,18 @@ mod service_detection_tests {
     #[test]
     fn bare_pg_matches_only_exactly_not_as_substring() {
         // `pg` is exact-match: a package that merely contains "pg" must not trip it.
-        assert!(infer_service_addons(&set(&["imagepg-tools"])).addons.is_empty());
+        assert!(infer_service_addons(&set(&["imagepg-tools"]))
+            .addons
+            .is_empty());
         assert_eq!(infer_service_addons(&set(&["pg"])).addons, vec!["postgres"]);
     }
 
     #[test]
     fn orm_dependency_infers_postgres_default() {
-        assert_eq!(infer_service_addons(&set(&["prisma"])).addons, vec!["postgres"]);
+        assert_eq!(
+            infer_service_addons(&set(&["prisma"])).addons,
+            vec!["postgres"]
+        );
         assert_eq!(
             infer_service_addons(&set(&["@prisma/client"])).addons,
             vec!["postgres"]
@@ -740,7 +839,10 @@ services:
             "owner/shop-api",
             "main",
             "main",
-            PackageInference { framework: "Next.js", package_manager: "pnpm" },
+            PackageInference {
+                framework: "Next.js",
+                package_manager: "pnpm",
+            },
             false,
         );
         let detected = infer_service_addons(&set(&["pg", "ioredis"]));
@@ -761,7 +863,9 @@ services:
         assert_eq!(services.len(), 3);
         assert_eq!(services[0]["role"], "web");
         assert_eq!(services[0]["build"], true);
-        assert!(services.iter().any(|s| s["name"] == "postgres" && s["role"] == "backing"));
+        assert!(services
+            .iter()
+            .any(|s| s["name"] == "postgres" && s["role"] == "backing"));
     }
 
     #[test]
@@ -770,7 +874,10 @@ services:
             "owner/app",
             "main",
             "main",
-            PackageInference { framework: "Node", package_manager: "npm" },
+            PackageInference {
+                framework: "Node",
+                package_manager: "npm",
+            },
             false,
         );
         let detected = infer_service_addons(&set(&["mongoose"]));

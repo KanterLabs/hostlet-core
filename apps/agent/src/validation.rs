@@ -212,7 +212,13 @@ fn managed_volume_name(target: &str) -> String {
     let slug: String = target
         .trim_start_matches('/')
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let slug = slug.trim_matches('-');
     if slug.is_empty() {
@@ -843,7 +849,8 @@ services:
 
     #[test]
     fn remap_preserves_the_mode_suffix() {
-        let compose = "services:\n  web:\n    build: .\n    volumes:\n      - ./cache:/app/cache:ro\n";
+        let compose =
+            "services:\n  web:\n    build: .\n    volumes:\n      - ./cache:/app/cache:ro\n";
         let remapped = remap_host_binds_to_named_volumes(compose).unwrap();
         assert!(remapped.contains("hostlet-app-cache:/app/cache:ro"));
     }
