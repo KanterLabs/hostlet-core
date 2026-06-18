@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Box, CheckCircle2, GitBranch, HardDrive, Lock, Plus, Search, Server, WandSparkles } from "lucide-react";
 import { api } from "@/lib/api";
-import { AppShell, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard, cx } from "@/components/ui";
+import { AppShell, Badge, DataList, Field, Notice, PageHeader, Panel, SectionHeader, SelectField, StatusPill, SummaryItem, ToggleCard, cx } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 import {
   CreateAppForm,
@@ -219,6 +219,20 @@ export default function CreateApp() {
                       <div className="mt-3 grid gap-2 sm:grid-cols-2">
                         <SummaryItem label="Framework" value={inspection.detectedFramework || "Custom Dockerfile"} />
                         <SummaryItem label="Package manager" value={inspection.packageManager || "n/a"} />
+                      </div>
+                    )}
+                    {inspection.runtimeKind === "compose" && inspection.services && inspection.services.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        <div className="eyebrow">Detected services</div>
+                        {inspection.services.map((service) => (
+                          <div key={service.name} className="flex items-center justify-between gap-2 rounded-md border border-line bg-surface px-3 py-2 text-sm">
+                            <span className="flex min-w-0 items-center gap-2">
+                              <span className="truncate font-medium">{service.name}</span>
+                              <Badge variant={service.role === "web" ? "neutral" : "outline"}>{service.role === "web" ? "web" : "internal"}</Badge>
+                            </span>
+                            <span className="muted truncate text-xs">{service.image || (service.build ? "build from repo" : "")}</span>
+                          </div>
+                        ))}
                       </div>
                     )}
                     {inspection.warnings.length > 0 && (

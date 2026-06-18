@@ -16,8 +16,8 @@ use axum::{
 };
 use hostlet_contracts::{parse_github_repo, valid_commit_sha};
 use inference::{
-    dockerfile_inspection, gitea_inspection, infer_dockerfile, infer_package_json, node_inspection,
-    railpack_inspection, unknown_inspection,
+    compose_inspection, dockerfile_inspection, gitea_inspection, infer_dockerfile,
+    infer_package_json, node_inspection, railpack_inspection, unknown_inspection,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -272,6 +272,47 @@ async fn inspect_repo(
         .unwrap_or(default_branch);
     if repo.eq_ignore_ascii_case("go-gitea/gitea") {
         return Ok(gitea_inspection(repo, branch, default_branch));
+    }
+
+    // An explicit `hostlet.yml` declaring a Compose runtime wins over the
+    // package.json/Dockerfile detectors: the repo owner has stated the app is
+    // multi-service. We preview the parsed service list and surface any
+    // safe-subset violations the agent would reject at deploy time.
+    if let Some(manifest_text) = github_file_text(state, repo, branch, "hostlet.yml", token).await?
+    {
+        if let Some(manifest) =
+            hostlet_contracts::compose::HostletComposeManifest::parse_compose(&manifest_text)
+        {
+            let compose_file = manifest.compose_file();
+            let (services, subset_warnings) =
+                match github_file_text(state, repo, branch, compose_file, token).await? {
+                    Some(compose_text) => (
+                        hostlet_contracts::compose::parse_compose_services(
+                            &compose_text,
+                            &manifest.compose.web_service,
+                        ),
+                        hostlet_contracts::compose::compose_subset_warnings(
+                            &compose_text,
+                            &manifest.compose.web_service,
+                        ),
+                    ),
+                    None => (
+                        Vec::new(),
+                        vec![format!(
+                            "hostlet.yml references compose file {compose_file}, which was not found in the repository."
+                        )],
+                    ),
+                };
+            return Ok(compose_inspection(
+                repo,
+                branch,
+                default_branch,
+                "hostlet.yml",
+                &manifest.compose,
+                &services,
+                &subset_warnings,
+            ));
+        }
     }
 
     let dockerfile = github_file_text(state, repo, branch, "Dockerfile", token).await?;

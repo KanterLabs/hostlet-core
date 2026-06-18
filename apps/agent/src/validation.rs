@@ -69,7 +69,22 @@ fn compose_override_env_block(app_id: Uuid, deployment_id: Uuid, payload: &Value
         .join("\n")
 }
 
+/// Builds the Hostlet Compose override (`compose.hostlet.yml`) that is merged
+/// over the app's compose file at deploy time.
+///
+/// **Every** service is hardened so a backing container cannot escalate
+/// privileges or fork-bomb a shared host: `no-new-privileges` and a `pids_limit`
+/// are applied to all services. The web service additionally drops all Linux
+/// capabilities (`cap_drop: ALL`) — Hostlet's generated web runtimes never need
+/// them — while backing services keep Docker's already-curated default
+/// capability set, because standard database/cache images (e.g. Postgres, Redis)
+/// chown/setuid during init and would fail to start under `cap_drop: ALL`.
+///
+/// Only the web service receives the injected environment and a published port,
+/// and that publish is bound to `127.0.0.1` (loopback) so Caddy stays the sole
+/// public edge; backing services get no host port at all.
 pub(crate) fn compose_override_yaml(
+    compose_text: &str,
     web_service: &str,
     port: u16,
     app_id: Uuid,
@@ -77,9 +92,39 @@ pub(crate) fn compose_override_yaml(
     payload: &Value,
 ) -> String {
     let env_yaml = compose_override_env_block(app_id, deployment_id, payload);
-    format!(
-        "services:\n  {web_service}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"web\"\n    environment:\n{env_yaml}\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    pids_limit: 256\n    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
-    )
+    let mut service_names: Vec<String> =
+        hostlet_contracts::compose::parse_compose_services(compose_text, web_service)
+            .into_iter()
+            .map(|service| service.name)
+            .collect();
+    if !service_names.iter().any(|name| name == web_service) {
+        service_names.push(web_service.to_string());
+    }
+    let mut out = String::from("services:\n");
+    for name in &service_names {
+        let is_web = name == web_service;
+        let role = if is_web { "web" } else { "backing" };
+        out.push_str(&format!(
+            "  {name}:\n    labels:\n      hostlet.app_id: \"{app_id}\"\n      hostlet.deployment_id: \"{deployment_id}\"\n      hostlet.role: \"{role}\"\n"
+        ));
+        if is_web {
+            out.push_str(&format!("    environment:\n{env_yaml}\n"));
+        }
+        out.push_str("    security_opt:\n      - no-new-privileges:true\n");
+        if is_web {
+            out.push_str("    cap_drop:\n      - ALL\n");
+        }
+        out.push_str(&format!(
+            "    pids_limit: {}\n",
+            if is_web { 256 } else { 512 }
+        ));
+        if is_web {
+            out.push_str(&format!(
+                "    ports:\n      - target: {port}\n        host_ip: 127.0.0.1\n        protocol: tcp\n"
+            ));
+        }
+    }
+    out
 }
 
 /// Look up a string key in a YAML mapping without repeatedly allocating a
@@ -103,7 +148,10 @@ fn validate_compose_top_level_volumes(value: &serde_yaml::Value) -> anyhow::Resu
         match volume {
             serde_yaml::Value::Null => {}
             serde_yaml::Value::Mapping(mapping) => {
-                for key in ["driver", "driver_opts", "external"] {
+                for key in hostlet_contracts::compose::FORBIDDEN_TOP_LEVEL_VOLUME_FIELDS
+                    .iter()
+                    .copied()
+                {
                     if yaml_contains_key(mapping, key) {
                         bail!("compose volume {volume_name} uses unsupported field {key}");
                     }
@@ -144,16 +192,10 @@ pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyh
         let service = raw_service
             .as_mapping()
             .context("compose services must be objects")?;
-        for key in [
-            "container_name",
-            "network_mode",
-            "privileged",
-            "pid",
-            "ipc",
-            "devices",
-            "networks",
-            "ports",
-        ] {
+        for key in hostlet_contracts::compose::FORBIDDEN_SERVICE_FIELDS
+            .iter()
+            .copied()
+        {
             if yaml_contains_key(service, key) {
                 bail!("compose service {service_name} uses unsupported field {key}");
             }
@@ -406,6 +448,7 @@ mod tests {
     fn app_ports_bind_to_loopback_only() {
         assert_eq!(docker_port_map(3000), "127.0.0.1::3000");
         let override_yaml = compose_override_yaml(
+            "services:\n  web:\n    build: .\n  db:\n    image: postgres:16\n",
             "web",
             3000,
             Uuid::nil(),
@@ -417,6 +460,14 @@ mod tests {
         assert!(override_yaml.contains("no-new-privileges:true"));
         assert!(override_yaml.contains("cap_drop:\n      - ALL"));
         assert!(override_yaml.contains("pids_limit: 256"));
+        // Every service is hardened, but only the web service publishes a port
+        // (to loopback) and only it drops all caps; the backing service keeps
+        // Docker's default cap set so real database images can initialize.
+        assert!(override_yaml.contains("hostlet.role: \"backing\""));
+        assert_eq!(override_yaml.matches("ports:").count(), 1);
+        assert_eq!(override_yaml.matches("pids_limit: 512").count(), 1);
+        // no-new-privileges applies to both services (web + db).
+        assert_eq!(override_yaml.matches("no-new-privileges:true").count(), 2);
     }
 
     #[test]

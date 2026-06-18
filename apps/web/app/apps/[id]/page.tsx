@@ -35,6 +35,7 @@ import {
   Panel,
   SectionHeader,
   SelectField,
+  ServiceStack,
   StatusPill,
   SummaryItem,
   ToggleCard,
@@ -206,6 +207,8 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
           </MetricsGrid>
 
           <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />
+
+          {app?.runtimeKind === "compose" && <ServiceStack services={app?.services} />}
 
           <Panel className="mb-6">
             <SectionHeader title="App actions" description="Deploy, operate, publish, and remove this self-hosted app." />

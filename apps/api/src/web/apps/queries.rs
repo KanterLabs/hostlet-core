@@ -61,7 +61,23 @@ const APP_SELECT_BODY: &str = r#"
           hs.last_error AS health_last_error,
           hs.last_checked_at AS health_last_checked_at,
           hs.last_healthy_at AS health_last_healthy_at,
-          hs.updated_at AS health_updated_at
+          hs.updated_at AS health_updated_at,
+          COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+              'name', ds.service_name,
+              'role', ds.role,
+              'containerName', ds.container_name,
+              'imageTag', ds.image_tag,
+              'targetPort', ds.target_port,
+              'publishedPort', ds.published_port,
+              'status', ds.status,
+              'healthStatus', ds.health_status,
+              'lastCheckedAt', ds.last_checked_at,
+              'lastHealthyAt', ds.last_healthy_at
+            ) ORDER BY (ds.role <> 'web'), ds.service_name)
+            FROM deployment_services ds
+            WHERE ds.deployment_id = a.current_deployment_id
+          ), '[]'::jsonb) AS services
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN LATERAL (

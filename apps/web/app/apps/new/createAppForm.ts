@@ -49,6 +49,16 @@ export const defaultCreateAppForm: CreateAppForm = {
 
 export type InspectEnv = { key: string; required?: boolean; value?: string; source?: string };
 
+/** A service detected in a multi-service (Compose) repo, for a read-only preview. */
+export type InspectionService = {
+  name: string;
+  role: string;
+  image?: string | null;
+  build?: boolean;
+  ports?: string[];
+  volumes?: string[];
+};
+
 export type RepoInspection = {
   repoFullName: string;
   defaultBranch: string;
@@ -66,6 +76,8 @@ export type RepoInspection = {
   recommendedPackagingStrategy?: string;
   detectedFramework?: string;
   packageManager?: string;
+  webService?: string;
+  services?: InspectionService[];
   env: InspectEnv[];
   warnings: string[];
   summary: string;

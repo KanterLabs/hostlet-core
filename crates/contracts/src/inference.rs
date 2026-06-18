@@ -236,6 +236,57 @@ pub fn railpack_inspection(
     })
 }
 
+/// Builds the inspection payload for a bring-your-own multi-service Compose app
+/// (a repo with a `hostlet.yml` declaring `runtime: compose`). Surfaces the
+/// parsed service list so the UI can render a card per service, marks the app
+/// undeployable when the compose breaches the safe subset, and folds the subset
+/// warnings into the standard `warnings` array the create UI already renders.
+pub fn compose_inspection(
+    repo: &str,
+    branch: &str,
+    default_branch: &str,
+    hostlet_config_path: &str,
+    compose: &crate::compose::HostletComposeSection,
+    services: &[crate::compose::ServiceSummary],
+    subset_warnings: &[String],
+) -> Value {
+    let web_service = compose.web_service.as_str();
+    let container_port = compose.port.map(i32::from).unwrap_or(3000);
+    let health_path = compose.health_path.as_deref().unwrap_or("/");
+    let mut warnings = vec![format!(
+        "Multi-service Compose app detected ({} services). Hostlet runs the '{web_service}' service as the web entrypoint; the other services are reachable only on the app's internal network.",
+        services.len()
+    )];
+    warnings.extend(subset_warnings.iter().cloned());
+    let mut result = object_map(inspection_base(InspectionBaseInput {
+        repo,
+        branch,
+        default_branch,
+        deployable: subset_warnings.is_empty(),
+        container_port: serde_json::json!(container_port),
+        packaging_options: serde_json::json!(["auto"]),
+        recommended_packaging_strategy: "auto",
+        env: serde_json::json!([]),
+        warnings: serde_json::json!(warnings),
+        summary: format!(
+            "Compose app detected with {} services. Web service: {web_service}.",
+            services.len()
+        ),
+    }));
+    result.insert("runtimeKind".into(), serde_json::json!("compose"));
+    result.insert("webService".into(), serde_json::json!(web_service));
+    result.insert(
+        "hostletConfigPath".into(),
+        serde_json::json!(hostlet_config_path),
+    );
+    result.insert("healthPath".into(), serde_json::json!(health_path));
+    result.insert(
+        "services".into(),
+        serde_json::to_value(services).unwrap_or_else(|_| serde_json::json!([])),
+    );
+    Value::Object(result)
+}
+
 pub fn unknown_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
     inspection_base(InspectionBaseInput {
         repo,

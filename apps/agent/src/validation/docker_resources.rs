@@ -80,6 +80,80 @@ pub(crate) async fn compose_service_container(
     Ok(name)
 }
 
+/// Best-effort runtime facts for every service in a deployed Compose project,
+/// as `DeploymentServiceReport`s the API persists into `deployment_services`.
+///
+/// Never fails the deploy: the declared service list comes from the compose
+/// file (so the web service is always present), and a service whose container
+/// can't be inspected is reported with null runtime detail rather than erroring.
+/// Per-service health and the web service's published port are filled in by the
+/// caller, which knows the health-check result and the host-published port.
+pub(crate) async fn compose_all_services(
+    dir: &Path,
+    project: &str,
+    compose_file: &Path,
+    override_file: &Path,
+    compose_text: &str,
+    web_service: &str,
+) -> Vec<hostlet_contracts::DeploymentServiceReport> {
+    let declared = hostlet_contracts::compose::parse_compose_services(compose_text, web_service);
+    let mut services = Vec::with_capacity(declared.len());
+    for summary in declared {
+        let container =
+            compose_service_container(dir, project, compose_file, override_file, &summary.name)
+                .await
+                .ok();
+        let (image_tag, status) = match &container {
+            Some(name) => inspect_container_facts(name).await,
+            None => (None, None),
+        };
+        services.push(hostlet_contracts::DeploymentServiceReport {
+            name: summary.name,
+            role: summary.role,
+            container_name: container,
+            image_tag,
+            target_port: None,
+            published_port: None,
+            status,
+            health_status: None,
+        });
+    }
+    services
+}
+
+/// Reads a container's image and lifecycle status via `docker inspect`. Returns
+/// `(None, None)` on any failure — callers treat missing facts as "unknown".
+async fn inspect_container_facts(name: &str) -> (Option<String>, Option<String>) {
+    let output = command_output(
+        "docker",
+        &[
+            "inspect",
+            "-f",
+            "{{.State.Status}}\t{{.Config.Image}}",
+            name,
+        ],
+        Duration::from_secs(15),
+    )
+    .await;
+    let Ok(output) = output else {
+        return (None, None);
+    };
+    if !output.status.success() {
+        return (None, None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut parts = text.trim().splitn(2, '\t');
+    let status = parts
+        .next()
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    let image = parts
+        .next()
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    (image, status)
+}
+
 pub(crate) async fn command_output_in_dir(
     dir: &Path,
     bin: &str,

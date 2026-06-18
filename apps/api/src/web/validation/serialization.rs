@@ -43,6 +43,7 @@ pub(in crate::web) fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
         "domain": req::<String>(&r, "domain"),
         "currentDeploymentId": req::<Option<Uuid>>(&r, "current_deployment_id"),
         "runtimeKind": or_default(&r, "runtime_kind", "single".to_string()),
+        "services": or_default::<serde_json::Value>(&r, "services", serde_json::json!([])),
         "hostletConfigPath": or_default(&r, "hostlet_config_path", "hostlet.yml".to_string()),
         "runtimeConfig": or_default(&r, "runtime_config", serde_json::json!({})),
         "packagingStrategy": or_default(&r, "packaging_strategy", "auto".to_string()),

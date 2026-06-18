@@ -929,6 +929,7 @@ dependencies = [
  "hmac",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "url",
  "uuid",

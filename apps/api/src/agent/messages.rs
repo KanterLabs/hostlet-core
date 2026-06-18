@@ -158,6 +158,11 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
     .await
     .map(|done| done.rows_affected())
     .unwrap_or(0);
+    if updated == 1 {
+        if let Some(services) = msg.get("services").and_then(|v| v.as_array()) {
+            persist_deployment_services(state, server_id, id, services).await;
+        }
+    }
     if matches!(status.as_str(), "success" | "rolled_back") && updated == 1 {
         let _ = sqlx::query("UPDATE apps SET current_deployment_id=$1, domain=COALESCE($2, domain) WHERE id=(SELECT app_id FROM deployments WHERE id=$1)")
             .bind(id)
@@ -176,6 +181,74 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
                 tracing::warn!(error = %err, %server_id, "failed to enqueue automatic Docker cleanup");
             }
         }
+    }
+}
+
+/// Persists the agent-reported per-service rows of a multi-service (Compose)
+/// deployment into `deployment_services`.
+///
+/// `app_id` is read from the deployment row (the agent cannot spoof it) and the
+/// `server_id` guard scopes the write to this server's deployment. Each row is
+/// validated and upserted on `(deployment_id, service_name)`; a malformed row is
+/// skipped rather than failing the whole batch. `last_healthy_at` advances only
+/// when the reported health is `healthy`.
+async fn persist_deployment_services(
+    state: &AppState,
+    server_id: Uuid,
+    deployment_id: Uuid,
+    services: &[serde_json::Value],
+) {
+    for service in services {
+        let Some(name) = service.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if name.is_empty() || name.len() > 64 {
+            continue;
+        }
+        let role = match service.get("role").and_then(|v| v.as_str()) {
+            Some(role @ ("web" | "backing")) => role,
+            _ => continue,
+        };
+        let container_name = service
+            .get("containerName")
+            .and_then(|v| v.as_str())
+            .filter(|name| hostlet_contracts::valid_container_name(name));
+        let image_tag = capped_str(service, "imageTag", 256);
+        let target_port = bounded_i32(service, "targetPort", PORT_RANGE);
+        let published_port = bounded_i32(service, "publishedPort", PORT_RANGE);
+        let svc_status = capped_str(service, "status", 64);
+        let health_status = capped_str(service, "healthStatus", 32);
+        let _ = sqlx::query(
+            "INSERT INTO deployment_services \
+             (deployment_id, app_id, service_name, role, container_name, image_tag, \
+              target_port, published_port, status, health_status, last_checked_at, last_healthy_at) \
+             SELECT $1, d.app_id, $2, $3, $4, $5, $6, $7, $8, $9, now(), \
+                    CASE WHEN $9 = 'healthy' THEN now() ELSE NULL END \
+             FROM deployments d WHERE d.id = $1 AND d.server_id = $10 \
+             ON CONFLICT (deployment_id, service_name) DO UPDATE SET \
+               role = EXCLUDED.role, \
+               container_name = EXCLUDED.container_name, \
+               image_tag = EXCLUDED.image_tag, \
+               target_port = EXCLUDED.target_port, \
+               published_port = EXCLUDED.published_port, \
+               status = EXCLUDED.status, \
+               health_status = EXCLUDED.health_status, \
+               last_checked_at = now(), \
+               last_healthy_at = CASE WHEN EXCLUDED.health_status = 'healthy' THEN now() \
+                                      ELSE deployment_services.last_healthy_at END",
+        )
+        .bind(deployment_id)
+        .bind(name)
+        .bind(role)
+        .bind(container_name)
+        .bind(image_tag)
+        .bind(target_port)
+        .bind(published_port)
+        .bind(svc_status)
+        .bind(health_status)
+        .bind(server_id)
+        .execute(&state.db)
+        .await;
     }
 }
 

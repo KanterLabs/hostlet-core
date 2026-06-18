@@ -1,6 +1,6 @@
 pub(super) use hostlet_contracts::{
-    dockerfile_inspection, gitea_inspection, infer_dockerfile, infer_package_json, node_inspection,
-    railpack_inspection, unknown_inspection,
+    compose_inspection, dockerfile_inspection, gitea_inspection, infer_dockerfile,
+    infer_package_json, node_inspection, railpack_inspection, unknown_inspection,
 };
 
 #[cfg(test)]

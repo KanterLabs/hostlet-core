@@ -178,7 +178,7 @@ pub(crate) async fn deploy_compose(
     }
     tokio::fs::write(
         &override_file,
-        compose_override_yaml(web_service, port, app_id, deployment_id, &p),
+        compose_override_yaml(&compose_text, web_service, port, app_id, deployment_id, &p),
     )
     .await?;
     log(
@@ -337,6 +337,25 @@ pub(crate) async fn deploy_compose(
             format!("localhost:{internal_port}")
         });
     }
+    // Enumerate every service in the stack so the API can persist one
+    // `deployment_services` row per service and the UI can render a card each.
+    // The web service is the only one Hostlet health-checks and host-publishes,
+    // so its health/published port are overlaid here onto the best-effort facts.
+    let mut services = compose_all_services(
+        project_dir,
+        &project,
+        compose_file,
+        &override_file,
+        &compose_text,
+        web_service,
+    )
+    .await;
+    if let Some(web) = services.iter_mut().find(|svc| svc.name == *web_service) {
+        web.target_port = Some(port as i32);
+        web.published_port = Some(internal_port as i32);
+        web.health_status = Some("healthy".to_string());
+    }
+    let services_json = serde_json::to_value(&services).ok();
     status_extra(
         &cfg,
         deployment_id,
@@ -347,6 +366,7 @@ pub(crate) async fn deploy_compose(
             published_port: Some(internal_port),
             compose_project: Some(&project),
             runtime_metadata: Some(runtime_metadata),
+            services: services_json,
             ..StatusDetails::default()
         },
     )

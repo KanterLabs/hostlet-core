@@ -133,6 +133,9 @@ pub(crate) struct StatusDetails<'a> {
     pub(crate) published_port: Option<u16>,
     pub(crate) compose_project: Option<&'a str>,
     pub(crate) runtime_metadata: Option<Value>,
+    /// Per-service rows for a multi-service (Compose) deployment, serialized
+    /// from `[DeploymentServiceReport]`. Only populated on the success path.
+    pub(crate) services: Option<Value>,
 }
 
 pub(crate) async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
@@ -151,6 +154,7 @@ fn deployment_status_event(id: Uuid, status: &str, details: StatusDetails<'_>) -
         "published_port": details.published_port,
         "compose_project": details.compose_project,
         "runtime_metadata": details.runtime_metadata,
+        "services": details.services,
     })
 }
 
