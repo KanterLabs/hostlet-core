@@ -149,6 +149,7 @@ pub(crate) async fn deploy_compose(
     domain: &str,
     fallback_health_path: &str,
     git_sync_duration_ms: u128,
+    web_image: Option<&str>,
 ) -> anyhow::Result<()> {
     ensure_docker_compose().await?;
     let build_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
@@ -188,19 +189,50 @@ pub(crate) async fn deploy_compose(
         &format!("Detected Hostlet Compose app. Project {project}, web service {web_service}."),
     )
     .await;
+    // The compose process environment supplies `${VAR}` interpolation: the
+    // app's env (so a generated add-on stack resolves e.g. ${POSTGRES_PASSWORD}
+    // from the encrypted store) plus HOSTLET_WEB_IMAGE for managed-add-ons apps
+    // whose web service was built from the repo. Secrets travel as the child
+    // process env, never as command args, so they are not logged — and `config`
+    // runs `--quiet` so the resolved (interpolated) compose is never printed.
+    let mut compose_env: Vec<(String, String)> = Vec::new();
+    if let Some(map) = p.get("env").and_then(|v| v.as_object()) {
+        for (key, value) in map {
+            if hostlet_contracts::valid_env_key(key) {
+                compose_env.push((key.clone(), value.as_str().unwrap_or_default().to_string()));
+            }
+        }
+    }
+    if let Some(web_image) = web_image {
+        compose_env.push((
+            hostlet_contracts::compose::WEB_IMAGE_ENV.to_string(),
+            web_image.to_string(),
+        ));
+    }
+    let compose_env_refs: Vec<(&str, &str)> = compose_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     let compose_up_started = Instant::now();
-    run_log_in_dir(
+    run_log_in_dir_env(
         &cfg,
         deployment_id,
         project_dir,
+        &compose_env_refs,
         "docker",
-        &compose_invocation(&project, compose_file, &override_file, &["config"])?,
+        &compose_invocation(
+            &project,
+            compose_file,
+            &override_file,
+            &["config", "--quiet"],
+        )?,
     )
     .await?;
-    run_log_in_dir(
+    run_log_in_dir_env(
         &cfg,
         deployment_id,
         project_dir,
+        &compose_env_refs,
         "docker",
         &compose_invocation(
             &project,

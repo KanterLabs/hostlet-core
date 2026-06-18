@@ -75,6 +75,31 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let image = format!("hostlet/{app_name}:{deployment_id}");
     let project_dir = safe_project_dir(&checkout, root_directory).await?;
     if p.get("runtime_kind").and_then(|v| v.as_str()) == Some("compose") {
+        // Managed-add-ons stacks set the web service to `image:
+        // ${HOSTLET_WEB_IMAGE}`, so the repo is built with the normal pipeline
+        // and the resulting image is interpolated into compose. Bring-your-own
+        // compose (no marker) builds its own services and skips this.
+        let web_image_marker = format!("${{{}}}", hostlet_contracts::compose::WEB_IMAGE_ENV);
+        let needs_web_build = p
+            .pointer("/runtime_config/generatedCompose/compose")
+            .and_then(|value| value.as_str())
+            .is_some_and(|compose| compose.contains(&web_image_marker));
+        let web_image = if needs_web_build {
+            build_image(
+                &cfg,
+                deployment_id,
+                &app_name,
+                &image,
+                &project_dir,
+                port,
+                &p,
+                git_sync_duration_ms,
+            )
+            .await?;
+            Some(image.clone())
+        } else {
+            None
+        };
         return deploy_compose(
             cfg,
             p.clone(),
@@ -87,6 +112,7 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
             domain,
             health_path,
             git_sync_duration_ms,
+            web_image.as_deref(),
         )
         .await;
     }

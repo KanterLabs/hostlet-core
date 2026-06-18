@@ -4,7 +4,7 @@ use super::request_context_or_response;
 pub async fn create_app(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<CreateApp>,
+    Json(mut body): Json<CreateApp>,
 ) -> impl IntoResponse {
     let context = match request_context_or_response(&headers, &state).await {
         Ok(context) => context,
@@ -60,7 +60,7 @@ pub async fn create_app(
         )
             .into_response();
     }
-    let runtime_kind = match clean_runtime_kind(body.runtime_kind.as_deref()) {
+    let mut runtime_kind = match clean_runtime_kind(body.runtime_kind.as_deref()) {
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
@@ -68,7 +68,7 @@ pub async fn create_app(
         Ok(value) => value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    let runtime_config = body.runtime_config.unwrap_or_else(|| serde_json::json!({}));
+    let mut runtime_config = body.runtime_config.unwrap_or_else(|| serde_json::json!({}));
     if let Err(message) = clean_runtime_config(&runtime_config) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
@@ -125,6 +125,27 @@ pub async fn create_app(
             "health path must start with / and cannot contain control characters",
         )
             .into_response();
+    }
+    // Resolve managed add-ons (Postgres/Redis chosen at create time) into a
+    // generated multi-service Compose runtime + the env to persist. Generated
+    // secrets land in the app's encrypted env; the generated compose references
+    // them via `${VAR}` interpolation, so nothing secret is stored in
+    // runtime_config. The added env vars are validated alongside the rest below.
+    match super::addons::resolve_managed_addons(
+        &runtime_config,
+        "web",
+        body.container_port as u16,
+        &health_path,
+    ) {
+        Ok(Some(resolved)) => {
+            runtime_kind = "compose".to_string();
+            runtime_config = resolved.runtime_config;
+            for (key, value) in resolved.env {
+                body.env.push(EnvVar { key, value });
+            }
+        }
+        Ok(None) => {}
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     }
     let root_directory = clean_optional(body.root_directory).unwrap_or_else(|| ".".into());
     if !valid_root_directory(&root_directory) {
