@@ -10,15 +10,19 @@ use hostlet_contracts::compose::{add_on_catalog, generate_compose, AddOn};
 
 /// The outcome of resolving requested add-ons: the `runtime_config` with
 /// `generatedCompose` filled in, and the `(key, value)` env pairs to persist.
-pub(super) struct ResolvedAddons {
-    pub(super) runtime_config: serde_json::Value,
-    pub(super) env: Vec<(String, String)>,
+///
+/// `pub(crate)` so both the self-hosted create handler and the Hostlet Cloud
+/// overlay's create handler share one resolver instead of duplicating the
+/// secret-generation + compose-generation logic.
+pub(crate) struct ResolvedAddons {
+    pub(crate) runtime_config: serde_json::Value,
+    pub(crate) env: Vec<(String, String)>,
 }
 
 /// Resolves `runtime_config.compose.addOns` into a generated multi-service
 /// runtime. Returns `Ok(None)` when no add-ons are requested. Errors are
 /// user-facing 400 messages.
-pub(super) fn resolve_managed_addons(
+pub(crate) fn resolve_managed_addons(
     runtime_config: &serde_json::Value,
     web_service: &str,
     port: u16,
