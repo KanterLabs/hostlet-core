@@ -464,6 +464,96 @@ JSON
   expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${railpack_app_id}"
 }
 
+# deploy_managed_addons_app: a normal web app with a Hostlet-managed Postgres
+# add-on. Create resolves it into a generated multi-service compose runtime; the
+# agent builds the web image with Railpack, interpolates it + the generated
+# secret into compose, and runs the stack. Asserts the per-service topology, that
+# the backing Postgres is unpublished, that the web app actually reaches Postgres
+# over the internal network via the injected DATABASE_URL, and that the secret
+# never leaks into the deploy logs.
+deploy_managed_addons_app() {
+  local payload app_payload app_id detail published_port logs db_status project delete_payload delete_job
+  payload="$(cat <<JSON
+{
+  "name":"ci-addons-postgres",
+  "repo_full_name":"${APP_REPO_FULL}",
+  "branch":"main",
+  "server_id":null,
+  "container_port":3000,
+  "health_path":"/health",
+  "domain":"",
+  "runtime_kind":"single",
+  "hostlet_config_path":"hostlet.yml",
+  "runtime_config":{"compose":{"addOns":[{"key":"postgres"}]}},
+  "root_directory":".",
+  "memory_limit_mb":512,
+  "cpu_limit":0.5,
+  "public_exposure":false,
+  "auto_deploy":false,
+  "deploy_after_create":false,
+  "env":[]
+}
+JSON
+)"
+  app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps" --data "${payload}")"
+  app_id="$(printf '%s' "${app_payload}" | json_get id)"
+  CREATED_APP_IDS+=("${app_id}")
+  project="hostlet-app-${app_id//-/}"
+
+  # Create switched the app to a compose runtime with a generated stack.
+  detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+  printf '%s' "${detail}" | json_get runtimeKind | grep -q '^compose$'
+
+  deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+  deployment_id="$(printf '%s' "${deploy_payload}" | json_get deploymentId)"
+  wait_deployment_status "${deployment_id}"
+
+  detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+  published_port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
+  curl -fsS "http://127.0.0.1:${published_port}/health" | grep -q '^ok$'
+
+  # Two services reported: web (routed) + postgres (backing).
+  printf '%s' "${detail}" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+roles = {s["name"]: s["role"] for s in (d.get("services") or [])}
+assert roles.get("web") == "web", roles
+assert roles.get("postgres") == "backing", roles
+'
+
+  # The backing Postgres container has no host port; the web service publishes to loopback.
+  if docker ps --filter "label=com.docker.compose.project=${project}" --filter "label=hostlet.role=backing" --format '{{.Ports}}' | grep -q '\->'; then
+    echo "managed add-on backing service published a host port" >&2
+    exit 1
+  fi
+  docker ps --filter "label=com.docker.compose.project=${project}" --filter "label=hostlet.role=web" --format '{{.Ports}}' | grep -q '127.0.0.1'
+
+  # The web app reaches Postgres via the injected DATABASE_URL (give PG time to accept).
+  db_status=""
+  for _ in $(seq 1 30); do
+    db_status="$(curl -fsS "http://127.0.0.1:${published_port}/db" || true)"
+    if [ "${db_status}" = "db-ok" ]; then break; fi
+    sleep 2
+  done
+  if [ "${db_status}" != "db-ok" ]; then
+    echo "web app could not reach managed Postgres via DATABASE_URL (last: ${db_status})" >&2
+    exit 1
+  fi
+
+  # The rendered connection secret never leaked into the deploy logs.
+  logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
+  if printf '%s' "${logs}" | grep -Eq 'postgres://postgres:[^@[:space:]]+@postgres'; then
+    echo "managed add-on deploy logs leaked the rendered DATABASE_URL" >&2
+    exit 1
+  fi
+
+  delete_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${app_id}")"
+  delete_job="$(printf '%s' "${delete_payload}" | json_get jobId)"
+  wait_job_status "${delete_job}"
+  expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}"
+  echo "managed add-ons (web + Postgres) E2E passed"
+}
+
 # ---------------------------------------------------------------------------
 # First-run setup + authenticate a CI user.
 # ---------------------------------------------------------------------------
@@ -664,10 +754,17 @@ delete_job="$(printf '%s' "${delete_payload}" | json_get jobId)"
 wait_job_status "${delete_job}"
 expect_status 404 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}"
 
-for fixture in "${RAILPACK_FIXTURES[@]}"; do
-  IFS=: read -r fixture_name repo_name health_path expected <<<"${fixture}"
-  deploy_railpack_fixture "${fixture_name}" "${repo_name}" "${health_path}" "${expected}"
-done
+# HOSTLET_E2E_SKIP_RAILPACK_FIXTURES=1 runs a focused subset (node + compose +
+# add-ons) without the seven per-language Railpack fixture deploys. CI leaves it
+# unset so the full matrix runs.
+if [ "${HOSTLET_E2E_SKIP_RAILPACK_FIXTURES:-}" = "1" ]; then
+  echo "skipping Railpack fixture deploys (HOSTLET_E2E_SKIP_RAILPACK_FIXTURES=1)"
+else
+  for fixture in "${RAILPACK_FIXTURES[@]}"; do
+    IFS=: read -r fixture_name repo_name health_path expected <<<"${fixture}"
+    deploy_railpack_fixture "${fixture_name}" "${repo_name}" "${health_path}" "${expected}"
+  done
+fi
 
 compose_payload="$(cat <<JSON
 {
@@ -732,5 +829,8 @@ if docker network ls -q --filter "label=com.docker.compose.project=hostlet-app-$
   echo "compose project network leaked after app delete" >&2
   exit 1
 fi
+
+# Managed add-ons (web app + Hostlet-managed Postgres) — the Phase 1b path.
+deploy_managed_addons_app
 
 echo "self-hosted deploy E2E passed"

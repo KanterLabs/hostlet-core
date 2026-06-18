@@ -249,6 +249,7 @@ pub(crate) async fn deploy_compose(
         compose_file,
         &override_file,
         web_service,
+        &compose_env_refs,
     )
     .await?;
     let internal_port = docker_published_port(&container, port).await?;
@@ -271,10 +272,11 @@ pub(crate) async fn deploy_compose(
         match wait_health(&cfg, deployment_id, &container, internal_port, health_path).await {
             Ok(duration) => duration,
             Err(err) => {
-                let _ = run_log_in_dir(
+                let _ = run_log_in_dir_env(
                     &cfg,
                     deployment_id,
                     project_dir,
+                    &compose_env_refs,
                     "docker",
                     &compose_invocation(
                         &project,
@@ -380,6 +382,7 @@ pub(crate) async fn deploy_compose(
         &override_file,
         &compose_text,
         web_service,
+        &compose_env_refs,
     )
     .await;
     if let Some(web) = services.iter_mut().find(|svc| svc.name == *web_service) {
@@ -602,16 +605,6 @@ pub(crate) async fn run_log(
     args: &[&str],
 ) -> anyhow::Result<()> {
     run_log_streamed(cfg, deployment_id, None, &[], bin, args).await
-}
-
-pub(crate) async fn run_log_in_dir(
-    cfg: &Config,
-    deployment_id: Uuid,
-    dir: &Path,
-    bin: &str,
-    args: &[&str],
-) -> anyhow::Result<()> {
-    run_log_streamed(cfg, deployment_id, Some(dir), &[], bin, args).await
 }
 
 pub(crate) async fn run_log_in_dir_env(

@@ -35,9 +35,14 @@ pub(crate) async fn compose_service_container(
     compose_file: &Path,
     override_file: &Path,
     service: &str,
+    envs: &[(&str, &str)],
 ) -> anyhow::Result<String> {
-    let output = command_output_in_dir(
+    // `docker compose ps` re-parses the compose files, so it needs the same
+    // `${VAR}` interpolation environment as `up` — otherwise a generated stack's
+    // `image: ${HOSTLET_WEB_IMAGE}` resolves to empty and the command fails.
+    let output = command_output_in_dir_env(
         dir,
+        envs,
         "docker",
         &[
             "compose",
@@ -95,14 +100,21 @@ pub(crate) async fn compose_all_services(
     override_file: &Path,
     compose_text: &str,
     web_service: &str,
+    envs: &[(&str, &str)],
 ) -> Vec<hostlet_contracts::DeploymentServiceReport> {
     let declared = hostlet_contracts::compose::parse_compose_services(compose_text, web_service);
     let mut services = Vec::with_capacity(declared.len());
     for summary in declared {
-        let container =
-            compose_service_container(dir, project, compose_file, override_file, &summary.name)
-                .await
-                .ok();
+        let container = compose_service_container(
+            dir,
+            project,
+            compose_file,
+            override_file,
+            &summary.name,
+            envs,
+        )
+        .await
+        .ok();
         let (image_tag, status) = match &container {
             Some(name) => inspect_container_facts(name).await,
             None => (None, None),
@@ -154,14 +166,18 @@ async fn inspect_container_facts(name: &str) -> (Option<String>, Option<String>)
     (image, status)
 }
 
-pub(crate) async fn command_output_in_dir(
+pub(crate) async fn command_output_in_dir_env(
     dir: &Path,
+    envs: &[(&str, &str)],
     bin: &str,
     args: &[&str],
     timeout: Duration,
 ) -> anyhow::Result<Output> {
     let mut cmd = Command::new(bin);
     cmd.current_dir(dir).args(args).kill_on_drop(true);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     match tokio::time::timeout(timeout, cmd.output()).await {
         Ok(output) => output.with_context(|| format!("failed to start {bin}")),
         Err(_) => bail!("{bin} timed out after {} seconds", timeout.as_secs()),
