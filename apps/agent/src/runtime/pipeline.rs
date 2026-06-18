@@ -522,7 +522,11 @@ async fn run_app_container(
     let port_map = docker_port_map(port as u16);
     let data_volume = app_data_volume(app_id);
     ensure_app_data_volume(cfg, deployment_id, &data_volume).await?;
-    let data_mount = format!("type=volume,source={data_volume},target=/data");
+    // Mount the managed volume where the app declares it persists data (e.g.
+    // /app/data) instead of the default /data, so apps that aren't run as compose
+    // on Cloud still persist + report storage. Falls back to /data.
+    let data_mount_target = data_mount_path(p);
+    let data_mount = format!("type=volume,source={data_volume},target={data_mount_target}");
     let mut args = vec![
         "run",
         "-d",

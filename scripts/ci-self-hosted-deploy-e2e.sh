@@ -613,6 +613,7 @@ create_payload="$(cat <<JSON
   "runtime_kind":"single",
   "hostlet_config_path":"hostlet.yml",
   "root_directory":".",
+  "runtime_config":{"dataMountPath":"/app/data"},
   "memory_limit_mb":512,
   "cpu_limit":0.5,
   "public_exposure":false,
@@ -642,6 +643,19 @@ published_port="$(printf '%s' "${app_detail}" | json_get currentDeployment.publi
 container_name="hostlet-app-${app_id}-${deployment_id}"
 wait_published_health_ok "${published_port}" "/health" "${container_name}"
 curl -fsS "http://127.0.0.1:${published_port}/" | grep -q 'hostlet-ci-v1-v1'
+
+# The single-service managed volume honors the declared data path: it mounts at
+# /app/data (runtime_config.dataMountPath) instead of the default /data, so apps
+# that persist to a non-/data dir keep their data on the managed volume.
+data_mount="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Type}} {{.Name}}{{end}}{{end}}' "${container_name}")"
+if ! printf '%s' "${data_mount}" | grep -q "^volume hostlet-app-data-${app_id}$"; then
+  echo "expected managed volume hostlet-app-data-${app_id} mounted at /app/data, got '${data_mount}'" >&2
+  exit 1
+fi
+if docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "${container_name}" | grep -qx "/data"; then
+  echo "managed volume still mounted at /data despite dataMountPath=/app/data" >&2
+  exit 1
+fi
 
 logs_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
 printf '%s' "${logs_payload}" | grep -q 'Health check passed'

@@ -115,6 +115,52 @@ pub fn is_mappable_relative_bind(source: &str) -> bool {
         && !source.split('/').any(|part| part == "..")
 }
 
+/// Validates an absolute container mount path (e.g. `/app/data`): absolute, at
+/// most 256 chars, not the bare root `/`, no `..` segment, and free of control
+/// characters and backslashes. Used to vet the data-volume mount path before the
+/// agent mounts a managed volume there.
+pub fn valid_container_mount_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value != "/"
+        && value.len() <= 256
+        && !value.split('/').any(|part| part == "..")
+        && !value.chars().any(|c| c.is_control() || c == '\\')
+}
+
+/// Detects the container path an app declares for persistent data, from the
+/// first relative host-bind in its compose (e.g. `./data:/app/data` → `/app/data`).
+/// Cloud deploys such apps single-service (dropping the compose), so this lets the
+/// single-service managed volume mount where the app actually writes instead of
+/// the default `/data`. Returns `None` when no valid declared path is found.
+pub fn detect_data_mount_path(compose_yaml: &str) -> Option<String> {
+    parse_compose_services(compose_yaml, "")
+        .iter()
+        .flat_map(|service| service.volumes.iter())
+        .find_map(|volume| {
+            let mut parts = volume.splitn(3, ':');
+            let source = parts.next()?;
+            let target = parts.next()?;
+            (is_mappable_relative_bind(source) && valid_container_mount_path(target))
+                .then(|| target.to_string())
+        })
+}
+
+/// Merges `runtimeConfig.dataMountPath` onto an inspection payload (preserving any
+/// existing runtimeConfig), so the create handler stores it and the agent mounts
+/// the single-service managed volume at this path.
+pub fn with_data_mount_path(mut inspection: serde_json::Value, path: &str) -> serde_json::Value {
+    let Some(map) = inspection.as_object_mut() else {
+        return inspection;
+    };
+    let runtime_config = map
+        .entry("runtimeConfig")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(rc) = runtime_config.as_object_mut() {
+        rc.insert("dataMountPath".to_string(), serde_json::json!(path));
+    }
+    inspection
+}
+
 /// Parses a Compose file into display summaries, tagging `web_service` as the
 /// web role. Returns an empty vec for unparseable YAML or a missing `services:`
 /// block — callers treat that as "no preview available", not an error.
@@ -596,6 +642,49 @@ services:
         assert!(compose_subset_warnings(absolute, "web")
             .iter()
             .any(|w| w.contains("host bind mount")));
+    }
+
+    #[test]
+    fn detects_declared_data_mount_path_from_relative_bind() {
+        let compose = "services:\n  web:\n    build: .\n    volumes:\n      - ./data:/app/data\n";
+        assert_eq!(
+            detect_data_mount_path(compose).as_deref(),
+            Some("/app/data")
+        );
+        // A named volume or an absolute bind is not a declared app data path.
+        assert_eq!(
+            detect_data_mount_path("services:\n  web:\n    volumes:\n      - app-data:/data\n"),
+            None
+        );
+        assert_eq!(
+            detect_data_mount_path("services:\n  web:\n    volumes:\n      - /etc:/host-etc\n"),
+            None
+        );
+        assert_eq!(
+            detect_data_mount_path("services:\n  web:\n    build: .\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn container_mount_path_validation() {
+        assert!(valid_container_mount_path("/app/data"));
+        assert!(valid_container_mount_path("/data"));
+        assert!(!valid_container_mount_path("/"));
+        assert!(!valid_container_mount_path("app/data"));
+        assert!(!valid_container_mount_path("/app/../etc"));
+        assert!(!valid_container_mount_path("/app\\data"));
+    }
+
+    #[test]
+    fn with_data_mount_path_merges_into_runtime_config() {
+        let inspection = serde_json::json!({"runtimeKind": "single", "runtimeConfig": {"foo": 1}});
+        let out = with_data_mount_path(inspection, "/app/data");
+        assert_eq!(
+            out.pointer("/runtimeConfig/dataMountPath").unwrap(),
+            "/app/data"
+        );
+        assert_eq!(out.pointer("/runtimeConfig/foo").unwrap(), 1);
     }
 
     #[test]

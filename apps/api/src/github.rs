@@ -14,6 +14,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use hostlet_contracts::compose::{detect_data_mount_path, with_data_mount_path};
 use hostlet_contracts::{parse_github_repo, valid_commit_sha};
 use inference::{
     compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
@@ -325,7 +326,8 @@ async fn inspect_repo(
     // images are never run on a shared host) and feed the same
     // `runtime_config.compose.addOns` the create handler resolves into a
     // generated multi-service stack.
-    let compose_addons = detect_compose_addons(state, repo, branch, token).await?;
+    let (compose_addons, data_mount_path) =
+        detect_compose_signals(state, repo, branch, token).await?;
 
     if let Some(package_text) = github_file_text(state, repo, branch, "package.json", token).await?
     {
@@ -353,13 +355,19 @@ async fn inspect_repo(
         );
         let mut detected = infer_service_addons(&package_json_dependencies(&package_text));
         detected.merge(&compose_addons);
-        return Ok(with_detected_services(base, &detected));
+        return Ok(apply_data_mount_path(
+            with_detected_services(base, &detected),
+            data_mount_path.as_deref(),
+        ));
     }
 
     if let Some(contents) = dockerfile {
         let inference = infer_dockerfile(&contents);
         let base = dockerfile_inspection(repo, branch, default_branch, inference);
-        return Ok(with_detected_services(base, &compose_addons));
+        return Ok(apply_data_mount_path(
+            with_detected_services(base, &compose_addons),
+            data_mount_path.as_deref(),
+        ));
     }
 
     for (path, language, is_manifest) in [
@@ -377,30 +385,45 @@ async fn inspect_repo(
                 DetectedServices::default()
             };
             detected.merge(&compose_addons);
-            return Ok(with_detected_services(base, &detected));
+            return Ok(apply_data_mount_path(
+                with_detected_services(base, &detected),
+                data_mount_path.as_deref(),
+            ));
         }
     }
 
     Ok(unknown_inspection(repo, branch, default_branch))
 }
 
-/// Reads a repo's bare docker-compose file (one without a `hostlet.yml`) as a
-/// signal of which managed backing services the app needs, returning the catalog
-/// add-ons its service images map to. An absent file yields no add-ons. The
-/// repo's compose is never run on a shared host — only its declared service
-/// images inform which vetted catalog services to provision.
-async fn detect_compose_addons(
+/// Applies a detected data mount path to an inspection (no-op when none/invalid),
+/// so the single-service managed volume mounts where the app declares it persists.
+fn apply_data_mount_path(inspection: Value, path: Option<&str>) -> Value {
+    match path {
+        Some(path) => with_data_mount_path(inspection, path),
+        None => inspection,
+    }
+}
+
+/// Reads a repo's bare docker-compose file (one without a `hostlet.yml`) for two
+/// single-service signals: the managed backing add-ons its service images map to,
+/// and the container path it declares for persistent data (`./data:/app/data` →
+/// `/app/data`). The repo's compose is never run on a shared host — only these
+/// signals inform the generated stack + where the managed data volume mounts.
+async fn detect_compose_signals(
     state: &AppState,
     repo: &str,
     branch: &str,
     token: Option<&str>,
-) -> anyhow::Result<DetectedServices> {
+) -> anyhow::Result<(DetectedServices, Option<String>)> {
     for path in ["compose.yaml", "docker-compose.yml"] {
         if let Some(compose_text) = github_file_text(state, repo, branch, path, token).await? {
-            return Ok(infer_addons_from_compose(&compose_text));
+            return Ok((
+                infer_addons_from_compose(&compose_text),
+                detect_data_mount_path(&compose_text),
+            ));
         }
     }
-    Ok(DetectedServices::default())
+    Ok((DetectedServices::default(), None))
 }
 
 async fn github_file_text(

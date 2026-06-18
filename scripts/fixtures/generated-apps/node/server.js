@@ -49,8 +49,12 @@ http.createServer((req, res) => {
   }
   let persisted = "no-data";
   try {
-    fs.mkdirSync("/data", { recursive: true });
-    const marker = "/data/hostlet-ci-version";
+    // Persist to HOSTLET_DATA_DIR (where Hostlet mounts the managed volume —
+    // /data by default, or the app's declared dataMountPath), proving the volume
+    // survives a redeploy wherever it is mounted.
+    const dataDir = process.env.HOSTLET_DATA_DIR || "/data";
+    fs.mkdirSync(dataDir, { recursive: true });
+    const marker = `${dataDir}/hostlet-ci-version`;
     if (!fs.existsSync(marker)) fs.writeFileSync(marker, version);
     persisted = fs.readFileSync(marker, "utf8");
   } catch {

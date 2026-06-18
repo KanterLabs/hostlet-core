@@ -410,16 +410,30 @@ pub(crate) fn env_pairs_has_key(pairs: &[String], key: &str) -> bool {
         .any(|(existing, _)| existing == key)
 }
 
+/// The container path where the single-service managed data volume is mounted.
+/// Apps that declare a persistent data path in their compose (e.g.
+/// `./data:/app/data`) get the volume there; everything else defaults to `/data`.
+/// An invalid declared path safely falls back to `/data`. Single source of truth
+/// for both the volume mount target and the `HOSTLET_DATA_DIR`/`DATA_DIR` env.
+pub(crate) fn data_mount_path(p: &Value) -> String {
+    p.pointer("/runtime_config/dataMountPath")
+        .and_then(|v| v.as_str())
+        .filter(|path| hostlet_contracts::compose::valid_container_mount_path(path))
+        .unwrap_or("/data")
+        .to_string()
+}
+
 pub(crate) fn runtime_env_args(p: &Value, port: i64) -> Vec<String> {
     let mut pairs = env_args(p);
     if !env_pairs_has_key(&pairs, "PORT") {
         pairs.push(format!("PORT={port}"));
     }
+    let data_dir = data_mount_path(p);
     if !env_pairs_has_key(&pairs, "HOSTLET_DATA_DIR") {
-        pairs.push("HOSTLET_DATA_DIR=/data".into());
+        pairs.push(format!("HOSTLET_DATA_DIR={data_dir}"));
     }
     if !env_pairs_has_key(&pairs, "DATA_DIR") {
-        pairs.push("DATA_DIR=/data".into());
+        pairs.push(format!("DATA_DIR={data_dir}"));
     }
     pairs
 }
@@ -890,5 +904,25 @@ services:
         .unwrap();
         assert!(a.contains("hostlet-app-data"));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn data_mount_path_honors_declared_path_and_defaults_to_data() {
+        assert_eq!(data_mount_path(&serde_json::json!({})), "/data");
+        assert_eq!(
+            data_mount_path(&serde_json::json!({"runtime_config": {"dataMountPath": "/app/data"}})),
+            "/app/data"
+        );
+        // An invalid declared path safely falls back to /data.
+        assert_eq!(
+            data_mount_path(
+                &serde_json::json!({"runtime_config": {"dataMountPath": "relative/path"}})
+            ),
+            "/data"
+        );
+        assert_eq!(
+            data_mount_path(&serde_json::json!({"runtime_config": {"dataMountPath": "/"}})),
+            "/data"
+        );
     }
 }
