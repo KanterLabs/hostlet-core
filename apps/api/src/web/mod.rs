@@ -29,7 +29,7 @@ mod validation;
 
 pub use app_delete::{delete_app, reconcile_completed_delete_jobs};
 pub use app_env::{app_env_vars, delete_app_env_var, set_app_env_var};
-pub use apps::{create_app, get_app, list_apps, update_app};
+pub use apps::{addons_catalog, create_app, get_app, list_apps, update_app};
 pub use audit::audit_events;
 pub use cleanup::{cleanup_preview, run_cleanup};
 pub use dns::cloudflare::cloudflare_status;

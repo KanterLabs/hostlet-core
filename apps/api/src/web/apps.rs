@@ -11,6 +11,12 @@ pub use update::update_app;
 
 pub(in crate::web) use request_auth::request_context_or_response;
 
+/// Returns the built-in managed add-on catalog (Postgres, Redis, …) so the
+/// create flow can offer an "Add service" picker. Public, self-hostable data.
+pub async fn addons_catalog() -> impl IntoResponse {
+    Json(hostlet_contracts::compose::add_on_catalog()).into_response()
+}
+
 pub async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let context = match customer_context(&headers, &state).await {
         Ok(context) => context,
