@@ -138,7 +138,7 @@ const CANDIDATES_CTE_BODY: &str = r#"SELECT d.id, d.container_name, d.image_tag,
   WHERE d.status = ANY($1)
      OR ($4::bigint > 0
          AND d.status IN ('failed','expired','cancelled')
-         AND COALESCE(d.finished_at,d.updated_at,d.created_at)
+         AND COALESCE(d.finished_at,d.created_at)
                >= now() - ($4::bigint * interval '1 hour'))"#;
 
 /// Keep predicate used in both the keep-list query and the stale-count's
@@ -188,7 +188,7 @@ const DEFAULT_CLEANUP_KEEP_FAILED_HOURS: i64 = 0;
 /// [`DEFAULT_CLEANUP_KEEP_FAILED_HOURS`] (disabled) when unset or invalid.
 ///
 /// When > 0, keeps containers/images of `failed`/`expired`/`cancelled`
-/// deployments whose `COALESCE(finished_at,updated_at,created_at)` is within
+/// deployments whose `COALESCE(finished_at,created_at)` is within
 /// that many hours, so failed tenants stay debuggable.  Honoured by all
 /// cleanup paths.  Valid range: `[0, 720]` (0 = disabled, 720 = 30 days).
 pub(crate) fn cleanup_keep_failed_hours() -> i64 {

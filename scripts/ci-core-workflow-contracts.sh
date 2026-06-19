@@ -84,6 +84,7 @@ assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'HOSTLET_RUNNER_DOCKER_DIS
 assert_contains "${ROOT}/scripts/ci-verify-runner-selftest.sh" 'STUB_DOCKER_FAIL=1'
 assert_contains "${ROOT}/scripts/ci-verify-runner-selftest.sh" 'HOSTLET_ALLOW_LOW_DOCKER_DISK=1'
 assert_not_contains "${ROOT}/scripts/backup.sh" '--single-transaction'
+assert_not_contains "${ROOT}/apps/api/src/cleanup.rs" 'd.updated_at'
 
 python3 - "${STAGING_WORKFLOW}" <<'PY'
 import re
