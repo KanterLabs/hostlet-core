@@ -1,6 +1,5 @@
 use crate::{
     auth::{current_user_id, request_context, RequestContext},
-    crypto::verify_token,
     deploy, github,
     state::AppState,
 };
@@ -12,7 +11,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use std::collections::HashSet;
 use uuid::Uuid;
 
 mod app_delete;
@@ -27,7 +25,8 @@ mod servers;
 mod system;
 mod validation;
 
-pub use app_delete::{delete_app, reconcile_completed_delete_jobs};
+pub use crate::update_checks::refresh_update_check_if_stale;
+pub use app_delete::{delete_app, finalize_delete_app_from_job, reconcile_completed_delete_jobs};
 pub use app_env::{app_env_vars, delete_app_env_var, set_app_env_var};
 pub use apps::{addons_catalog, create_app, get_app, list_apps, update_app};
 pub use audit::audit_events;
@@ -42,18 +41,23 @@ pub use jobs::{
 pub use servers::{create_server, list_servers, server_install_command};
 pub use system::{
     backup_metadata, operator_cleanup_preview, operator_run_cleanup, operator_status,
-    refresh_update_check_if_stale, system_update_check, system_version,
+    system_update_check, system_version,
 };
 
+pub(in crate::web) use crate::job_control::{
+    enqueue_interactive_agent_job, record_audit_event, AuditEventInput,
+};
+pub(in crate::web) use crate::serialization::{
+    audit_event_json, health_counts_json, health_event_json, resource_container,
+    resource_snapshot_json,
+};
 pub(in crate::web) use app_delete::{
     app_belongs_to_user, app_domain_in_use, compensate_failed_app_update_dns,
-    delete_created_app_row, finalize_delete_app_from_job,
+    delete_created_app_row,
 };
 pub(in crate::web) use cleanup::{cleanup_plan, run_cleanup_inner};
 pub(in crate::web) use dns::cloudflare::{delete_cloudflare_app_dns, ensure_cloudflare_app_dns};
 pub(in crate::web) use health::system_health_counts;
-pub(in crate::web) use jobs::enqueue_interactive_agent_job;
-pub(in crate::web) use system::domain_host;
 pub(in crate::web) use validation::*;
 
 /// Payload for creating a new app. Optional fields fall back to runtime/server
@@ -130,31 +134,4 @@ async fn customer_context(
     request_context(headers, state)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED.into_response())
-}
-
-struct AuditEventInput<'a> {
-    actor_type: &'a str,
-    actor_id: Option<String>,
-    event_type: &'a str,
-    app_id: Option<Uuid>,
-    deployment_id: Option<Uuid>,
-    job_id: Option<Uuid>,
-    metadata: serde_json::Value,
-}
-
-async fn record_audit_event(state: &AppState, event: AuditEventInput<'_>) {
-    let _ = sqlx::query(
-        "INSERT INTO audit_events
-           (actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(event.actor_type)
-    .bind(event.actor_id)
-    .bind(event.event_type)
-    .bind(event.app_id)
-    .bind(event.deployment_id)
-    .bind(event.job_id)
-    .bind(event.metadata)
-    .execute(&state.db)
-    .await;
 }

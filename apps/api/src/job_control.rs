@@ -1,5 +1,5 @@
 use crate::{deploy, state::AppState};
-use axum::{http::StatusCode, response::IntoResponse};
+use axum::{http::StatusCode, response::IntoResponse, Json};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -29,6 +29,96 @@ pub fn agent_job_visibility_predicate(user_param: usize, cloud_param: usize) -> 
           )
         "#
     )
+}
+
+/// Input for recording a structured audit event.
+pub struct AuditEventInput<'a> {
+    pub actor_type: &'a str,
+    pub actor_id: Option<String>,
+    pub event_type: &'a str,
+    pub app_id: Option<Uuid>,
+    pub deployment_id: Option<Uuid>,
+    pub job_id: Option<Uuid>,
+    pub metadata: serde_json::Value,
+}
+
+/// Records a structured audit event into the `audit_events` table.
+pub async fn record_audit_event(state: &AppState, event: AuditEventInput<'_>) {
+    let _ = sqlx::query(
+        "INSERT INTO audit_events
+           (actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    )
+    .bind(event.actor_type)
+    .bind(event.actor_id)
+    .bind(event.event_type)
+    .bind(event.app_id)
+    .bind(event.deployment_id)
+    .bind(event.job_id)
+    .bind(event.metadata)
+    .execute(&state.db)
+    .await;
+}
+
+/// Enqueues an interactive (non-deploy) agent job and returns a `202 Accepted`
+/// response carrying the new job ID, or `500` on failure.
+pub async fn enqueue_interactive_agent_job(
+    state: &AppState,
+    server_id: Uuid,
+    app_id: Uuid,
+    deployment_id: Option<Uuid>,
+    job_type: &str,
+    payload: serde_json::Value,
+) -> axum::response::Response {
+    match deploy::enqueue_agent_job(
+        state,
+        server_id,
+        Some(app_id),
+        deployment_id,
+        job_type,
+        payload,
+        20,
+    )
+    .await
+    {
+        Ok(job_id) => {
+            record_audit_event(
+                state,
+                AuditEventInput {
+                    actor_type: "owner",
+                    actor_id: None,
+                    event_type: &format!("{job_type}_requested"),
+                    app_id: Some(app_id),
+                    deployment_id,
+                    job_id: Some(job_id),
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"jobId": job_id})),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, app_id = %app_id, job_type, "failed to enqueue agent job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Marks an agent job as failed with the given summary message.
+pub async fn mark_agent_job_failed(state: &AppState, job_id: Uuid, failure: &str) {
+    let _ = sqlx::query(
+        "UPDATE agent_jobs
+         SET status='failed', failure_summary=$2, updated_at=now(), finished_at=now()
+         WHERE id=$1",
+    )
+    .bind(job_id)
+    .bind(failure)
+    .execute(&state.db)
+    .await;
 }
 
 pub async fn retry_agent_job(

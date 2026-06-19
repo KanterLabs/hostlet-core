@@ -76,52 +76,6 @@ pub async fn restart_app_container(
     .await
 }
 
-pub(in crate::web) async fn enqueue_interactive_agent_job(
-    state: &AppState,
-    server_id: Uuid,
-    app_id: Uuid,
-    deployment_id: Option<Uuid>,
-    job_type: &str,
-    payload: serde_json::Value,
-) -> axum::response::Response {
-    match deploy::enqueue_agent_job(
-        state,
-        server_id,
-        Some(app_id),
-        deployment_id,
-        job_type,
-        payload,
-        20,
-    )
-    .await
-    {
-        Ok(job_id) => {
-            record_audit_event(
-                state,
-                AuditEventInput {
-                    actor_type: "owner",
-                    actor_id: None,
-                    event_type: &format!("{job_type}_requested"),
-                    app_id: Some(app_id),
-                    deployment_id,
-                    job_id: Some(job_id),
-                    metadata: serde_json::json!({}),
-                },
-            )
-            .await;
-            (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({"jobId": job_id})),
-            )
-                .into_response()
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, app_id = %app_id, job_type, "failed to enqueue agent job");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
 pub async fn agent_job_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -161,28 +115,6 @@ pub async fn agent_job_status(
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// Resolves the reported status for a job row, performing the deferred
-/// finalization for `delete_app` jobs. A `delete_app` job that the agent
-/// reports as `success` is only truly finished once the app row has been
-/// removed; until then we keep reporting `running` so callers keep polling.
-async fn resolve_job_status(state: &AppState, id: Uuid, row: &sqlx::postgres::PgRow) -> String {
-    let status = row.get::<String, _>("status");
-    let is_pending_delete = status == "success"
-        && row.get::<String, _>("job_type") == "delete_app"
-        && row.get::<Option<Uuid>, _>("app_id").is_some();
-    if !is_pending_delete {
-        return status;
-    }
-    let finalized = finalize_delete_app_from_job(state, id)
-        .await
-        .unwrap_or(false);
-    if finalized {
-        status
-    } else {
-        "running".into()
     }
 }
 
@@ -264,4 +196,30 @@ pub async fn cancel_agent_job(
         Err(response) => return response,
     };
     crate::job_control::cancel_agent_job(&state, context.user_id, id, false).await
+}
+
+/// Resolves the reported status for a job row, performing the deferred
+/// finalization for `delete_app` jobs. A `delete_app` job the agent reports as
+/// `success` is only truly finished once the app row has been removed; until
+/// then we keep reporting `running` so callers keep polling.
+///
+/// Lives here rather than in `job_control` because it calls the web-layer
+/// `finalize_delete_app_from_job`, which the Hostlet Cloud overlay forks — a
+/// shared non-web module must not depend on the overlay-replaced web layer.
+async fn resolve_job_status(state: &AppState, id: Uuid, row: &sqlx::postgres::PgRow) -> String {
+    let status = row.get::<String, _>("status");
+    let is_pending_delete = status == "success"
+        && row.get::<String, _>("job_type") == "delete_app"
+        && row.get::<Option<Uuid>, _>("app_id").is_some();
+    if !is_pending_delete {
+        return status;
+    }
+    let finalized = finalize_delete_app_from_job(state, id)
+        .await
+        .unwrap_or(false);
+    if finalized {
+        status
+    } else {
+        "running".into()
+    }
 }

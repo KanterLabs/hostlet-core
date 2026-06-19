@@ -7,38 +7,11 @@ pub(in crate::web) use serialization::{app_json, health_json};
 // Re-export the contract-level validators directly so callers in `crate::web`
 // can use them by name without a hand-written passthrough wrapper per function.
 pub(in crate::web) use hostlet_contracts::{
-    app_slug, clean_command, clean_optional, clean_packaging_strategy, clean_runtime_kind,
-    valid_branch, valid_domain, valid_env_key, valid_env_value, valid_health_path, valid_hostname,
-    valid_repo_full_name, valid_root_directory,
+    app_slug, clean_command, clean_hostlet_config_path, clean_optional, clean_packaging_strategy,
+    clean_runtime_config, clean_runtime_kind, domain_host, valid_app_name, valid_branch,
+    valid_cpu_limit, valid_domain, valid_env_key, valid_health_path, valid_hostname,
+    valid_memory_limit, valid_repo_full_name, valid_root_directory,
 };
-
-pub(in crate::web) fn clean_runtime_config(value: &serde_json::Value) -> Result<(), &'static str> {
-    if !value.is_object() {
-        return Err("runtime config must be an object");
-    }
-    if value.to_string().len() > 32_000 {
-        return Err("runtime config is too large");
-    }
-    Ok(())
-}
-
-pub(in crate::web) fn valid_app_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 80
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' '))
-}
-
-pub(in crate::web) fn valid_memory_limit(value: Option<i32>) -> bool {
-    value.map(|v| (64..=262_144).contains(&v)).unwrap_or(true)
-}
-
-pub(in crate::web) fn valid_cpu_limit(value: Option<f64>) -> bool {
-    value
-        .map(|v| v.is_finite() && (0.1..=128.0).contains(&v))
-        .unwrap_or(true)
-}
 
 pub(in crate::web) fn default_domain_pattern(state: &AppState) -> Option<String> {
     state
@@ -115,31 +88,5 @@ pub(in crate::web) fn reserved_public_domain_label(label: &str) -> bool {
 }
 
 pub(in crate::web) fn validate_env_vars(env: &[EnvVar]) -> Result<(), &'static str> {
-    let mut keys = HashSet::new();
-    for ev in env {
-        if !valid_env_key(&ev.key) {
-            return Err("invalid env var key");
-        }
-        if !valid_env_value(&ev.value) {
-            return Err("env var value is too large");
-        }
-        if !keys.insert(ev.key.as_str()) {
-            return Err("env var keys must be unique");
-        }
-    }
-    Ok(())
-}
-
-pub(in crate::web) fn clean_hostlet_config_path(
-    value: Option<&str>,
-) -> Result<String, &'static str> {
-    let value = value
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or("hostlet.yml");
-    if valid_root_directory(value) && (value.ends_with(".yml") || value.ends_with(".yaml")) {
-        Ok(value.to_string())
-    } else {
-        Err("Hostlet config path must be a relative .yml or .yaml file")
-    }
+    hostlet_contracts::validate_env_pairs(env.iter().map(|ev| (ev.key.as_str(), ev.value.as_str())))
 }

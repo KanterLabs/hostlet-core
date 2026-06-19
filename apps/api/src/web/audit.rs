@@ -4,21 +4,6 @@ use super::*;
 /// meant as a recent-activity feed rather than a full export.
 const AUDIT_EVENT_LIMIT: i64 = 200;
 
-/// Project one `audit_events` row into the camelCase JSON shape the API returns.
-fn audit_event_json(row: sqlx::postgres::PgRow) -> serde_json::Value {
-    serde_json::json!({
-        "id": row.get::<Uuid, _>("id"),
-        "actorType": row.get::<String, _>("actor_type"),
-        "actorId": row.get::<Option<String>, _>("actor_id"),
-        "eventType": row.get::<String, _>("event_type"),
-        "appId": row.get::<Option<Uuid>, _>("app_id"),
-        "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
-        "jobId": row.get::<Option<Uuid>, _>("job_id"),
-        "metadata": row.get::<serde_json::Value, _>("metadata_json"),
-        "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-    })
-}
-
 pub async fn audit_events(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let context = match customer_context(&headers, &state).await {
         Ok(context) => context,

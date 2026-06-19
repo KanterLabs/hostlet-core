@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub mod compose;
 pub mod crypto;
 mod inference;
+mod validation;
 
 pub use inference::{
     compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
@@ -13,6 +14,10 @@ pub use inference::{
     manifest_dependency_tokens, node_inspection, package_json_dependencies, railpack_inspection,
     unknown_inspection, with_detected_services, DetectedServices, DockerfileInference,
     PackageInference,
+};
+pub use validation::{
+    clean_hostlet_config_path, clean_runtime_config, domain_host, valid_app_name, valid_cpu_limit,
+    valid_memory_limit, validate_env_pairs,
 };
 
 /// Defines a `snake_case` status enum whose wire string is shared by serde, the

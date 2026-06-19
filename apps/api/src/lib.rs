@@ -5,16 +5,21 @@ pub mod cleanup;
 pub mod crypto;
 pub mod deploy;
 pub mod deployment_policy;
+pub mod device_flow;
 pub mod env;
 pub mod github;
 pub mod job_control;
+pub mod operator;
+pub mod password;
 pub mod policies;
 pub mod rate_limit;
 pub mod runtime_recovery;
 pub mod screenshots;
+pub mod serialization;
 pub mod server_capacity;
 pub mod state;
 pub mod storage;
+pub mod update_checks;
 pub mod web;
 
 use axum::{

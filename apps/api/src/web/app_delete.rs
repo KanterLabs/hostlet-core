@@ -157,10 +157,7 @@ async fn close_public_app_dns(state: &AppState, id: Uuid, domain: &str) -> Resul
     })
 }
 
-pub(in crate::web) async fn finalize_delete_app_from_job(
-    state: &AppState,
-    job_id: Uuid,
-) -> anyhow::Result<bool> {
+pub async fn finalize_delete_app_from_job(state: &AppState, job_id: Uuid) -> anyhow::Result<bool> {
     let row = sqlx::query(
         "SELECT app_id,payload_json FROM agent_jobs WHERE id=$1 AND job_type='delete_app' AND status='success'",
     )
@@ -211,7 +208,7 @@ pub(in crate::web) async fn finalize_delete_app_from_job(
     if public_exposure {
         if let Err(err) = delete_cloudflare_app_dns(state, app_id, &domain).await {
             tracing::warn!(error = %err, domain = %domain, "failed to remove public tunnel DNS while deleting app");
-            mark_agent_job_failed(state, job_id, &err.to_string()).await;
+            crate::job_control::mark_agent_job_failed(state, job_id, &err.to_string()).await;
             return Err(err);
         }
     }
@@ -233,12 +230,17 @@ pub(in crate::web) async fn finalize_delete_app_from_job(
             Ok(true)
         }
         Ok(false) => {
-            mark_agent_job_failed(state, job_id, "app disappeared before deletion completed").await;
+            crate::job_control::mark_agent_job_failed(
+                state,
+                job_id,
+                "app disappeared before deletion completed",
+            )
+            .await;
             Ok(false)
         }
         Err(err) => {
             tracing::warn!(error = %err, app_id = %app_id, "failed to delete app records after cleanup");
-            mark_agent_job_failed(state, job_id, &err.to_string()).await;
+            crate::job_control::mark_agent_job_failed(state, job_id, &err.to_string()).await;
             Err(err)
         }
     }
@@ -374,18 +376,6 @@ pub(in crate::web) async fn compensate_failed_app_update_dns(
             tracing::warn!(error = %err, domain = %old_domain, "failed to restore old public tunnel after DB update failure");
         }
     }
-}
-
-pub(in crate::web) async fn mark_agent_job_failed(state: &AppState, job_id: Uuid, failure: &str) {
-    let _ = sqlx::query(
-        "UPDATE agent_jobs
-         SET status='failed', failure_summary=$2, updated_at=now(), finished_at=now()
-         WHERE id=$1",
-    )
-    .bind(job_id)
-    .bind(failure)
-    .execute(&state.db)
-    .await;
 }
 
 #[cfg(test)]
