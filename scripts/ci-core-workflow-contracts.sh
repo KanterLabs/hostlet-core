@@ -50,6 +50,8 @@ assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
 assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
 assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
 assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${FULL_CI_WORKFLOW}" "group: full-ci-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
+assert_contains "${STAGING_DEPLOYABILITY}" "group: deployability-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'HOSTLET_SELF_HOSTED_STARTUP_ATTEMPTS:-300'

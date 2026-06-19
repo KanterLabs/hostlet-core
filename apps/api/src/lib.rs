@@ -7,8 +7,10 @@ pub mod deploy;
 pub mod deployment_policy;
 pub mod env;
 pub mod github;
+pub mod job_control;
 pub mod policies;
 pub mod rate_limit;
+pub mod runtime_recovery;
 pub mod screenshots;
 pub mod server_capacity;
 pub mod state;
@@ -33,12 +35,6 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-/// Interval between background sweeps of stale deployments and agent jobs.
-/// Startup runs the same recovery once, but a crashed or offline agent can
-/// strand jobs/deployments at any time; without this sweep they block new
-/// deploys until the API restarts.
-const RUNTIME_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
-
 pub async fn run_from_env() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
@@ -48,7 +44,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         .init();
 
     let state = AppState::from_env().await?;
-    recover_startup_state(&state).await?;
+    runtime_recovery::recover_startup_state(&state).await?;
     // One-shot orphan sweep: runs once at startup in the background to remove
     // screenshot files that have no app_screenshots row. Not added to the
     // RUNTIME_RECOVERY ticker; the sweep is startup hygiene, not periodic.
@@ -56,17 +52,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
     tokio::spawn(async move {
         screenshots::sweep_orphaned_screenshot_files(&sweep_state).await;
     });
-    let recovery_state = state.clone();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(RUNTIME_RECOVERY_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // The first tick completes immediately and startup recovery just ran.
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            recover_runtime_state(&recovery_state).await;
-        }
-    });
+    runtime_recovery::spawn_runtime_recovery_task(state.clone());
     if state.update_checks_enabled {
         let update_state = state.clone();
         tokio::spawn(async move {
@@ -87,42 +73,6 @@ pub async fn run_from_env() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
-}
-
-pub async fn recover_startup_state(state: &AppState) -> anyhow::Result<()> {
-    let recovered = deploy::recover_stale_deployments_and_cleanup(state).await?;
-    if recovered > 0 {
-        tracing::warn!(recovered, "marked stale deployments as failed");
-    }
-    let recovered_jobs = agent::recover_stale_agent_jobs(state).await?;
-    if recovered_jobs > 0 {
-        tracing::warn!(recovered_jobs, "reconciled stale agent jobs");
-    }
-    let finalized_deletes = web::reconcile_completed_delete_jobs(state).await?;
-    if finalized_deletes > 0 {
-        tracing::warn!(finalized_deletes, "finalized completed delete jobs");
-    }
-    Ok(())
-}
-
-/// One background recovery sweep. Both recover functions are idempotent
-/// UPDATE-based sweeps shared with startup; database errors are logged and
-/// never end the loop.
-async fn recover_runtime_state(state: &AppState) {
-    match deploy::recover_stale_deployments(state).await {
-        Ok(recovered) if recovered > 0 => {
-            tracing::warn!(recovered, "marked stale deployments as failed");
-        }
-        Ok(_) => {}
-        Err(err) => tracing::warn!(error = %err, "periodic stale-deployment recovery failed"),
-    }
-    match agent::recover_stale_agent_jobs(state).await {
-        Ok(recovered) if recovered > 0 => {
-            tracing::warn!(recovered, "reconciled stale agent jobs");
-        }
-        Ok(_) => {}
-        Err(err) => tracing::warn!(error = %err, "periodic stale-job recovery failed"),
-    }
 }
 
 pub fn core_router(state: AppState) -> anyhow::Result<Router> {

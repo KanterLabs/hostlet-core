@@ -122,36 +122,6 @@ pub(in crate::web) async fn enqueue_interactive_agent_job(
     }
 }
 
-/// Builds the SQL fragment that restricts agent-job visibility to jobs the
-/// caller is allowed to see.
-///
-/// `user_param` and `cloud_param` are 1-based bind-parameter indices that the
-/// fragment references as `${user_param}` / `${cloud_param}`. They must match
-/// the order in which the surrounding query binds the user id and the
-/// cloud-mode flag; see [`bind_job_mutation`], which keeps the canonical
-/// `$1 = job id, $2 = user id, $3 = cloud flag` layout in lockstep with the
-/// `(2, 3)` arguments passed here.
-fn agent_job_visibility_predicate(user_param: usize, cloud_param: usize) -> String {
-    format!(
-        r#"
-          AND (
-            EXISTS (SELECT 1 FROM apps a WHERE a.id=j.app_id AND a.user_id=${user_param})
-            OR EXISTS (
-              SELECT 1 FROM deployments d
-              JOIN apps a ON a.id=d.app_id
-              WHERE d.id=j.deployment_id AND a.user_id=${user_param}
-            )
-            OR (
-              ${cloud_param} = false
-              AND j.app_id IS NULL
-              AND j.deployment_id IS NULL
-              AND (s.user_id=${user_param} OR s.kind='local')
-            )
-          )
-        "#
-    )
-}
-
 pub async fn agent_job_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -170,7 +140,7 @@ pub async fn agent_job_status(
         WHERE j.id=$1
           {}
         "#,
-        agent_job_visibility_predicate(2, 3)
+        crate::job_control::agent_job_visibility_predicate(2, 3)
     );
     let row = sqlx::query(&sql)
         .bind(id)
@@ -236,7 +206,7 @@ pub async fn list_agent_jobs(
         ORDER BY j.created_at DESC
         LIMIT 200
         "#,
-        agent_job_visibility_predicate(1, 2)
+        crate::job_control::agent_job_visibility_predicate(1, 2)
     );
     let rows = sqlx::query(&sql)
         .bind(user_id)
@@ -281,122 +251,7 @@ pub async fn retry_agent_job(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let select = format!(
-        r#"
-        SELECT j.job_type, j.app_id, j.payload_json
-        FROM agent_jobs j
-        JOIN servers s ON s.id = j.server_id
-        WHERE j.id=$1
-          {}
-          AND j.status IN ('failed','expired','cancelled')
-        "#,
-        agent_job_visibility_predicate(2, 3)
-    );
-    let row = match sqlx::query(&select)
-        .bind(id)
-        .bind(context.user_id)
-        .bind(false)
-        .fetch_optional(&state.db)
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, job_id = %id, "failed to load agent job for retry");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let job_type = row.get::<String, _>("job_type");
-    if matches!(job_type.as_str(), "deploy" | "rollback") {
-        return retry_deployment_job(&state, context.user_id, id, &job_type, &row).await;
-    }
-    // Non-deploy job types retry in place: their payload survives the scrub and
-    // the original job row carries everything the agent needs to re-run.
-    let update = format!(
-        r#"
-        UPDATE agent_jobs j
-        SET status='queued',
-            failure_summary=NULL,
-            last_error=NULL,
-            claimed_by=NULL,
-            claimed_at=NULL,
-            lease_expires_at=NULL,
-            finished_at=NULL,
-            updated_at=now()
-        FROM servers s
-        WHERE j.id=$1
-          AND s.id=j.server_id
-          {}
-          AND j.status IN ('failed','expired','cancelled')
-          AND COALESCE(j.payload_json, '{{}}'::jsonb) <> '{{}}'::jsonb
-        RETURNING j.app_id,j.deployment_id
-        "#,
-        agent_job_visibility_predicate(2, 3)
-    );
-    run_job_mutation(
-        &state,
-        id,
-        context.user_id,
-        &update,
-        JobMutationOutcome {
-            event_type: "agent_job_retried",
-            failure_log: "failed to retry agent job",
-            success: StatusCode::NO_CONTENT,
-        },
-    )
-    .await
-}
-
-/// Retries a `deploy`/`rollback` job by creating a FRESH deployment instead of
-/// requeuing the original row. The stored secrets were scrubbed on the terminal
-/// transition, and the original deployment row is already terminal — so
-/// `handle_deployment_status` would silently drop a reused run's reports. The
-/// new deployment re-decrypts the env vars and GitHub token at retry time and
-/// its status reports flow normally.
-async fn retry_deployment_job(
-    state: &AppState,
-    user_id: Uuid,
-    id: Uuid,
-    job_type: &str,
-    row: &sqlx::postgres::PgRow,
-) -> axum::response::Response {
-    let Some(app_id) = row.get::<Option<Uuid>, _>("app_id") else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "job no longer has an app to retry against",
-        )
-            .into_response();
-    };
-    let result = if job_type == "rollback" {
-        deploy::create_and_send_rollback(state, user_id, app_id).await
-    } else {
-        let payload = row.get::<Option<serde_json::Value>, _>("payload_json");
-        let commit_sha = payload
-            .as_ref()
-            .and_then(|payload| payload.get("commit_sha"))
-            .and_then(|value| value.as_str())
-            .unwrap_or("HEAD");
-        deploy::create_and_send_deploy(state, user_id, app_id, commit_sha).await
-    };
-    match result {
-        Ok(new_deployment_id) => {
-            record_audit_event(
-                state,
-                AuditEventInput {
-                    actor_type: "owner",
-                    actor_id: None,
-                    event_type: "agent_job_retried",
-                    app_id: Some(app_id),
-                    deployment_id: Some(new_deployment_id),
-                    job_id: Some(id),
-                    metadata: serde_json::json!({}),
-                },
-            )
-            .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-    }
+    crate::job_control::retry_agent_job(&state, context.user_id, id, false).await
 }
 
 pub async fn cancel_agent_job(
@@ -408,88 +263,5 @@ pub async fn cancel_agent_job(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let update = format!(
-        r#"
-        UPDATE agent_jobs j
-        SET status='cancelled',
-            failure_summary='Cancelled by owner before the agent started work.',
-            last_error='Cancelled by owner before the agent started work.',
-            payload_json=j.payload_json - 'env' - 'github_token',
-            finished_at=now(),
-            updated_at=now()
-        FROM servers s
-        WHERE j.id=$1
-          AND s.id=j.server_id
-          {}
-          AND j.status='queued'
-        RETURNING j.app_id,j.deployment_id
-        "#,
-        agent_job_visibility_predicate(2, 3)
-    );
-    run_job_mutation(
-        &state,
-        id,
-        context.user_id,
-        &update,
-        JobMutationOutcome {
-            event_type: "agent_job_cancelled",
-            failure_log: "failed to cancel agent job",
-            success: StatusCode::NO_CONTENT,
-        },
-    )
-    .await
-}
-
-/// Describes how a job-mutation handler reports its result: the audit event to
-/// record on success, the warning message to log on a database error, and the
-/// status code returned when exactly one row was affected.
-struct JobMutationOutcome {
-    event_type: &'static str,
-    failure_log: &'static str,
-    success: StatusCode,
-}
-
-/// Runs an owner-scoped `UPDATE ... RETURNING j.app_id,j.deployment_id` against
-/// `agent_jobs`, binding the canonical `$1 = job id, $2 = user id, $3 = cloud
-/// flag` parameters expected by [`agent_job_visibility_predicate`]`(2, 3)`.
-///
-/// On a matched row it records the audit event and returns `outcome.success`;
-/// no matched row yields `NOT_FOUND`, and a database error is logged and yields
-/// `INTERNAL_SERVER_ERROR`.
-async fn run_job_mutation(
-    state: &AppState,
-    id: Uuid,
-    user_id: Uuid,
-    update_sql: &str,
-    outcome: JobMutationOutcome,
-) -> axum::response::Response {
-    let result = sqlx::query(update_sql)
-        .bind(id)
-        .bind(user_id)
-        .bind(false)
-        .fetch_optional(&state.db)
-        .await;
-    match result {
-        Ok(Some(row)) => {
-            record_audit_event(
-                state,
-                AuditEventInput {
-                    actor_type: "owner",
-                    actor_id: None,
-                    event_type: outcome.event_type,
-                    app_id: row.get::<Option<Uuid>, _>("app_id"),
-                    deployment_id: row.get::<Option<Uuid>, _>("deployment_id"),
-                    job_id: Some(id),
-                    metadata: serde_json::json!({}),
-                },
-            )
-            .await;
-            outcome.success.into_response()
-        }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, job_id = %id, message = outcome.failure_log);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    crate::job_control::cancel_agent_job(&state, context.user_id, id, false).await
 }
