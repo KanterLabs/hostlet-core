@@ -69,7 +69,7 @@ trap 'exit 143' TERM
 mkdir -p "$BACKUP_DIR"
 
 compose_cmd exec -T postgres \
-  pg_dump --single-transaction -U "$POSTGRES_USER" "$POSTGRES_DB" > "$BACKUP_DIR/postgres.sql"
+  pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > "$BACKUP_DIR/postgres.sql"
 
 cat > "$BACKUP_DIR/ENVIRONMENT_REQUIRED.txt" <<'TXT'
 Restore requires the same secret values used by the original deployment:

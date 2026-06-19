@@ -17,6 +17,15 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local file="$1"
+  local needle="$2"
+  if grep -Fq -- "${needle}" "${file}"; then
+    echo "${file#${ROOT}/} contains forbidden text: ${needle}" >&2
+    exit 1
+  fi
+}
+
 assert_contains "${SELF_HOSTED_LIB}" 'ensure_rust_toolchain_path'
 assert_contains "${SELF_HOSTED_LIB}" 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"'
 assert_contains "${SELF_HOSTED_LIB}" 'export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"'
@@ -74,6 +83,7 @@ assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'mountpoint -q /var/lib/do
 assert_contains "${ROOT}/scripts/ci-verify-runner.sh" 'HOSTLET_RUNNER_DOCKER_DISK_FAIL_PERCENT'
 assert_contains "${ROOT}/scripts/ci-verify-runner-selftest.sh" 'STUB_DOCKER_FAIL=1'
 assert_contains "${ROOT}/scripts/ci-verify-runner-selftest.sh" 'HOSTLET_ALLOW_LOW_DOCKER_DISK=1'
+assert_not_contains "${ROOT}/scripts/backup.sh" '--single-transaction'
 
 python3 - "${STAGING_WORKFLOW}" <<'PY'
 import re
