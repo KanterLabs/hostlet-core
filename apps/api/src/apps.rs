@@ -12,6 +12,8 @@ use crate::state::AppState;
 use sqlx::Row;
 use uuid::Uuid;
 
+pub mod serialization;
+
 /// A plaintext environment variable to persist with the app. The value is
 /// encrypted with the app's crypto provider before it is written.
 pub struct AppEnvVarInput {
