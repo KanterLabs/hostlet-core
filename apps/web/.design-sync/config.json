@@ -1,0 +1,17 @@
+{
+  "projectId": "a5dd9f8d-f122-4ce4-90f4-a66e0687a814",
+  "pkg": "@hostlet/web",
+  "globalName": "HostletUI",
+  "shape": "package",
+  "srcDir": "components/ui",
+  "tsconfig": "tsconfig.json",
+  "cssEntry": ".design-sync/compiled.css",
+  "buildCmd": "node_modules/.bin/tailwindcss -c .design-sync/tailwind.dssync.ts -i app/globals.css -o .design-sync/compiled.css",
+  "readmeHeader": ".design-sync/conventions.md",
+  "extraEntries": ["./.design-sync/process-shim.mjs"],
+  "componentSrcMap": { "AppShell": null },
+  "runtimeFontPrefixes": ["Geist Mono", "Geist", "JetBrains Mono", "SF Mono"],
+  "overrides": {
+    "ConfirmDialog": { "cardMode": "single", "primaryStory": "Destructive", "viewport": "560x400" }
+  }
+}
