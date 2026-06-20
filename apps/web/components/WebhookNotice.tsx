@@ -66,12 +66,12 @@ export function WebhookNotice({
           </div>
           <p className={`mt-2 max-w-2xl text-sm ${tone.body}`}>{description}</p>
           {autoDeployWarning && <p className="mt-2 max-w-2xl text-sm font-medium text-warning-fg">{autoDeployWarning}</p>}
-          <div className="mt-3 break-all rounded-md bg-white/70 px-3 py-2 font-mono text-xs text-neutral-800 ring-1 ring-black/5">
+          <div className="mt-3 break-all rounded-md bg-surface-alt px-3 py-2 font-mono text-xs text-ink ring-1 ring-line">
             {readiness.webhookUrl}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" className="button-secondary bg-white/80" onClick={copyWebhookUrl}>
+          <button type="button" className="button-secondary" onClick={copyWebhookUrl}>
             <Copy size={16} />
             {copyState}
           </button>

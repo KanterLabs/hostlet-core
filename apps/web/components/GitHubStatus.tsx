@@ -55,8 +55,8 @@ export function GitHubStatus({ compact = false, showConnect = true }: { compact?
       {!compact && status && (
         <>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            <div className="rounded-md bg-white/70 px-3 py-2 text-xs">Device Flow: {status.oauthConfigured ? "ready" : "missing"}</div>
-            <div className="rounded-md bg-white/70 px-3 py-2 text-xs">Webhook secret: {status.webhookConfigured ? "custom" : "dev/default"}</div>
+            <div className="rounded-md bg-surface-alt px-3 py-2 text-xs">Device Flow: {status.oauthConfigured ? "ready" : "missing"}</div>
+            <div className="rounded-md bg-surface-alt px-3 py-2 text-xs">Webhook secret: {status.webhookConfigured ? "custom" : "dev/default"}</div>
           </div>
           {showConnect && status.oauthConfigured && status.tokenValid !== true && <GitHubDeviceFlow className="mt-3" />}
         </>

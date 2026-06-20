@@ -26,8 +26,9 @@
 }
 
 /* shadcn semantic token layer — HSL channels derived from the brand vars above.
-   Light is the active theme; the .dark block keeps the system theme-ready
-   (no toggle is shipped yet). New primitives consume these through Tailwind
+   Light is the default theme; the .dark block below holds the dark canvas,
+   activated by the `.dark` class on <html> (see ThemeToggle + the no-flash
+   init script in layout.tsx). New primitives consume these through Tailwind
    (bg-primary, text-foreground, border-border, …) rather than raw palette
    literals, so the brand lives in one place. */
 :root {
@@ -63,6 +64,21 @@
 }
 
 .dark {
+  color-scheme: dark;
+
+  /* Brand hex tokens re-mapped for the dark canvas. The body, rail, panels,
+     borders, and text all consume these, so the whole shell flips — not just
+     the shadcn HSL layer below. Kept visually in step with that layer. */
+  --ink: #f4f6f5;
+  --muted: #8b9692;
+  --line: #262d2a;
+  --panel: #090c0b;
+  --surface: #0e110f;
+  --surface-alt: #1a201d;
+  --rail: #0c100e;
+  --action: #10b981;
+  --action-strong: #34d399;
+
   --background: 160 12% 4%;
   --foreground: 0 0% 98%;
   --card: 160 10% 6%;
@@ -115,6 +131,10 @@ h1, h2, h3 {
 
 ::selection {
   background: #d4f2e4;
+}
+
+.dark ::selection {
+  background: #0f3d2e;
 }
 
 a {
@@ -195,7 +215,7 @@ label {
   }
 
   .skeleton {
-    @apply animate-pulse rounded-md bg-neutral-200;
+    @apply animate-pulse rounded-md bg-neutral-200 dark:bg-neutral-800;
   }
 }
 

@@ -30,7 +30,7 @@ const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: 
   },
 };
 
-const DEFAULT_STATUS = { icon: CircleDashed, tone: "bg-neutral-100 text-neutral-800 ring-neutral-300" };
+const DEFAULT_STATUS = { icon: CircleDashed, tone: "bg-neutral-100 text-neutral-800 ring-neutral-300 dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700" };
 
 export function statusLabel(status?: string | null) {
   const value = (status || "unknown").replaceAll("_", " ").trim().toLowerCase();

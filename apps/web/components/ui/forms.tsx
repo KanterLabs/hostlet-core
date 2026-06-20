@@ -90,7 +90,7 @@ export function ToggleCard({
   description?: string;
 }) {
   return (
-    <label className={cx("flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition", checked ? "border-emerald-200 bg-emerald-50" : "border-line bg-surface hover:border-neutral-300 hover:bg-surface-alt")}>
+    <label className={cx("flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition", checked ? "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/40" : "border-line bg-surface hover:border-neutral-300 hover:bg-surface-alt")}>
       <input className="mt-0.5" type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
       {Icon && <Icon size={17} className={cx("mt-0.5", checked ? "text-action" : "text-neutral-500")} />}
       <span className="min-w-0">
