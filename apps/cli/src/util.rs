@@ -390,6 +390,60 @@ mod tests {
     }
 
     #[test]
+    fn quote_env_leaves_url_safe_values_unquoted() {
+        // Alphanumerics plus / : . _ - , = stay bare (see quote_env's allow list).
+        let value = "ghcr.io/shanekanterman04/hostlet-api:v0.4.1";
+        assert_eq!(quote_env(value), value);
+    }
+
+    #[test]
+    fn quote_env_quotes_and_escapes_special_characters() {
+        assert_eq!(quote_env("a b"), "\"a b\"");
+        assert_eq!(quote_env("he said \"hi\""), "\"he said \\\"hi\\\"\"");
+        assert_eq!(quote_env("back\\slash"), "\"back\\\\slash\"");
+    }
+
+    #[test]
+    fn quote_env_and_unquote_env_treat_empty_as_empty() {
+        assert_eq!(quote_env(""), "");
+        assert_eq!(unquote_env(""), "");
+    }
+
+    #[test]
+    fn env_quote_round_trips_quotes_and_backslashes() {
+        for value in [
+            "a b",
+            "he said \"hi\"",
+            "back\\slash",
+            "trailing\\",
+            "\\\"mixed\\\"",
+        ] {
+            assert_eq!(
+                unquote_env(&quote_env(value)),
+                value,
+                "round trip failed for {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_duration_reports_minutes_below_one_hour() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0 minutes");
+        assert_eq!(format_duration(Duration::from_secs(59)), "0 minutes");
+        assert_eq!(format_duration(Duration::from_secs(60)), "1 minutes");
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59 minutes");
+    }
+
+    #[test]
+    fn format_duration_reports_hours_then_days_at_boundaries() {
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1 hours");
+        assert_eq!(format_duration(Duration::from_secs(47 * 3600)), "47 hours");
+        // 48 h is the days threshold: hours/24 = 2.
+        assert_eq!(format_duration(Duration::from_secs(48 * 3600)), "2 days");
+        assert_eq!(format_duration(Duration::from_secs(72 * 3600)), "3 days");
+    }
+
+    #[test]
     fn generated_encryption_key_is_base64_32_bytes() {
         let secret = base64_secret(32);
         assert_eq!(STANDARD.decode(secret).unwrap().len(), 32);

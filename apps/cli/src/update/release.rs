@@ -288,3 +288,151 @@ pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_release() -> ReleaseInfo {
+        ReleaseInfo {
+            version: "0.5.0".into(),
+            notes_url: "https://example.test/notes".into(),
+            released_at: None,
+            minimum_supported_version: None,
+            compose_migrations: false,
+            database_migrations: false,
+            assets: Vec::new(),
+            image_registry: None,
+            image_tag: None,
+            images: ReleaseImages::default(),
+        }
+    }
+
+    fn full_images() -> ReleaseImages {
+        let image = |reference: &str| {
+            Some(ReleaseImage {
+                reference: reference.into(),
+                digest: None,
+            })
+        };
+        ReleaseImages {
+            api: image("api"),
+            web: image("web"),
+            agent: image("agent"),
+            screenshotter: image("screenshotter"),
+        }
+    }
+
+    #[test]
+    fn image_tag_falls_back_to_v_prefixed_version() {
+        let mut release = base_release();
+        release.version = "1.2.3".into();
+        assert_eq!(release.image_tag(), "v1.2.3");
+    }
+
+    #[test]
+    fn image_tag_does_not_double_prefix_existing_v() {
+        let mut release = base_release();
+        release.version = "v1.2.3".into();
+        assert_eq!(release.image_tag(), "v1.2.3");
+    }
+
+    #[test]
+    fn image_tag_prefers_explicit_tag_over_version() {
+        let mut release = base_release();
+        release.version = "1.2.3".into();
+        release.image_tag = Some("v9.9.9-rc1".into());
+        assert_eq!(release.image_tag(), "v9.9.9-rc1");
+    }
+
+    #[test]
+    fn has_release_images_requires_all_four_images() {
+        let mut release = base_release();
+        assert!(!release.has_release_images());
+
+        release.images = full_images();
+        assert!(release.has_release_images());
+
+        release.images.agent = None;
+        assert!(!release.has_release_images());
+    }
+
+    #[test]
+    fn asset_lookup_matches_by_exact_name() {
+        let mut release = base_release();
+        release.assets = vec![
+            ReleaseAsset {
+                name: "hostlet-linux-x64".into(),
+                download_url: "https://example.test/bin".into(),
+            },
+            ReleaseAsset {
+                name: "hostlet-linux-x64.sha256".into(),
+                download_url: "https://example.test/sum".into(),
+            },
+        ];
+
+        assert_eq!(
+            release.asset("hostlet-linux-x64").map(|a| a.download_url.as_str()),
+            Some("https://example.test/bin")
+        );
+        assert_eq!(
+            release
+                .asset("hostlet-linux-x64.sha256")
+                .map(|a| a.download_url.as_str()),
+            Some("https://example.test/sum")
+        );
+        assert!(release.asset("missing").is_none());
+    }
+
+    #[test]
+    fn parse_release_image_reads_ref_and_digest() {
+        let value = serde_json::json!({ "ref": "ghcr.io/x:1", "digest": "sha256:abc" });
+        let image = parse_release_image(Some(&value)).unwrap();
+        assert_eq!(image.reference, "ghcr.io/x:1");
+        assert_eq!(image.digest.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn parse_release_image_drops_empty_digest() {
+        let value = serde_json::json!({ "ref": "ghcr.io/x:1", "digest": "" });
+        let image = parse_release_image(Some(&value)).unwrap();
+        assert_eq!(image.reference, "ghcr.io/x:1");
+        assert!(image.digest.is_none());
+    }
+
+    #[test]
+    fn parse_release_image_requires_ref() {
+        assert!(parse_release_image(None).is_none());
+        assert!(parse_release_image(Some(&serde_json::json!({ "digest": "sha256:abc" }))).is_none());
+    }
+
+    #[test]
+    fn apply_manifest_trims_v_prefix_from_versions() {
+        let mut release = base_release();
+        let manifest = serde_json::json!({
+            "version": "v2.0.0",
+            "minimum_supported_version": "v1.5.0",
+            "compose_migrations": true,
+            "database_migrations": true,
+            "notes_url": "https://example.test/v2"
+        });
+
+        apply_release_manifest_value(&mut release, &manifest);
+
+        assert_eq!(release.version, "2.0.0");
+        assert_eq!(release.minimum_supported_version.as_deref(), Some("1.5.0"));
+        assert!(release.compose_migrations);
+        assert!(release.database_migrations);
+        assert_eq!(release.notes_url, "https://example.test/v2");
+    }
+
+    #[test]
+    fn apply_manifest_preserves_existing_image_tag_when_absent() {
+        let mut release = base_release();
+        release.image_tag = Some("v3.3.3".into());
+
+        apply_release_manifest_value(&mut release, &serde_json::json!({}));
+
+        assert_eq!(release.image_tag(), "v3.3.3");
+    }
+}

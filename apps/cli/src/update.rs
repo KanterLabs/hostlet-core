@@ -277,3 +277,57 @@ pub(crate) fn checkout_release_tag(root: &Path, release: &ReleaseInfo) -> anyhow
     )?;
     run_passthrough(root, "git", &["checkout".into(), "--detach".into(), tag])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn operator_api_and_token_prefers_public_api_url_and_trims_slashes() {
+        let env = env_map(&[
+            ("PUBLIC_API_URL", "https://hostlet.example.test/"),
+            ("HOSTLET_API_URL", "http://ignored.test"),
+            ("LOCAL_AGENT_TOKEN", "tok-123"),
+        ]);
+
+        let (api_url, token) = operator_api_and_token(&env).unwrap();
+
+        assert_eq!(api_url, "https://hostlet.example.test");
+        assert_eq!(token, "tok-123");
+    }
+
+    #[test]
+    fn operator_api_and_token_falls_back_to_hostlet_api_url() {
+        let env = env_map(&[
+            ("HOSTLET_API_URL", "http://10.0.0.1:8080///"),
+            ("LOCAL_AGENT_TOKEN", "tok"),
+        ]);
+
+        let (api_url, _) = operator_api_and_token(&env).unwrap();
+
+        assert_eq!(api_url, "http://10.0.0.1:8080");
+    }
+
+    #[test]
+    fn operator_api_and_token_defaults_to_loopback_when_unset() {
+        let env = env_map(&[("LOCAL_AGENT_TOKEN", "tok")]);
+
+        let (api_url, _) = operator_api_and_token(&env).unwrap();
+
+        assert_eq!(api_url, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn operator_api_and_token_requires_local_agent_token() {
+        let env = env_map(&[("PUBLIC_API_URL", "https://hostlet.example.test")]);
+
+        assert!(operator_api_and_token(&env).is_err());
+    }
+}

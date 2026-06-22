@@ -317,3 +317,85 @@ pub(crate) async fn cloudflare_tunnel_token(
         .map(str::to_string)
         .context("Cloudflare tunnel token response did not include a token")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn populate_env_derives_public_urls_from_host() {
+        let config = CloudflareConfig {
+            domain: "example.test".into(),
+            hostlet_host: "hostlet.example.test".into(),
+            app_prefix: "app-".into(),
+            token: "cf-token".into(),
+            zone_id: "zone-1".into(),
+            tunnel_target: "abc.cfargotunnel.com".into(),
+            tunnel_token: "tunnel-token".into(),
+        };
+        let mut env = BTreeMap::new();
+
+        config.populate_env(&mut env);
+
+        for key in ["PUBLIC_WEB_URL", "PUBLIC_API_URL", "PUBLIC_WEBHOOK_URL"] {
+            assert_eq!(
+                env.get(key).map(String::as_str),
+                Some("https://hostlet.example.test"),
+                "{key} should be the https host URL"
+            );
+        }
+        assert_eq!(
+            env.get("HOSTLET_ALLOWED_WEB_ORIGINS").map(String::as_str),
+            Some("https://hostlet.example.test")
+        );
+        assert_eq!(
+            env.get("HOSTLET_CONTROL_PLANE_HOST").map(String::as_str),
+            Some("hostlet.example.test")
+        );
+        assert_eq!(
+            env.get("HOSTLET_BASE_DOMAIN").map(String::as_str),
+            Some("example.test")
+        );
+        assert_eq!(
+            env.get("HOSTLET_DOMAIN_PREFIX").map(String::as_str),
+            Some("app-")
+        );
+        assert_eq!(
+            env.get("CLOUDFLARE_API_TOKEN").map(String::as_str),
+            Some("cf-token")
+        );
+        assert_eq!(
+            env.get("CLOUDFLARE_ZONE_ID").map(String::as_str),
+            Some("zone-1")
+        );
+        assert_eq!(
+            env.get("CLOUDFLARE_TUNNEL_TARGET").map(String::as_str),
+            Some("abc.cfargotunnel.com")
+        );
+        assert_eq!(
+            env.get("CLOUDFLARE_TUNNEL_TOKEN").map(String::as_str),
+            Some("tunnel-token")
+        );
+    }
+
+    #[test]
+    fn result_first_str_reads_field_off_first_element() {
+        let value = serde_json::json!({
+            "result": [ { "id": "first" }, { "id": "second" } ]
+        });
+        assert_eq!(result_first_str(&value, "id"), Some("first"));
+    }
+
+    #[test]
+    fn result_first_str_handles_missing_empty_and_absent_field() {
+        assert_eq!(result_first_str(&serde_json::json!({}), "id"), None);
+        assert_eq!(
+            result_first_str(&serde_json::json!({ "result": [] }), "id"),
+            None
+        );
+        assert_eq!(
+            result_first_str(&serde_json::json!({ "result": [ {} ] }), "id"),
+            None
+        );
+    }
+}
