@@ -41,6 +41,54 @@ pub(crate) async fn checkout_fetched_ref(
     }
 }
 
+/// Builds the optional `-c url.<token-url>.insteadOf=https://github.com/` git
+/// config flag that lets PRIVATE github.com submodules be fetched with the same
+/// installation token used for the superproject. Returns `None` when no non-empty
+/// token is available (anonymous, public-only). Only github.com URLs are rewritten
+/// so the token is never sent to other hosts. Uses the same url-encoding as
+/// `git_fetch_remote`.
+fn github_submodule_auth_config(github_token: Option<&str>) -> Option<String> {
+    let token = github_token.filter(|token| !token.trim().is_empty())?;
+    let encoded = url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+    Some(format!(
+        "url.https://x-access-token:{encoded}@github.com/.insteadOf=https://github.com/"
+    ))
+}
+
+/// Syncs and updates git submodules in `checkout` after the superproject ref is
+/// checked out. No-op when there is no `.gitmodules`, so single-repo deploys are
+/// byte-for-byte unaffected. Recurses so a submodule's own submodules build too.
+/// When a non-empty `github_token` is available, private github.com submodules are
+/// fetched with the same installation token used for the superproject.
+pub(crate) async fn update_submodules(
+    cfg: &Config,
+    deployment_id: Uuid,
+    checkout: &Path,
+    github_token: Option<&str>,
+) -> anyhow::Result<()> {
+    if !checkout.join(".gitmodules").exists() {
+        return Ok(());
+    }
+    let auth = github_submodule_auth_config(github_token);
+    let mut sync_args: Vec<&str> = Vec::new();
+    let mut update_args: Vec<&str> = Vec::new();
+    if let Some(auth) = auth.as_deref() {
+        sync_args.extend_from_slice(&["-c", auth]);
+        update_args.extend_from_slice(&["-c", auth]);
+    }
+    sync_args.extend_from_slice(&["submodule", "sync", "--recursive"]);
+    update_args.extend_from_slice(&[
+        "submodule",
+        "update",
+        "--init",
+        "--recursive",
+        "--depth",
+        "1",
+    ]);
+    run_git(cfg, deployment_id, checkout, &sync_args).await?;
+    run_git(cfg, deployment_id, checkout, &update_args).await
+}
+
 /// Ensures `checkout` contains the requested branch/commit, reusing an existing
 /// clone when present or initializing a fresh one otherwise.  Self-heals three
 /// failure modes:
@@ -54,7 +102,9 @@ pub(crate) async fn checkout_fetched_ref(
 ///    fetch+checkout step on an otherwise-reusable checkout fails, the directory is
 ///    wiped and a fresh clone is attempted exactly once.
 ///
-/// Only the exact `checkout` path is ever removed.
+/// Only the exact `checkout` path is ever removed. Submodules are synced after
+/// checkout when `.gitmodules` is present.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_checkout(
     cfg: &Config,
     deployment_id: Uuid,
@@ -63,6 +113,7 @@ pub(crate) async fn sync_checkout(
     fetch_remote: &str,
     branch: &str,
     commit_sha: &str,
+    github_token: Option<&str>,
 ) -> anyhow::Result<()> {
     if checkout.exists() {
         let git_dir_ok = checkout.join(".git").exists();
@@ -87,7 +138,9 @@ pub(crate) async fn sync_checkout(
             .await;
 
             match reuse_result {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    return update_submodules(cfg, deployment_id, checkout, github_token).await;
+                }
                 Err(err) => {
                     log(
                         cfg,
@@ -136,7 +189,8 @@ pub(crate) async fn sync_checkout(
         &["fetch", fetch_remote, branch],
     )
     .await?;
-    checkout_fetched_ref(cfg, deployment_id, checkout, branch, commit_sha).await
+    checkout_fetched_ref(cfg, deployment_id, checkout, branch, commit_sha).await?;
+    update_submodules(cfg, deployment_id, checkout, github_token).await
 }
 
 /// Reads `remote.origin.url` from the checkout's git config and verifies it
@@ -270,6 +324,63 @@ mod tests {
         path
     }
 
+    /// Allow git's `file` transport for submodule operations in tests. Modern git
+    /// (CVE-2022-39253) blocks local-path submodule fetches unless
+    /// `protocol.file.allow=always`. The production `update_submodules` command
+    /// carries no such flag (real submodules are https://github.com URLs), so the
+    /// allowance is injected through the environment, which the spawned git inherits.
+    /// Set once and never cleared (values before count) so it cannot race a
+    /// concurrent git spawn into a partially-set `GIT_CONFIG_COUNT`.
+    fn allow_local_submodule_transport() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("GIT_CONFIG_KEY_0", "protocol.file.allow");
+            std::env::set_var("GIT_CONFIG_VALUE_0", "always");
+            std::env::set_var("GIT_CONFIG_COUNT", "1");
+        });
+    }
+
+    /// Create a bare superproject at `bare` whose worktree `work` embeds the bare
+    /// repo `sub_bare` as a submodule at `sub_path`. Returns the superproject HEAD
+    /// SHA.
+    fn make_bare_origin_with_submodule(
+        work: &Path,
+        bare: &Path,
+        sub_bare: &Path,
+        sub_path: &str,
+    ) -> String {
+        std::fs::create_dir_all(work).unwrap();
+        git_cmd(work, &["init"]);
+        git_cmd(work, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git_cmd(work, &["config", "user.email", "test@hostlet.test"]);
+        git_cmd(work, &["config", "user.name", "Hostlet Test"]);
+        std::fs::write(work.join("root.txt"), "root").unwrap();
+        git_cmd(work, &["add", "."]);
+        git_cmd(work, &["commit", "-m", "initial"]);
+        git_cmd(
+            work,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub_bare.to_str().unwrap(),
+                sub_path,
+            ],
+        );
+        git_cmd(work, &["commit", "-m", "add submodule"]);
+        git_cmd(
+            work.parent().unwrap(),
+            &[
+                "clone",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        head_sha(bare)
+    }
+
     // --- tests ---
 
     #[tokio::test]
@@ -289,6 +400,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -315,6 +427,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -333,6 +446,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -358,6 +472,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -376,6 +491,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -405,6 +521,7 @@ mod tests {
             bare1.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -419,6 +536,7 @@ mod tests {
             bare2.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -451,6 +569,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -467,6 +586,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             "HEAD",
+            None,
         )
         .await
         .unwrap();
@@ -494,6 +614,7 @@ mod tests {
             bare.to_str().unwrap(),
             "main",
             &first_sha,
+            None,
         )
         .await
         .unwrap();
@@ -506,6 +627,133 @@ mod tests {
         // The second file is NOT present because we checked out the first commit.
         assert!(checkout.join("v1.txt").exists());
         assert!(!checkout.join("v2.txt").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn git_clone_checks_out_submodule_working_file() {
+        allow_local_submodule_transport();
+        let tmp = temp_root();
+        let sub_work = tmp.join("sub-work");
+        let sub_bare = tmp.join("sub-bare.git");
+        make_bare_origin(&sub_work, &sub_bare, "engine.txt");
+        let super_work = tmp.join("super-work");
+        let super_bare = tmp.join("super-bare.git");
+        make_bare_origin_with_submodule(&super_work, &super_bare, &sub_bare, "engine");
+        let checkout = tmp.join("checkout");
+        let cfg = test_config(tmp.clone());
+
+        sync_checkout(
+            &cfg,
+            Uuid::nil(),
+            &checkout,
+            super_bare.to_str().unwrap(),
+            super_bare.to_str().unwrap(),
+            "main",
+            "HEAD",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(checkout.join("root.txt").exists());
+        assert!(
+            checkout.join("engine/engine.txt").exists(),
+            "submodule working file must exist after sync_checkout"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn git_redeploy_picks_up_new_submodule_pointer() {
+        allow_local_submodule_transport();
+        let tmp = temp_root();
+        let sub_work = tmp.join("sub-work");
+        let sub_bare = tmp.join("sub-bare.git");
+        make_bare_origin(&sub_work, &sub_bare, "engine-v1.txt");
+        let super_work = tmp.join("super-work");
+        let super_bare = tmp.join("super-bare.git");
+        make_bare_origin_with_submodule(&super_work, &super_bare, &sub_bare, "engine");
+        let checkout = tmp.join("checkout");
+        let cfg = test_config(tmp.clone());
+
+        // First deploy: v1 file must appear.
+        sync_checkout(
+            &cfg,
+            Uuid::nil(),
+            &checkout,
+            super_bare.to_str().unwrap(),
+            super_bare.to_str().unwrap(),
+            "main",
+            "HEAD",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(checkout.join("engine/engine-v1.txt").exists());
+        assert!(!checkout.join("engine/engine-v2.txt").exists());
+
+        // Advance the submodule pointer in the superproject.
+        let new_tip = add_commit_and_push(&sub_work, &sub_bare, "engine-v2.txt");
+        let engine_dir = super_work.join("engine");
+        git_cmd(&engine_dir, &["fetch", sub_bare.to_str().unwrap(), "main"]);
+        git_cmd(&engine_dir, &["checkout", &new_tip]);
+        git_cmd(&super_work, &["add", "engine"]);
+        git_cmd(&super_work, &["commit", "-m", "bump submodule"]);
+        git_cmd(
+            &super_work,
+            &["push", "--force", super_bare.to_str().unwrap(), "main"],
+        );
+
+        // Second deploy (reuse path): v2 file must now appear.
+        sync_checkout(
+            &cfg,
+            Uuid::nil(),
+            &checkout,
+            super_bare.to_str().unwrap(),
+            super_bare.to_str().unwrap(),
+            "main",
+            "HEAD",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            checkout.join("engine/engine-v2.txt").exists(),
+            "reuse path must pick up the advanced submodule pointer"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn update_submodules_is_noop_without_gitmodules() {
+        let tmp = temp_root();
+        let work = tmp.join("work");
+        let bare = tmp.join("bare.git");
+        make_bare_origin(&work, &bare, "hello.txt");
+        let checkout = tmp.join("checkout");
+        let cfg = test_config(tmp.clone());
+
+        sync_checkout(
+            &cfg,
+            Uuid::nil(),
+            &checkout,
+            bare.to_str().unwrap(),
+            bare.to_str().unwrap(),
+            "main",
+            "HEAD",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(checkout.join("hello.txt").exists());
+        assert!(!checkout.join(".gitmodules").exists());
+
+        // Direct call: must be a clean no-op.
+        update_submodules(&cfg, Uuid::nil(), &checkout, None)
+            .await
+            .unwrap();
+        assert!(checkout.join("hello.txt").exists());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

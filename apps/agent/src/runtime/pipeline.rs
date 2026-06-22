@@ -43,6 +43,7 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         &fetch_remote,
         branch,
         commit_sha,
+        github_token,
     )
     .await;
     if let Err(err) = checkout_result {
