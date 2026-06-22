@@ -79,9 +79,7 @@ jobs:
       - name: Compute image tags
         run: echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
-        run: |
-          mkdir -p "$DOCKER_CONFIG"
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build and push staging images
         env:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
