@@ -65,12 +65,15 @@ jobs:
   images:
     needs: [secrets, rust, web]
     runs-on: [self-hosted, Linux, X64, hostlet-core]
-    env:
-      # Per-run docker config dir so a concurrent hostlet-cloud deploy on the same
-      # runner host can't overwrite this job's ghcr.io auth mid-push (the runners
-      # share one ~/.docker/config.json -> intermittent GHCR 403).
-      DOCKER_CONFIG: ${{ runner.temp }}/docker-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Isolate docker credentials for this run
+        # Per-run DOCKER_CONFIG so a concurrent hostlet-cloud deploy on the same
+        # runner host can't overwrite this job's ghcr.io auth mid-push (the runners
+        # share one ~/.docker/config.json -> intermittent GHCR 403).
+        run: |
+          cfg="$RUNNER_TEMP/docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$cfg"
+          echo "DOCKER_CONFIG=$cfg" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
       - name: Compute image tags
