@@ -33,8 +33,7 @@ independently in each repo.  **Shared helpers must NOT live in any of these file
 
 ```
 apps/api/src/state.rs            apps/api/src/lib.rs
-apps/api/src/main.rs             apps/api/src/github.rs
-apps/api/src/github/inference.rs
+apps/api/src/github.rs           apps/api/src/github/inference.rs
 apps/api/src/web/app_delete.rs   apps/api/src/web/app_env.rs
 apps/api/src/web/apps.rs         apps/api/src/web/audit.rs
 apps/api/src/web/cleanup.rs      apps/api/src/web/dns/cloudflare.rs

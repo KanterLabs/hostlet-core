@@ -18,6 +18,26 @@ export const DEPLOYMENT_STEPS = [
 
 export type DeploymentStep = (typeof DEPLOYMENT_STEPS)[number];
 
+export type StepState = {
+  step: DeploymentStep;
+  done: boolean;
+  current: boolean;
+  failed: boolean;
+};
+
+export function statusSteps(status: string): StepState[] {
+  const failed = status === "failed";
+  const currentStep = failed ? "success" : status;
+  const activeIndex = DEPLOYMENT_STEPS.indexOf(currentStep as DeploymentStep);
+
+  return DEPLOYMENT_STEPS.map((step, index) => ({
+    step,
+    current: step === currentStep,
+    done: failed ? index < DEPLOYMENT_STEPS.length - 1 : activeIndex >= index,
+    failed: failed && step === currentStep,
+  }));
+}
+
 export function humanStatus(status: string) {
   return status.replaceAll("_", " ");
 }

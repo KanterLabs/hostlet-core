@@ -7,13 +7,13 @@ import { AppShell, DataList, LogViewer, Notice, PageHeader, Panel, SectionHeader
 import { useDeploymentLogs } from "@/lib/useDeploymentLogs";
 import { shortSha } from "@/lib/app-status";
 import {
-  DEPLOYMENT_STEPS,
   formatBytes,
   formatDuration,
   humanStatus,
   imageBudgetLabel,
   socketLabel,
   statusHelp,
+  statusSteps,
 } from "./deploymentStatus";
 
 type RuntimeMetadata = {
@@ -70,7 +70,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
 
   const status = deployment?.status || "loading";
   const finished = status === "success" || status === "failed";
-  const activeIndex = DEPLOYMENT_STEPS.indexOf(status as (typeof DEPLOYMENT_STEPS)[number]);
+  const steps = statusSteps(status);
   const metadata = deployment?.runtimeMetadata;
   const isCompose = metadata?.runtime === "compose";
   const packaging = isCompose ? "Docker Compose" : metadata?.packagingStrategy || "auto";
@@ -96,13 +96,11 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
               <Panel>
                 <SectionHeader icon={ScrollText} title="Status" action={<StatusPill status={status} />} />
                 <div className="space-y-3">
-                  {DEPLOYMENT_STEPS.map((step, index) => {
-                    const done = status === "failed" ? index < Math.max(activeIndex, 0) : activeIndex >= index;
-                    const current = status === step;
+                  {steps.map(({ step, done, failed }) => {
                     return (
                       <div key={step} className="flex items-center gap-3 rounded-md bg-surface-alt px-3 py-2">
-                        <span className={`flex h-7 w-7 items-center justify-center rounded-full ${status === "failed" && current ? "bg-red-100 text-red-700" : done ? "bg-emerald-100 text-emerald-700" : "bg-surface text-muted ring-1 ring-line"}`}>
-                          {status === "failed" && current ? <XCircle size={15} /> : done ? <CheckCircle2 size={15} /> : <Clock size={15} />}
+                        <span className={`flex h-7 w-7 items-center justify-center rounded-full ${failed ? "bg-red-100 text-red-700" : done ? "bg-emerald-100 text-emerald-700" : "bg-surface text-muted ring-1 ring-line"}`}>
+                          {failed ? <XCircle size={15} /> : done ? <CheckCircle2 size={15} /> : <Clock size={15} />}
                         </span>
                         <span className="text-sm font-medium">{humanStatus(step)}</span>
                       </div>

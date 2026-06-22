@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { firstErrorLine } from "@/components/ui";
+import { statusSteps } from "@/app/deployments/[id]/deploymentStatus";
 
 const validRuntimeMetadata = {
   packagingStrategy: "generated",
@@ -95,6 +96,18 @@ test("firstErrorLine skips command echoes with error-like flags", () => {
     "stdout: $ railpack build --name hostlet/app-demo:image --progress plain --error-missing-start /var/lib/hostlet/repos/app-demo",
     "stderr: error: no start command could be inferred",
   ])).toBe("stderr: error: no start command could be inferred");
+});
+
+test("deployment status steps mark the terminal success step as failed", () => {
+  const steps = statusSteps("failed");
+  expect(steps.slice(0, -1).every((step) => step.done && !step.failed)).toBe(true);
+  expect(steps.at(-1)).toMatchObject({ step: "success", current: true, done: false, failed: true });
+});
+
+test("deployment status steps keep active in-progress states focused", () => {
+  const steps = statusSteps("health_checking");
+  expect(steps.find((step) => step.step === "health_checking")).toMatchObject({ current: true, done: true, failed: false });
+  expect(steps.find((step) => step.step === "routing")).toMatchObject({ current: false, done: false, failed: false });
 });
 
 async function mockDeploymentApi(
