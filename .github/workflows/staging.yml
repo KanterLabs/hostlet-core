@@ -65,13 +65,20 @@ jobs:
   images:
     needs: [secrets, rust, web]
     runs-on: [self-hosted, Linux, X64, hostlet-core]
+    env:
+      # Per-run docker config dir so a concurrent hostlet-cloud deploy on the same
+      # runner host can't overwrite this job's ghcr.io auth mid-push (the runners
+      # share one ~/.docker/config.json -> intermittent GHCR 403).
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
       - name: Compute image tags
         run: echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build and push staging images
         env:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
