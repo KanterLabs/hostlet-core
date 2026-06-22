@@ -372,7 +372,9 @@ mod tests {
         ];
 
         assert_eq!(
-            release.asset("hostlet-linux-x64").map(|a| a.download_url.as_str()),
+            release
+                .asset("hostlet-linux-x64")
+                .map(|a| a.download_url.as_str()),
             Some("https://example.test/bin")
         );
         assert_eq!(
@@ -403,7 +405,9 @@ mod tests {
     #[test]
     fn parse_release_image_requires_ref() {
         assert!(parse_release_image(None).is_none());
-        assert!(parse_release_image(Some(&serde_json::json!({ "digest": "sha256:abc" }))).is_none());
+        assert!(
+            parse_release_image(Some(&serde_json::json!({ "digest": "sha256:abc" }))).is_none()
+        );
     }
 
     #[test]
