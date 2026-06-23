@@ -137,19 +137,6 @@ impl AppUpdate {
     }
 }
 
-/// Validate a `Option<Option<String>>` command field: an absent outer option
-/// leaves the column untouched, an inner `Some` is cleaned, and an inner
-/// `None` clears the command.
-fn clean_command_field(
-    field: Option<Option<String>>,
-) -> Result<Option<Option<String>>, &'static str> {
-    match field {
-        Some(Some(value)) => Ok(Some(clean_command(Some(value))?)),
-        Some(None) => Ok(Some(None)),
-        None => Ok(None),
-    }
-}
-
 async fn load_app_for_update(
     db: &PgPool,
     id: Uuid,
@@ -269,15 +256,15 @@ pub async fn update_app(
             Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
         }
     }
-    match clean_command_field(body.install_command) {
+    match clean_optional_command(body.install_command) {
         Ok(value) => update.install_command = value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     }
-    match clean_command_field(body.build_command) {
+    match clean_optional_command(body.build_command) {
         Ok(value) => update.build_command = value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     }
-    match clean_command_field(body.start_command) {
+    match clean_optional_command(body.start_command) {
         Ok(value) => update.start_command = value,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     }

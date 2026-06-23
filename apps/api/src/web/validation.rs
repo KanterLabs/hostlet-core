@@ -7,10 +7,10 @@ pub(in crate::web) use serialization::{app_json, health_json};
 // Re-export the contract-level validators directly so callers in `crate::web`
 // can use them by name without a hand-written passthrough wrapper per function.
 pub(in crate::web) use hostlet_contracts::{
-    app_slug, clean_command, clean_hostlet_config_path, clean_optional, clean_packaging_strategy,
-    clean_runtime_config, clean_runtime_kind, domain_host, valid_app_name, valid_branch,
-    valid_cpu_limit, valid_domain, valid_env_key, valid_health_path, valid_hostname,
-    valid_memory_limit, valid_repo_full_name, valid_root_directory,
+    app_slug, clean_command, clean_hostlet_config_path, clean_optional, clean_optional_command,
+    clean_packaging_strategy, clean_runtime_config, clean_runtime_kind, domain_host,
+    valid_app_name, valid_branch, valid_cpu_limit, valid_domain, valid_env_key, valid_health_path,
+    valid_hostname, valid_memory_limit, valid_repo_full_name, valid_root_directory,
 };
 
 pub(in crate::web) fn default_domain_pattern(state: &AppState) -> Option<String> {

@@ -227,6 +227,27 @@ pub fn clean_command(value: Option<String>) -> Result<Option<String>, &'static s
     Ok(Some(value))
 }
 
+/// Validate and normalise an optional command patch from an update request.
+///
+/// The wire type for install/build/start commands on an update is
+/// `Option<Option<String>>`: the outer `None` means "leave the column
+/// untouched", an inner `None` means "clear the column", and an inner `Some`
+/// carries the new value which is validated and trimmed via [`clean_command`].
+/// The caller-visible shape (`None` / `Some(None)` / `Some(Some(_))`) is
+/// preserved so persistence can distinguish "unchanged" from "cleared".
+///
+/// Extracted from the previously private `clean_command_field` (core) and
+/// `validate_optional_command` (cloud overlay), which were byte-identical.
+pub fn clean_optional_command(
+    field: Option<Option<String>>,
+) -> Result<Option<Option<String>>, &'static str> {
+    match field {
+        Some(Some(value)) => Ok(Some(clean_command(Some(value))?)),
+        Some(None) => Ok(Some(None)),
+        None => Ok(None),
+    }
+}
+
 pub fn clean_runtime_kind(value: Option<&str>) -> Result<String, &'static str> {
     let value = value
         .map(str::trim)
@@ -349,6 +370,30 @@ mod contract_helper_tests {
         assert_eq!(app_slug("!!!"), "app");
         assert_eq!(app_slug("---"), "app");
         assert_eq!(app_slug("   "), "app");
+    }
+
+    #[test]
+    fn clean_optional_command_preserves_three_way_distinction() {
+        // Outer None → leave column untouched.
+        assert_eq!(clean_optional_command(None), Ok(None));
+
+        // Outer Some, inner None → clear the column.
+        assert_eq!(clean_optional_command(Some(None)), Ok(Some(None)));
+
+        // Outer Some, inner Some with a valid value → normalise and keep.
+        assert_eq!(
+            clean_optional_command(Some(Some("  npm run build  ".into()))),
+            Ok(Some(Some("npm run build".into())))
+        );
+
+        // Outer Some, inner Some with an empty/whitespace value → collapse to clear.
+        assert_eq!(
+            clean_optional_command(Some(Some("   ".into()))),
+            Ok(Some(None))
+        );
+
+        // Outer Some, inner Some with a value that fails clean_command validation.
+        assert!(clean_optional_command(Some(Some("echo a\nrm -rf b".into()))).is_err());
     }
 
     #[test]
