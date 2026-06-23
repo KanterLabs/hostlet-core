@@ -87,8 +87,20 @@ test("successful deployment does not promote transient health check retries", as
   await page.goto("/deployments/deploy-1");
 
   await expect(page.getByText("First error in the log")).toHaveCount(0);
-  await expect(page.getByText("stdout: Health check attempt 1/30 did not connect: error sending request for url (http://127.0.0.1:37438/)")).toBeVisible();
-  await expect(page.getByText("stdout: Health check passed.")).toBeVisible();
+  await expect(page.getByText("Health check attempt 1/30 did not connect: error sending request for url (http://127.0.0.1:37438/)")).toBeVisible();
+  await expect(page.getByText("Health check passed.")).toBeVisible();
+});
+
+test("log viewer strips stdout/stderr prefixes from rendered lines", async ({ page }) => {
+  await mockDeploymentApi(page, validRuntimeMetadata, { status: "success" }, [
+    { stream: "stdout", line: "$ npm run build" },
+    { stream: "stderr", line: "oops" },
+  ]);
+  await page.goto("/deployments/deploy-1");
+
+  await expect(page.getByText("$ npm run build")).toBeVisible();
+  await expect(page.getByText("stdout:")).toHaveCount(0);
+  await expect(page.locator('[data-stream="stderr"]').getByText("oops")).toBeVisible();
 });
 
 test("firstErrorLine skips command echoes with error-like flags", () => {
