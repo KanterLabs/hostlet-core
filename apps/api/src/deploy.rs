@@ -306,14 +306,10 @@ pub async fn create_and_send_deploy(
             .bind(app_id)
             .fetch_one(&state.db)
             .await?;
-            if used_bytes >= account_limit {
-                anyhow::bail!(
-                    "Your projects are over the {} MB account storage limit ({} MB used by their \
-                     images + volumes). Remove a project, shrink an image, or upgrade your plan \
-                     before deploying.",
-                    account_limit / (1024 * 1024),
-                    used_bytes / (1024 * 1024),
-                );
+            if let Some(msg) =
+                storage_over_quota_error(used_bytes, account_limit, StorageScope::Account)
+            {
+                anyhow::bail!("{msg}");
             }
         }
         None => {
@@ -330,13 +326,10 @@ pub async fn create_and_send_deploy(
                 })
                 .unwrap_or(0);
             let limit_bytes = crate::storage::volume_storage_limit_bytes(&app.runtime_config);
-            if used_bytes >= limit_bytes {
-                anyhow::bail!(
-                    "This app is over its {} MB storage limit ({} MB used by its image + volumes). \
-                     Free space, shrink the image, or raise the limit before deploying.",
-                    limit_bytes / (1024 * 1024),
-                    used_bytes / (1024 * 1024),
-                );
+            if let Some(msg) =
+                storage_over_quota_error(used_bytes, limit_bytes, StorageScope::PerApp)
+            {
+                anyhow::bail!("{msg}");
             }
         }
     }
@@ -744,11 +737,48 @@ fn rollback_supported_for_runtime(runtime_kind: &str) -> bool {
     runtime_kind != "compose"
 }
 
+/// Which storage quota scope was exceeded, determining the user-facing message.
+#[derive(Debug, PartialEq)]
+enum StorageScope {
+    /// Account-wide cap: total footprint across all apps owned by the user.
+    Account,
+    /// Per-app cap: image + volumes for this one app.
+    PerApp,
+}
+
+/// Pure: returns the over-quota error message when `used_bytes >= limit_bytes`,
+/// `None` otherwise.  No I/O; extracts the decision from `create_and_send_deploy`
+/// so it can be unit-tested independently of the database.
+fn storage_over_quota_error(
+    used_bytes: i64,
+    limit_bytes: i64,
+    scope: StorageScope,
+) -> Option<String> {
+    if used_bytes < limit_bytes {
+        return None;
+    }
+    let limit_mb = limit_bytes / (1024 * 1024);
+    let used_mb = used_bytes / (1024 * 1024);
+    let msg = match scope {
+        StorageScope::Account => format!(
+            "Your projects are over the {limit_mb} MB account storage limit \
+             ({used_mb} MB used by their images + volumes). \
+             Remove a project, shrink an image, or upgrade your plan before deploying."
+        ),
+        StorageScope::PerApp => format!(
+            "This app is over its {limit_mb} MB storage limit \
+             ({used_mb} MB used by its image + volumes). \
+             Free space, shrink the image, or raise the limit before deploying."
+        ),
+    };
+    Some(msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         deployment_queue_status, is_active_deployment_status, rollback_supported_for_runtime,
-        route_key,
+        route_key, storage_over_quota_error, StorageScope,
     };
     use crate::state::AppState;
     use uuid::Uuid;
@@ -785,6 +815,47 @@ mod tests {
     fn compose_rollback_is_disabled_for_release() {
         assert!(rollback_supported_for_runtime("single"));
         assert!(!rollback_supported_for_runtime("compose"));
+    }
+
+    #[test]
+    fn storage_quota_returns_none_when_under_limit() {
+        // Under-limit returns None for both scopes; used == limit - 1 is still ok.
+        let limit = 512_i64 * 1024 * 1024;
+        assert_eq!(
+            storage_over_quota_error(limit - 1, limit, StorageScope::PerApp),
+            None
+        );
+        assert_eq!(
+            storage_over_quota_error(limit - 1, limit, StorageScope::Account),
+            None
+        );
+    }
+
+    #[test]
+    fn storage_quota_per_app_error_at_or_over_limit() {
+        // used == limit triggers the gate; message mentions limit in MB and "This app".
+        let limit = 512_i64 * 1024 * 1024;
+        let msg = storage_over_quota_error(limit, limit, StorageScope::PerApp)
+            .expect("used == limit should produce an error");
+        assert!(msg.contains("512 MB"), "limit in message: {msg}");
+        assert!(msg.contains("This app"), "per-app scope in message: {msg}");
+    }
+
+    #[test]
+    fn storage_quota_account_error_over_limit() {
+        // Account-scope message mentions limit in MB and prompts plan upgrade.
+        let limit = 4096_i64 * 1024 * 1024;
+        let msg = storage_over_quota_error(limit + 1, limit, StorageScope::Account)
+            .expect("used > limit should produce an error");
+        assert!(msg.contains("4096 MB"), "limit in message: {msg}");
+        assert!(
+            msg.contains("Your projects"),
+            "account scope in message: {msg}"
+        );
+        assert!(
+            msg.contains("upgrade your plan"),
+            "upgrade hint in message: {msg}"
+        );
     }
 
     #[tokio::test]
