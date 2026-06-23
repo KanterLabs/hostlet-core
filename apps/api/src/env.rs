@@ -6,19 +6,31 @@
 /// the moment cloud needs to customise those files. Placing shared, stable
 /// helpers here is *intended* to keep them outside the override boundary.
 ///
-/// **Current limitation:** hostlet-cloud currently re-inlines its own copies of
-/// several helpers from this file rather than inheriting them through the
-/// submodule. Changes made here are therefore NOT automatically reflected in
-/// cloud until the corresponding cloud-side duplicates are removed and the
-/// imports are redirected to core. The real fix is cloud-side; this file itself
-/// is correct and should remain the canonical source.
+/// **Note on cloud overlay:** cloud's `state.rs` used to re-inline its own
+/// copies of several helpers rather than inheriting them through the submodule.
+/// `nonempty_env` has been de-duplicated (C5); cloud now imports it from here.
+/// Any future helpers added to this file are safe to use in cloud without
+/// duplication, as long as cloud's `state.rs` imports them from `crate::env`.
 ///
 /// Placement rule (mandatory): shared helpers must live here (or in another
 /// file not listed in the cloud override set). See `AGENTS.md` for the full
 /// override inventory.
-use crate::crypto::nonempty_env;
 use anyhow::Context;
 use std::{path::PathBuf, time::Duration};
+
+/// Reads an environment variable, trims it, and returns `None` when it is
+/// missing or empty after trimming.
+///
+/// Canonical definition lives here (a file cloud does not override) so both
+/// core and cloud can reach it via `crate::env::nonempty_env` without
+/// duplicating logic. `crypto.rs` re-exports it from here; cloud's
+/// `state.rs` overlay should also import it from here.
+pub(crate) fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 /// Build the shared reqwest HTTP client used by all outbound API calls.
 ///
