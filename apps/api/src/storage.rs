@@ -15,8 +15,9 @@ fn default_volume_storage_limit_mb() -> i64 {
         .unwrap_or(hostlet_contracts::DEFAULT_VOLUME_STORAGE_LIMIT_MB)
 }
 
-/// Resolves an app's effective storage limit in bytes from its runtime config,
-/// falling back to the self-hosted default.
+/// Resolves an app's effective per-app storage limit in bytes from its runtime
+/// config, falling back to the self-hosted default. Used by the deploy gate only
+/// when no account-wide limit applies (see [`account_storage_limit_bytes`]).
 pub(crate) fn volume_storage_limit_bytes(runtime_config: &serde_json::Value) -> i64 {
     runtime_config
         .pointer("/compose/volumeStorageLimitMb")
@@ -24,6 +25,20 @@ pub(crate) fn volume_storage_limit_bytes(runtime_config: &serde_json::Value) -> 
         .filter(|mb| *mb > 0)
         .unwrap_or_else(default_volume_storage_limit_mb)
         .saturating_mul(1024 * 1024)
+}
+
+/// Resolves an app's account-wide (per-owner) storage limit in bytes, or `None`
+/// when the app declares none. Hostlet Cloud injects
+/// `runtime_config.compose.accountStorageLimitMb` per plan; when present it
+/// supersedes the per-app limit, and the deploy gate holds the owner's *total*
+/// footprint (image + volume across all their apps) to it instead. Self-hosted
+/// apps set no such field and keep the per-app limit.
+pub(crate) fn account_storage_limit_bytes(runtime_config: &serde_json::Value) -> Option<i64> {
+    runtime_config
+        .pointer("/compose/accountStorageLimitMb")
+        .and_then(|value| value.as_i64())
+        .filter(|mb| *mb > 0)
+        .map(|mb| mb.saturating_mul(1024 * 1024))
 }
 
 #[cfg(test)]
@@ -45,6 +60,20 @@ mod tests {
                 &serde_json::json!({ "compose": { "volumeStorageLimitMb": 0 } })
             ),
             default
+        );
+    }
+
+    #[test]
+    fn account_limit_is_some_only_when_a_positive_cap_is_set() {
+        let rc = serde_json::json!({ "compose": { "accountStorageLimitMb": 4096 } });
+        assert_eq!(account_storage_limit_bytes(&rc), Some(4096 * 1024 * 1024));
+        // Absent or non-positive => no account-wide limit (self-hosted path).
+        assert_eq!(account_storage_limit_bytes(&serde_json::json!({})), None);
+        assert_eq!(
+            account_storage_limit_bytes(
+                &serde_json::json!({ "compose": { "accountStorageLimitMb": 0 } })
+            ),
+            None
         );
     }
 }

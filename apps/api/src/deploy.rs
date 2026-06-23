@@ -285,31 +285,60 @@ pub async fn create_and_send_deploy(
     .fetch_one(&state.db)
     .await?;
     let app = DeployApp::from_row(&app_row);
-    // Storage quota gate (soft): refuse to start a new deploy when the app is
-    // already over its storage limit, using the last sampled usage. Usage counts
-    // the built image plus the managed volume(s); the ephemeral container
-    // writable layer does not. Running data is untouched — the user frees space,
-    // shrinks the image, or raises the limit. Self-hosted uses the default limit;
-    // Cloud injects a per-plan cap.
-    let usage =
-        sqlx::query("SELECT used_bytes, image_bytes FROM app_storage_usage WHERE app_id=$1")
+    // Storage quota gate (soft): refuse to start a new deploy when storage is
+    // already over the limit, using the last sampled usage. Usage counts the
+    // built image plus the managed volume(s); the ephemeral container writable
+    // layer does not. Running data is untouched — the user frees space, shrinks
+    // the image, or raises the limit.
+    //
+    // When the app declares an account-wide cap (Hostlet Cloud injects one per
+    // plan), the limit is the owner's *total* footprint across all their apps and
+    // supersedes the per-app limit, so storage is one shared quota rather than a
+    // separate cap per app. Self-hosted apps declare none and keep the per-app
+    // (default) limit.
+    match crate::storage::account_storage_limit_bytes(&app.runtime_config) {
+        Some(account_limit) => {
+            let used_bytes: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(su.used_bytes + su.image_bytes), 0)::bigint \
+                 FROM app_storage_usage su JOIN apps a ON a.id = su.app_id \
+                 WHERE a.user_id = (SELECT user_id FROM apps WHERE id = $1)",
+            )
+            .bind(app_id)
+            .fetch_one(&state.db)
+            .await?;
+            if used_bytes >= account_limit {
+                anyhow::bail!(
+                    "Your projects are over the {} MB account storage limit ({} MB used by their \
+                     images + volumes). Remove a project, shrink an image, or upgrade your plan \
+                     before deploying.",
+                    account_limit / (1024 * 1024),
+                    used_bytes / (1024 * 1024),
+                );
+            }
+        }
+        None => {
+            let usage = sqlx::query(
+                "SELECT used_bytes, image_bytes FROM app_storage_usage WHERE app_id=$1",
+            )
             .bind(app_id)
             .fetch_optional(&state.db)
             .await?;
-    let used_bytes = usage
-        .map(|row| {
-            row.get::<i64, _>("used_bytes")
-                .saturating_add(row.get::<i64, _>("image_bytes"))
-        })
-        .unwrap_or(0);
-    let limit_bytes = crate::storage::volume_storage_limit_bytes(&app.runtime_config);
-    if used_bytes >= limit_bytes {
-        anyhow::bail!(
-            "This app is over its {} MB storage limit ({} MB used by its image + volumes). \
-             Free space, shrink the image, or raise the limit before deploying.",
-            limit_bytes / (1024 * 1024),
-            used_bytes / (1024 * 1024),
-        );
+            let used_bytes = usage
+                .map(|row| {
+                    row.get::<i64, _>("used_bytes")
+                        .saturating_add(row.get::<i64, _>("image_bytes"))
+                })
+                .unwrap_or(0);
+            let limit_bytes = crate::storage::volume_storage_limit_bytes(&app.runtime_config);
+            if used_bytes >= limit_bytes {
+                anyhow::bail!(
+                    "This app is over its {} MB storage limit ({} MB used by its image + volumes). \
+                     Free space, shrink the image, or raise the limit before deploying.",
+                    limit_bytes / (1024 * 1024),
+                    used_bytes / (1024 * 1024),
+                );
+            }
+        }
     }
     let server_id = app.server_id;
     let insert_deployment = sqlx::query(
