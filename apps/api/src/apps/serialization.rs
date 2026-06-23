@@ -97,7 +97,9 @@ pub const APP_SELECT_BODY: &str = r#"
             FROM deployment_services ds
             WHERE ds.deployment_id = a.current_deployment_id
           ), '[]'::jsonb) AS services,
-          su.used_bytes AS storage_used_bytes
+          su.used_bytes AS storage_used_bytes,
+          su.image_bytes AS storage_image_bytes,
+          su.container_bytes AS storage_container_bytes
         FROM apps a
         JOIN servers s ON s.id = a.server_id
         LEFT JOIN LATERAL (
@@ -156,7 +158,15 @@ where
 /// tenant responses.  Every other field is identical in both cases.
 pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_json::Value {
     let runtime_config: serde_json::Value = or_default(&r, "runtime_config", serde_json::json!({}));
+    // `storage_used_bytes` is the managed volume total — the value the per-plan
+    // quota and the over-quota deploy gate are held to. Image and container
+    // bytes are the rest of the app's disk footprint, shown but never gated.
     let storage_used_bytes = opt::<i64>(&r, "storage_used_bytes").unwrap_or(0);
+    let storage_image_bytes = opt::<i64>(&r, "storage_image_bytes").unwrap_or(0);
+    let storage_container_bytes = opt::<i64>(&r, "storage_container_bytes").unwrap_or(0);
+    let storage_total_bytes = storage_used_bytes
+        .saturating_add(storage_image_bytes)
+        .saturating_add(storage_container_bytes);
     let storage_limit_bytes = crate::storage::volume_storage_limit_bytes(&runtime_config);
     let mut value = serde_json::json!({
         "id": req::<Uuid>(&r, "id"),
@@ -225,8 +235,34 @@ pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_js
             "updatedAt": or_default::<Option<chrono::DateTime<chrono::Utc>>>(&r, "health_updated_at", None)
         }))
     });
+    apply_storage_footprint(
+        &mut value,
+        storage_image_bytes,
+        storage_container_bytes,
+        storage_total_bytes,
+    );
     apply_server_visibility(&mut value, include_server);
     value
+}
+
+/// Adds the disk-footprint breakdown fields onto the app value. Set after the
+/// main object is built (rather than inside the `json!` macro) so the large
+/// serializer stays under the macro recursion limit. `storageUsedBytes` already
+/// carries the managed-volume value; these are the rest of the footprint.
+fn apply_storage_footprint(
+    value: &mut serde_json::Value,
+    image_bytes: i64,
+    container_bytes: i64,
+    total_bytes: i64,
+) {
+    if let Some(map) = value.as_object_mut() {
+        map.insert("storageImageBytes".into(), serde_json::json!(image_bytes));
+        map.insert(
+            "storageContainerBytes".into(),
+            serde_json::json!(container_bytes),
+        );
+        map.insert("storageTotalBytes".into(), serde_json::json!(total_bytes));
+    }
 }
 
 /// Drop the "server" sub-object when the caller hides host infra, leaving every other field untouched.

@@ -262,6 +262,10 @@ async fn handle_storage_stats(state: &AppState, server_id: Uuid, msg: &serde_jso
     let Some(used_bytes) = bounded_i64(msg, "usedBytes", RESOURCE_BYTES_RANGE) else {
         return;
     };
+    // Display-only footprint fields. Older agents omit them, so default to 0;
+    // they never gate deploys (only `used_bytes`, the managed volume, does).
+    let image_bytes = bounded_i64(msg, "imageBytes", RESOURCE_BYTES_RANGE).unwrap_or(0);
+    let container_bytes = bounded_i64(msg, "containerBytes", RESOURCE_BYTES_RANGE).unwrap_or(0);
     // Sanitize the per-volume breakdown: cap the count and validate each entry
     // before storing it as jsonb.
     let volumes: Vec<serde_json::Value> = msg
@@ -281,15 +285,20 @@ async fn handle_storage_stats(state: &AppState, server_id: Uuid, msg: &serde_jso
     // Keep the latest sample per app; the apps/server_id guard ensures an agent
     // only reports usage for apps assigned to its own server.
     let _ = sqlx::query(
-        "INSERT INTO app_storage_usage (app_id, used_bytes, volumes, sampled_at) \
-         SELECT $1, $2, $3, now() FROM apps WHERE id = $1 AND server_id = $4 \
+        "INSERT INTO app_storage_usage \
+           (app_id, used_bytes, image_bytes, container_bytes, volumes, sampled_at) \
+         SELECT $1, $2, $3, $4, $5, now() FROM apps WHERE id = $1 AND server_id = $6 \
          ON CONFLICT (app_id) DO UPDATE SET \
            used_bytes = EXCLUDED.used_bytes, \
+           image_bytes = EXCLUDED.image_bytes, \
+           container_bytes = EXCLUDED.container_bytes, \
            volumes = EXCLUDED.volumes, \
            sampled_at = now()",
     )
     .bind(app_id)
     .bind(used_bytes)
+    .bind(image_bytes)
+    .bind(container_bytes)
     .bind(serde_json::Value::Array(volumes))
     .bind(server_id)
     .execute(&state.db)
