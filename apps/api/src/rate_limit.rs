@@ -138,7 +138,7 @@ impl Default for RateLimiter {
 impl RateLimiter {
     pub fn check(&self, key: String, max: u32, window: Duration) -> bool {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().expect("rate limiter mutex poisoned");
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         if buckets.len() > BUCKET_EVICTION_THRESHOLD {
             buckets.retain(|_, bucket| now.duration_since(bucket.started_at) <= BUCKET_IDLE_TTL);
         }

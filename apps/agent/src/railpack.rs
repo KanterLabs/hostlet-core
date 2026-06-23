@@ -25,7 +25,7 @@ impl RailpackBuildkitSession {
         };
         let idle = {
             let refcounts = buildkit_refcounts();
-            let mut counts = refcounts.lock().expect("buildkit refcounts mutex poisoned");
+            let mut counts = refcounts.lock().unwrap_or_else(|e| e.into_inner());
             buildkit_release(&mut counts, &container)
         };
         if !idle {
@@ -248,7 +248,7 @@ async fn ensure_railpack_buildkit(
     // has an accurate count even if the caller drops the session early.
     {
         let refcounts = buildkit_refcounts();
-        let mut counts = refcounts.lock().expect("buildkit refcounts mutex poisoned");
+        let mut counts = refcounts.lock().unwrap_or_else(|e| e.into_inner());
         buildkit_acquire(&mut counts, &container);
     }
     Ok(RailpackBuildkitSession {
@@ -400,7 +400,7 @@ fn schedule_railpack_buildkit_idle_stop(cfg: Config, deployment_id: Uuid, contai
     let last_used = railpack_buildkit_last_used();
     let used_at = Instant::now();
     {
-        let mut map = last_used.lock().expect("buildkit last-used mutex poisoned");
+        let mut map = last_used.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(container.clone(), used_at);
     }
     let idle = Duration::from_secs(railpack_buildkit_idle_seconds());
@@ -409,9 +409,9 @@ fn schedule_railpack_buildkit_idle_stop(cfg: Config, deployment_id: Uuid, contai
         // Stop only if no newer build has touched the container AND no build is
         // currently using it (refcount guard prevents stopping mid-build).
         let should_stop = {
-            let map = last_used.lock().expect("buildkit last-used mutex poisoned");
+            let map = last_used.lock().unwrap_or_else(|e| e.into_inner());
             let refcounts = buildkit_refcounts();
-            let counts = refcounts.lock().expect("buildkit refcounts mutex poisoned");
+            let counts = refcounts.lock().unwrap_or_else(|e| e.into_inner());
             map.get(&container).is_some_and(|latest| *latest == used_at)
                 && counts.get(&container).is_none_or(|n| *n == 0)
         };
