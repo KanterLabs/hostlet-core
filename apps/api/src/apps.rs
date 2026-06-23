@@ -157,3 +157,147 @@ pub async fn create_app_record(
     })?;
     Ok(app_id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shared server id seeded by `db_test_state_from_env` via `seed_local_server`.
+    const TEST_SERVER_ID: Uuid = Uuid::from_u128(1);
+
+    async fn reset_db(state: &AppState) {
+        // Truncate derived tables before apps; users is cleared with DELETE so
+        // the NULL-FK servers row (seeded by seed_local_server) is untouched.
+        sqlx::query("TRUNCATE app_env_vars, apps CASCADE")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users")
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_user(state: &AppState, github_id: i64, login: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (github_id, login) VALUES ($1,$2) RETURNING id",
+        )
+        .bind(github_id)
+        .bind(login)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    fn minimal_record(user_id: Uuid, name: &str, domain: &str) -> NewAppRecord {
+        NewAppRecord {
+            user_id,
+            server_id: TEST_SERVER_ID,
+            name: name.into(),
+            repo_full_name: "hostlet-ci/node-hello".into(),
+            branch: "main".into(),
+            container_port: 3000,
+            health_path: "/health".into(),
+            domain: domain.into(),
+            runtime_kind: "single".into(),
+            hostlet_config_path: ".hostlet.yml".into(),
+            runtime_config: serde_json::json!({}),
+            packaging_strategy: "generated".into(),
+            root_directory: ".".into(),
+            install_command: None,
+            build_command: None,
+            start_command: None,
+            memory_limit_mb: None,
+            cpu_limit: None,
+            public_exposure: true,
+            auto_deploy: false,
+            env: vec![],
+        }
+    }
+
+    /// Success path: `create_app_record` persists the row and returns a valid UUID.
+    #[tokio::test]
+    async fn db_create_app_record_persists_row_and_returns_id() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_db(&state).await;
+        let user_id = insert_user(&state, 88801, "apps-create-user").await;
+
+        let app_id = create_app_record(
+            &state,
+            minimal_record(user_id, "test-app", "test-app.example.test"),
+        )
+        .await
+        .expect("create_app_record should succeed");
+
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM apps WHERE id=$1 AND user_id=$2)")
+                .bind(app_id)
+                .bind(user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert!(exists, "app row should be persisted in the database");
+    }
+
+    /// Env-var path: env vars are encrypted at rest, not stored as plaintext.
+    #[tokio::test]
+    async fn db_create_app_record_env_var_is_stored_encrypted() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_db(&state).await;
+        let user_id = insert_user(&state, 88802, "apps-env-user").await;
+        let mut record = minimal_record(user_id, "env-app", "env-app.example.test");
+        record.env = vec![AppEnvVarInput {
+            key: "MY_SECRET".into(),
+            value: "top-secret-value".into(),
+        }];
+
+        let app_id = create_app_record(&state, record)
+            .await
+            .expect("create_app_record with env var should succeed");
+
+        let ciphertext: String = sqlx::query_scalar(
+            "SELECT value_ciphertext FROM app_env_vars WHERE app_id=$1 AND key='MY_SECRET'",
+        )
+        .bind(app_id)
+        .fetch_one(&state.db)
+        .await
+        .expect("env var row should be persisted");
+        // Must not be stored as plaintext.
+        assert_ne!(
+            ciphertext, "top-secret-value",
+            "value must be encrypted at rest"
+        );
+        // Decrypting must recover the original value.
+        let decrypted = state
+            .crypto
+            .decrypt(&ciphertext)
+            .expect("ciphertext should decrypt");
+        assert_eq!(decrypted, "top-secret-value");
+    }
+
+    /// Error path: a non-existent user_id causes an FK violation → `CreateAppError::Insert`.
+    #[tokio::test]
+    async fn db_create_app_record_nonexistent_user_returns_insert_error() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_db(&state).await;
+        // Deliberately use a UUID that has no matching row in `users`.
+        let bogus_user_id = Uuid::new_v4();
+
+        let result = create_app_record(
+            &state,
+            minimal_record(bogus_user_id, "fk-app", "fk.example.test"),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(CreateAppError::Insert)),
+            "FK violation should map to CreateAppError::Insert"
+        );
+    }
+}
