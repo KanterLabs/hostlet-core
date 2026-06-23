@@ -44,9 +44,8 @@ pub(super) async fn assert_over_quota_gate_blocks_deploy(state: &AppState, user_
         "unexpected error: {err}"
     );
 
-    // A second app with a tiny volume but a huge image + container layer: the
-    // footprint fields are stored, and the over-quota gate stays volume-only, so
-    // the large image must not block its deploy.
+    // A second app with a tiny volume but a huge image: the image counts toward
+    // the quota, so it is over the 5 GB default and its deploy is blocked.
     let big_image_app = insert_app(state, user_id).await;
     handle_agent_message(
         state,
@@ -56,7 +55,7 @@ pub(super) async fn assert_over_quota_gate_blocks_deploy(state: &AppState, user_
             "appId": big_image_app,
             "usedBytes": 1_000_i64,
             "imageBytes": 8_000_000_000_i64,
-            "containerBytes": 2_000_000_000_i64,
+            "containerBytes": 0_i64,
             "volumes": [{ "name": "data", "usedBytes": 1_000_i64 }],
         }),
     )
@@ -68,13 +67,36 @@ pub(super) async fn assert_over_quota_gate_blocks_deploy(state: &AppState, user_
             .await
             .unwrap();
     assert_eq!(footprint.get::<i64, _>("image_bytes"), 8_000_000_000);
-    assert_eq!(footprint.get::<i64, _>("container_bytes"), 2_000_000_000);
+    let err = crate::deploy::create_and_send_deploy(state, user_id, big_image_app, "HEAD")
+        .await
+        .expect_err("a large image must trip the storage quota gate");
+    assert!(
+        err.to_string().contains("storage limit"),
+        "unexpected error: {err}"
+    );
+
+    // A third app whose only large usage is the ephemeral writable layer: it is
+    // not counted toward the quota, so the deploy is not storage-blocked.
+    let writable_only_app = insert_app(state, user_id).await;
+    handle_agent_message(
+        state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "storage_stats",
+            "appId": writable_only_app,
+            "usedBytes": 1_000_i64,
+            "imageBytes": 1_000_i64,
+            "containerBytes": 8_000_000_000_i64,
+            "volumes": [{ "name": "data", "usedBytes": 1_000_i64 }],
+        }),
+    )
+    .await;
     if let Err(err) =
-        crate::deploy::create_and_send_deploy(state, user_id, big_image_app, "HEAD").await
+        crate::deploy::create_and_send_deploy(state, user_id, writable_only_app, "HEAD").await
     {
         assert!(
             !err.to_string().contains("storage limit"),
-            "image/container bytes must not trip the volume quota gate: {err}"
+            "the ephemeral writable layer must not trip the storage quota gate: {err}"
         );
     }
 }

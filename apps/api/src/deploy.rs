@@ -286,20 +286,27 @@ pub async fn create_and_send_deploy(
     .await?;
     let app = DeployApp::from_row(&app_row);
     // Storage quota gate (soft): refuse to start a new deploy when the app is
-    // already over its managed-volume storage limit, using the last sampled
-    // usage. Running data is untouched — the user frees space or raises the
-    // limit. Self-hosted uses the default limit; Cloud injects a per-plan cap.
-    let used_bytes: i64 =
-        sqlx::query_scalar("SELECT used_bytes FROM app_storage_usage WHERE app_id=$1")
+    // already over its storage limit, using the last sampled usage. Usage counts
+    // the built image plus the managed volume(s); the ephemeral container
+    // writable layer does not. Running data is untouched — the user frees space,
+    // shrinks the image, or raises the limit. Self-hosted uses the default limit;
+    // Cloud injects a per-plan cap.
+    let usage =
+        sqlx::query("SELECT used_bytes, image_bytes FROM app_storage_usage WHERE app_id=$1")
             .bind(app_id)
             .fetch_optional(&state.db)
-            .await?
-            .unwrap_or(0);
+            .await?;
+    let used_bytes = usage
+        .map(|row| {
+            row.get::<i64, _>("used_bytes")
+                .saturating_add(row.get::<i64, _>("image_bytes"))
+        })
+        .unwrap_or(0);
     let limit_bytes = crate::storage::volume_storage_limit_bytes(&app.runtime_config);
     if used_bytes >= limit_bytes {
         anyhow::bail!(
-            "This app is over its {} MB managed-storage limit ({} MB used). Free space in its \
-             volumes or raise the limit before deploying.",
+            "This app is over its {} MB storage limit ({} MB used by its image + volumes). \
+             Free space, shrink the image, or raise the limit before deploying.",
             limit_bytes / (1024 * 1024),
             used_bytes / (1024 * 1024),
         );

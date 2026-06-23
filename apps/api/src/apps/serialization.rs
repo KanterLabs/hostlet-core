@@ -158,15 +158,17 @@ where
 /// tenant responses.  Every other field is identical in both cases.
 pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_json::Value {
     let runtime_config: serde_json::Value = or_default(&r, "runtime_config", serde_json::json!({}));
-    // `storage_used_bytes` is the managed volume total — the value the per-plan
-    // quota and the over-quota deploy gate are held to. Image and container
-    // bytes are the rest of the app's disk footprint, shown but never gated.
-    let storage_used_bytes = opt::<i64>(&r, "storage_used_bytes").unwrap_or(0);
+    // Storage usage counted toward the per-plan quota and the over-quota deploy
+    // gate is the built image plus the managed volume(s). The DB `used_bytes`
+    // column holds the volume total; `image_bytes` the built image. The ephemeral
+    // container writable layer is shown in the footprint but never gated.
+    let storage_volume_bytes = opt::<i64>(&r, "storage_used_bytes").unwrap_or(0);
     let storage_image_bytes = opt::<i64>(&r, "storage_image_bytes").unwrap_or(0);
     let storage_container_bytes = opt::<i64>(&r, "storage_container_bytes").unwrap_or(0);
-    let storage_total_bytes = storage_used_bytes
-        .saturating_add(storage_image_bytes)
-        .saturating_add(storage_container_bytes);
+    // `storageUsedBytes` is the gated usage (image + volume); the writable layer
+    // is added only into the displayed total footprint.
+    let storage_used_bytes = storage_volume_bytes.saturating_add(storage_image_bytes);
+    let storage_total_bytes = storage_used_bytes.saturating_add(storage_container_bytes);
     let storage_limit_bytes = crate::storage::volume_storage_limit_bytes(&runtime_config);
     let mut value = serde_json::json!({
         "id": req::<Uuid>(&r, "id"),
@@ -237,6 +239,7 @@ pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_js
     });
     apply_storage_footprint(
         &mut value,
+        storage_volume_bytes,
         storage_image_bytes,
         storage_container_bytes,
         storage_total_bytes,
@@ -248,14 +251,17 @@ pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_js
 /// Adds the disk-footprint breakdown fields onto the app value. Set after the
 /// main object is built (rather than inside the `json!` macro) so the large
 /// serializer stays under the macro recursion limit. `storageUsedBytes` already
-/// carries the managed-volume value; these are the rest of the footprint.
+/// carries the gated usage (image + volume); these break it down and add the
+/// ungated writable layer + total.
 fn apply_storage_footprint(
     value: &mut serde_json::Value,
+    volume_bytes: i64,
     image_bytes: i64,
     container_bytes: i64,
     total_bytes: i64,
 ) {
     if let Some(map) = value.as_object_mut() {
+        map.insert("storageVolumeBytes".into(), serde_json::json!(volume_bytes));
         map.insert("storageImageBytes".into(), serde_json::json!(image_bytes));
         map.insert(
             "storageContainerBytes".into(),
