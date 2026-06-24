@@ -2,6 +2,9 @@
 
 Self-hosted Hostlet runs the web UI, API, Postgres, local agent, and Caddy router on your machine.
 
+The Machines page reports this local deploy target, including agent heartbeat
+and deployment mode. Remote VPS management is not active in the current Core UI.
+
 ## Access Modes
 
 LAN-only mode keeps the control plane on your local network:

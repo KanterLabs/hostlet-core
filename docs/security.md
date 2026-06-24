@@ -60,7 +60,7 @@ Important security objectives:
 - No per-app network egress policy exists.
 - User-provided Dockerfiles are responsible for their own runtime user.
 - Image vulnerability scanning is not yet integrated.
-- Audit UI is not yet complete.
+- Settings shows a recent audit trail, but full audit search/export is not yet complete.
 - Scheduled off-host backups and clean-machine restore validation remain operational work.
 
 Use separate machines or VMs for higher-risk workloads.

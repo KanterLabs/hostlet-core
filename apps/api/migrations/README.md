@@ -18,13 +18,19 @@ core:
 | 022 | `022_simple_cloud_app_limits.sql` |
 | 024 | `024_cloud_portfolios.sql` |
 | 027 | `027_cloud_usage_rollup_hardening.sql` |
+| 029 | `029_cloud_portfolio_order.sql` |
+| 031 | `031_cloud_compose_plan_limits.sql` |
+| 033 | `033_cloud_volume_storage_limit.sql` |
+| 034 | `034_cloud_profile_entries.sql` |
+| 036 | `036_cloud_total_storage_limit.sql` |
+| 037 | `037_cloud_profile_entries_skills_kind.sql` |
 
 ## Next migration
 
-Core's next migration must start at **028 or higher**.  Before picking a
+Core's next migration must start at **038 or higher** unless a lower unused
+number is intentionally coordinated with `hostlet-cloud`. Before picking a
 version number, check `hostlet-cloud/apps/api/migrations/` for newly reserved
-numbers; a cloud-side renumbering/CI collision gate is planned as a separate
-task.
+numbers and keep byte-identical duplicate migrations in sync.
 
 ## Intentionally duplicated files
 

@@ -1,6 +1,8 @@
 # Deploying Apps
 
-Hostlet deploys supported GitHub repositories through the local or managed agent.
+Hostlet deploys supported GitHub repositories through the local self-hosted
+agent. Remote self-hosted server registration is deferred in Hostlet Core;
+managed worker behavior is outside the public Core runtime.
 
 ## Dockerfile Apps
 
@@ -37,10 +39,26 @@ Allowed Compose behavior focuses on app services and named volumes. Hostlet reje
 - custom networks
 - privileged containers
 - devices
-- host bind mounts
+- absolute or escaping host bind mounts
 - `container_name`
 
+Relative bind mounts that stay inside the repository may be remapped into
+Hostlet-managed named volumes during deploy. Hostlet does not allow arbitrary
+host paths or Docker socket mounts inside app services.
+
 Docker Compose apps are supported only in self-hosted installs that meet the local safety checks.
+
+In app detail, Compose apps show per-service cards. The web service is the
+publicly routed service; backing services stay internal and report service
+status, health, image/container metadata, and ports when available.
+
+## Apps Page
+
+The Apps page is a fleet view, not only a deploy launcher. It filters apps by
+active, failed, public, healthy, degraded, unhealthy, and unknown states. App
+cards show deployment status, health, machine, route, runtime, resource limits,
+auto redeploy state, latest webhook result, app detail links, deployment logs,
+and public/private app links when available.
 
 ## Runtime Health
 
@@ -51,6 +69,18 @@ Health state is separate from deployment status:
 - one failure marks an app degraded
 - repeated failures mark it unhealthy
 - owners can trigger a manual check or restart
+
+The app detail page also shows recent health events, live Docker resource
+statistics, storage usage, screenshots, automation/webhook status, settings,
+and encrypted environment variable controls.
+
+## Deployment Logs UI
+
+Deployment detail shows queue/building position, ordered status steps, retained
+logs, deployment metrics, websocket stream status, and first-error highlighting
+for failed deployments. The log viewer supports copy, wrap/no-wrap, follow, and
+jump-to-latest controls. If the live websocket disconnects, the page falls back
+to retained logs and shows the stream state.
 
 ## Rollbacks And State
 

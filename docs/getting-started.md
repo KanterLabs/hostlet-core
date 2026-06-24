@@ -16,10 +16,14 @@ The hosted-service layer is not required for self-hosted use.
 ```bash
 git clone https://github.com/ShaneKanterman04/hostlet-core.git
 cd hostlet-core
-curl -L https://github.com/ShaneKanterman04/hostlet-core/releases/latest/download/hostlet-linux-x64 -o hostlet
+curl -L https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/hostlet-linux-x64 -o hostlet
 chmod +x hostlet
 sudo mv hostlet /usr/local/bin/hostlet
 ```
+
+The public source lives in `hostlet-core`; release assets are currently
+published from the `ShaneKanterman04/Hostlet` GitHub Releases feed that the CLI
+updater reads.
 
 ## Initialize
 
@@ -45,26 +49,40 @@ Cloudflare Tunnel mode:
 hostlet up --tunnel
 ```
 
-Then open the URL printed by the CLI, enter the setup token if prompted, set the control-plane password, unlock the panel, and connect GitHub.
+Then open the URL printed by the CLI, enter the setup token if prompted, set a
+control-plane password of at least 12 characters, unlock the panel, and connect
+GitHub. The setup token field is used only when the install was configured with
+one.
+
+The web UI includes a persisted light/dark/system theme toggle. It is shown in
+the side rail on desktop and in the top-right corner on mobile, and it applies
+before the page paints on later visits.
 
 ## First App
 
 1. Click **New app**.
-2. Pick a GitHub repository.
-3. Choose the detected app shape.
-4. Click **Deploy**.
-5. Watch logs until the deployment succeeds.
+2. Choose a GitHub repository or paste a repo URL.
+3. Click **Inspect repo**.
+4. Review the inferred runtime, environment keys, route, and deploy settings.
+5. Click **Create and deploy**.
+6. Hostlet opens deployment logs when a deployment starts; otherwise it opens the app detail page.
 
 See [Deploying Apps](deploying-apps.md) for supported app shapes and limits.
 
-## Useful Commands
+## Common Commands
 
 ```bash
+hostlet version
 hostlet status
 hostlet logs
 hostlet doctor
 hostlet update check
+hostlet update --dry-run
 hostlet update
+hostlet update rollback
 hostlet backup
+hostlet backup --scheduled
+hostlet cleanup --dry-run
+hostlet cleanup --yes
 hostlet down
 ```

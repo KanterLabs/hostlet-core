@@ -37,7 +37,7 @@ Production releases are tagged `vX.Y.Z` and publish:
 
 - CLI binary and checksum
 - `hostlet-release.json`
-- GHCR images for API, web, and agent
+- GHCR images for API, web, agent, and screenshotter
 
 ## Security Review Expectations
 

@@ -8,6 +8,7 @@ Hostlet is an open-source deployment control panel for running web apps on your 
 - Dockerfile and Railpack generated app support.
 - Deployment logs, runtime health, restart, rollback, and delete flows.
 - Encrypted app environment variables.
+- App screenshot capture for exposed app URLs.
 - Optional Cloudflare Tunnel support for self-hosted public URLs.
 - Image-based production releases from GHCR.
 
@@ -26,10 +27,14 @@ Install the self-hosted CLI:
 ```bash
 git clone https://github.com/ShaneKanterman04/hostlet-core.git
 cd hostlet-core
-curl -L https://github.com/ShaneKanterman04/hostlet-core/releases/latest/download/hostlet-linux-x64 -o hostlet
+curl -L https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/hostlet-linux-x64 -o hostlet
 chmod +x hostlet
 sudo mv hostlet /usr/local/bin/hostlet
 ```
+
+The public source lives in `hostlet-core`; release assets are currently
+published from the `ShaneKanterman04/Hostlet` GitHub Releases feed that the CLI
+updater reads.
 
 Initialize and start:
 
