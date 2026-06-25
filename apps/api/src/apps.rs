@@ -45,17 +45,23 @@ pub struct NewAppRecord {
     pub cpu_limit: Option<f64>,
     pub public_exposure: bool,
     pub auto_deploy: bool,
+    /// Optional per-user app cap to enforce atomically. `Some(limit)` makes the
+    /// insert take a per-user advisory lock and re-count under it, rejecting with
+    /// [`CreateAppError::LimitReached`] when at/over the cap — closing the
+    /// check-then-insert race between concurrent creates. `None` (self-hosted, or
+    /// any caller without a plan limit) skips the lock entirely.
+    pub app_limit: Option<i32>,
     pub env: Vec<AppEnvVarInput>,
 }
 
 /// Why persisting a new app failed, mapped to the HTTP status the handlers
 /// previously returned inline.
 ///
-/// Only two variants are exposed so callers stay a simple status mapping
-/// (`Insert` → 400, `Internal` → 500); finer-grained diagnostics about *which*
-/// internal step failed (transaction, env encryption, commit) are emitted via
-/// `tracing` inside [`create_app_record`] instead of widening this enum, which
-/// would force every caller's `match` to grow new arms.
+/// Variants are kept minimal so callers stay a simple status mapping
+/// (`Insert` → 400, `Internal` → 500, `LimitReached` → the caller's plan-limit
+/// status); finer-grained diagnostics about *which* internal step failed
+/// (transaction, env encryption, commit) are emitted via `tracing` inside
+/// [`create_app_record`] instead of widening this enum further.
 #[derive(Debug)]
 pub enum CreateAppError {
     /// The INSERT was rejected (e.g. a constraint violation). Handlers return
@@ -63,6 +69,9 @@ pub enum CreateAppError {
     Insert,
     /// An internal failure (transaction, env encryption, or commit). → `500`.
     Internal,
+    /// The per-user `app_limit` was reached, checked atomically under the
+    /// advisory lock. Only returned when the caller supplied `Some(limit)`.
+    LimitReached,
 }
 
 /// Persist a new app row and its environment variables atomically, returning
@@ -96,6 +105,7 @@ pub async fn create_app_record(
         cpu_limit,
         public_exposure,
         auto_deploy,
+        app_limit,
         env,
     } = record;
 
@@ -103,6 +113,40 @@ pub async fn create_app_record(
         tracing::error!(error = %err, "create_app_record: failed to begin transaction");
         CreateAppError::Internal
     })?;
+    // Enforce the per-user app cap atomically when one is supplied. A
+    // transaction-scoped advisory lock keyed on the user serializes concurrent
+    // creates for that user, and the count is taken under the lock, so the
+    // check-then-insert race cannot let two requests both slip past the limit.
+    // The lock auto-releases on commit/rollback. `None` (self-hosted) skips this.
+    //
+    // The lock is per-user and held only across the count + insert (sub-10ms), so
+    // it does not serialize unrelated users; a single user firing many concurrent
+    // creates briefly parks their own connections on the small pool, which is an
+    // accepted trade for correctness. The key folds the 128-bit user id to i64; a
+    // cross-user collision (~1/2^64) only adds harmless extra serialization.
+    if let Some(limit) = app_limit {
+        let n = user_id.as_u128();
+        let lock_key = ((n >> 64) as u64 ^ n as u64) as i64;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "create_app_record: failed to take app-limit lock");
+                CreateAppError::Internal
+            })?;
+        let active: i64 = sqlx::query_scalar("SELECT count(*) FROM apps WHERE user_id=$1")
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "create_app_record: failed to count user apps");
+                CreateAppError::Internal
+            })?;
+        if active >= i64::from(limit) {
+            return Err(CreateAppError::LimitReached);
+        }
+    }
     let row = sqlx::query(
         "INSERT INTO apps (user_id,server_id,name,repo_full_name,branch,container_port,\
          health_path,domain,runtime_kind,hostlet_config_path,runtime_config,packaging_strategy,\
@@ -211,6 +255,7 @@ mod tests {
             cpu_limit: None,
             public_exposure: true,
             auto_deploy: false,
+            app_limit: None,
             env: vec![],
         }
     }
@@ -239,6 +284,78 @@ mod tests {
                 .await
                 .unwrap();
         assert!(exists, "app row should be persisted in the database");
+    }
+
+    /// `app_limit` is enforced atomically: with a cap of 1 the first create
+    /// succeeds and the second returns `LimitReached` rather than exceeding it.
+    #[tokio::test]
+    async fn db_create_app_record_enforces_app_limit() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_db(&state).await;
+        let user_id = insert_user(&state, 88803, "apps-limit-user").await;
+
+        let mut first = minimal_record(user_id, "limit-app-1", "limit-app-1.example.test");
+        first.app_limit = Some(1);
+        create_app_record(&state, first)
+            .await
+            .expect("first create under the limit should succeed");
+
+        let mut second = minimal_record(user_id, "limit-app-2", "limit-app-2.example.test");
+        second.app_limit = Some(1);
+        let err = create_app_record(&state, second)
+            .await
+            .expect_err("second create at the limit should be rejected");
+        assert!(matches!(err, CreateAppError::LimitReached));
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM apps WHERE user_id=$1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the per-user app limit must not be exceeded");
+    }
+
+    /// Concurrency: two simultaneous creates for the same user at a cap of 1 must
+    /// resolve to exactly one success and one `LimitReached`. This is the property
+    /// the advisory lock buys — without it both could count 0 and both insert.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_create_app_record_app_limit_is_race_safe() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_db(&state).await;
+        let user_id = insert_user(&state, 88804, "apps-race-user").await;
+
+        let s1 = state.clone();
+        let s2 = state.clone();
+        let mut r1 = minimal_record(user_id, "race-app-1", "race-app-1.example.test");
+        r1.app_limit = Some(1);
+        let mut r2 = minimal_record(user_id, "race-app-2", "race-app-2.example.test");
+        r2.app_limit = Some(1);
+
+        let t1 = tokio::spawn(async move { create_app_record(&s1, r1).await });
+        let t2 = tokio::spawn(async move { create_app_record(&s2, r2).await });
+        let (a, b) = (t1.await.unwrap(), t2.await.unwrap());
+
+        let oks = [&a, &b].iter().filter(|r| r.is_ok()).count();
+        let limited = [&a, &b]
+            .iter()
+            .filter(|r| matches!(r, Err(CreateAppError::LimitReached)))
+            .count();
+        assert_eq!(oks, 1, "exactly one concurrent create should succeed");
+        assert_eq!(
+            limited, 1,
+            "the other concurrent create must be LimitReached"
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM apps WHERE user_id=$1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the limit must hold under concurrency");
     }
 
     /// Env-var path: env vars are encrypted at rest, not stored as plaintext.

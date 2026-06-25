@@ -203,6 +203,8 @@ pub async fn create_app(
         cpu_limit: body.cpu_limit,
         public_exposure,
         auto_deploy,
+        // Self-hosted has no per-plan app cap; skip the advisory-lock recount.
+        app_limit: None,
         env: body
             .env
             .into_iter()
@@ -217,6 +219,12 @@ pub async fn create_app(
         Err(crate::apps::CreateAppError::Insert) => return StatusCode::BAD_REQUEST.into_response(),
         Err(crate::apps::CreateAppError::Internal) => {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        // Effectively unreachable: this handler passes app_limit: None, so the
+        // recount never runs. Kept consistent with the cloud handler's 402 so the
+        // response degrades sensibly if a future self-hosted cap ever sets it.
+        Err(crate::apps::CreateAppError::LimitReached) => {
+            return StatusCode::PAYMENT_REQUIRED.into_response()
         }
     };
     if public_exposure {
