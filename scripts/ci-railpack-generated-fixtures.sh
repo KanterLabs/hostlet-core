@@ -104,7 +104,7 @@ PY
 trap cleanup EXIT
 
 now_ms() {
-  date +%s%3N
+  echo $(( $(date +%s%N) / 1000000 ))
 }
 
 run_fixture() {
