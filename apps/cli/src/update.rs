@@ -147,7 +147,7 @@ pub(crate) async fn update(
     let tmp_binary = download_verified_cli(&client, &release, &tmp_dir).await?;
 
     checkout_release_tag(root, &release)?;
-    update_env_image_tag(root, &release.image_tag())?;
+    update_env_release_images(root, &release)?;
     let previous = swap_cli_binary(&tmp_dir, &tmp_binary)?;
 
     compose_up(root, false, false)?;
@@ -254,14 +254,20 @@ pub(crate) fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Re
     if !release.has_release_images() {
         bail!("latest release is missing required Hostlet image metadata");
     }
+    if !release.has_release_image_digests() {
+        bail!("latest release is missing required Hostlet image digests");
+    }
     Ok(())
 }
 
-pub(crate) fn update_env_image_tag(root: &Path, image_tag: &str) -> anyhow::Result<()> {
+pub(crate) fn update_env_release_images(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
     let env_path = root.join(".env");
     let mut env = read_env_file(&env_path)
         .with_context(|| format!("failed to read {}", env_path.display()))?;
-    env.insert("HOSTLET_IMAGE_TAG".into(), image_tag.to_string());
+    for (key, value) in release.image_env()? {
+        env.insert(key, value);
+    }
+    env.insert("HOSTLET_IMAGE_TAG".into(), release.image_tag());
     write_env_file(&env_path, &env)
 }
 

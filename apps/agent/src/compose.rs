@@ -202,14 +202,7 @@ pub(crate) async fn deploy_compose(
     // whose web service was built from the repo. Secrets travel as the child
     // process env, never as command args, so they are not logged — and `config`
     // runs `--quiet` so the resolved (interpolated) compose is never printed.
-    let mut compose_env: Vec<(String, String)> = Vec::new();
-    if let Some(map) = p.get("env").and_then(|v| v.as_object()) {
-        for (key, value) in map {
-            if hostlet_contracts::valid_env_key(key) {
-                compose_env.push((key.clone(), value.as_str().unwrap_or_default().to_string()));
-            }
-        }
-    }
+    let mut compose_env = compose_interpolation_env(&p);
     if let Some(web_image) = web_image {
         compose_env.push((
             hostlet_contracts::compose::WEB_IMAGE_ENV.to_string(),
@@ -414,6 +407,18 @@ pub(crate) async fn deploy_compose(
     )
     .await;
     Ok(())
+}
+
+fn compose_interpolation_env(p: &Value) -> Vec<(String, String)> {
+    let mut compose_env = Vec::new();
+    if let Some(map) = p.get("env").and_then(|v| v.as_object()) {
+        for (key, value) in map {
+            if hostlet_contracts::valid_host_process_env_key(key) {
+                compose_env.push((key.clone(), value.as_str().unwrap_or_default().to_string()));
+            }
+        }
+    }
+    compose_env
 }
 
 pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
@@ -649,6 +654,7 @@ async fn run_log_streamed(
     for (key, value) in envs {
         cmd.env(key, value);
     }
+    harden_host_command_env(&mut cmd);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -689,6 +695,18 @@ async fn run_log_streamed(
         bail!("{bin} exited with {status}");
     }
     Ok(())
+}
+
+fn harden_host_command_env(cmd: &mut Command) {
+    for (key, _) in std::env::vars() {
+        if key.starts_with("LD_") || key.starts_with("DYLD_") {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
 }
 
 fn compose_health_failure_message(
@@ -801,6 +819,24 @@ mod tests {
         let failed = compose_health_failure_message(&health_err, Some(&cleanup_err));
         assert!(failed.contains("Failed to remove the unhealthy Compose project"));
         assert!(failed.contains("docker failed"));
+    }
+
+    #[test]
+    fn compose_interpolation_env_rejects_host_process_control_keys() {
+        let env = compose_interpolation_env(&json!({
+            "env": {
+                "DATABASE_URL": "postgres://db",
+                "PATH": ".:/usr/bin",
+                "LD_PRELOAD": "/tmp/hook.so",
+                "DOCKER_HOST": "tcp://attacker",
+                "COMPOSE_FILE": "owned.yml"
+            }
+        }));
+
+        assert_eq!(
+            env,
+            vec![("DATABASE_URL".to_string(), "postgres://db".to_string())]
+        );
     }
 
     #[test]

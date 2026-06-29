@@ -50,12 +50,15 @@ Set strong values for production secrets and keep `.env` out of git.
 
 ## Production Compose
 
-Production Compose is image-only. It pulls tagged release images and starts with `--no-build`.
+Production Compose is image-only. It pulls release images by immutable digest and starts with `--no-build`.
 
-Set a release tag:
+`hostlet init` and `hostlet update` write the release image refs into `.env`:
 
 ```text
-HOSTLET_IMAGE_TAG=vX.Y.Z
+HOSTLET_API_IMAGE=ghcr.io/shanekanterman04/hostlet-api@sha256:...
+HOSTLET_WEB_IMAGE=ghcr.io/shanekanterman04/hostlet-web@sha256:...
+HOSTLET_AGENT_IMAGE=ghcr.io/shanekanterman04/hostlet-agent@sha256:...
+HOSTLET_SCREENSHOTTER_IMAGE=ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:...
 ```
 
 Start production:
@@ -71,6 +74,11 @@ With tunnel profile:
 ```bash
 docker compose --env-file .env -f infra/docker-compose.prod.yml --profile tunnel -p hostlet-release up -d --no-build
 ```
+
+For direct public hosting, set `HOSTLET_CADDYFILE=./Caddyfile.direct` and use
+real DNS names for `HOSTLET_CONTROL_PLANE_HOST` and `HOSTLET_BASE_DOMAIN` so
+Caddy can provision HTTPS certificates. The tunnel Caddyfile is the only mode
+that intentionally serves plain HTTP on loopback.
 
 ## Public App URLs
 

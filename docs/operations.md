@@ -25,10 +25,13 @@ hostlet down
 
 Hostlet checks GitHub Releases for stable updates. When `hostlet-release.json` is present, Hostlet uses it for release version, minimum supported direct-upgrade version, checksums, image metadata, and migration flags.
 
-Production deploys should use tagged release images:
+Production deploys should use immutable release image refs from `.env`:
 
 ```text
-HOSTLET_IMAGE_TAG=vX.Y.Z
+HOSTLET_API_IMAGE=ghcr.io/shanekanterman04/hostlet-api@sha256:...
+HOSTLET_WEB_IMAGE=ghcr.io/shanekanterman04/hostlet-web@sha256:...
+HOSTLET_AGENT_IMAGE=ghcr.io/shanekanterman04/hostlet-agent@sha256:...
+HOSTLET_SCREENSHOTTER_IMAGE=ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:...
 ```
 
 Then pull and restart with `--no-build`.

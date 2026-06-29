@@ -33,8 +33,8 @@ function isBlockedIp(ip) {
   }
   if (kind === 6) {
     const lower = ip.toLowerCase();
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-    if (mapped) return isBlockedIp(mapped[1]);
+    const mapped = ipv4FromMappedIpv6(lower);
+    if (mapped) return isBlockedIp(mapped);
     if (lower === "::" || lower === "::1") return true;
     const firstGroup = lower.split(":")[0];
     if (firstGroup.startsWith("fc") || firstGroup.startsWith("fd")) return true;
@@ -44,6 +44,41 @@ function isBlockedIp(ip) {
     return false;
   }
   return true;
+}
+
+function ipv4FromMappedIpv6(ip) {
+  const dotted = /^(.*:)ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
+  if (dotted) return dotted[2];
+
+  const groups = expandIpv6(ip);
+  if (!groups) return null;
+  if (
+    groups.slice(0, 5).every((group) => group === 0) &&
+    groups[5] === 0xffff
+  ) {
+    const hi = groups[6];
+    const lo = groups[7];
+    return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+  }
+  return null;
+}
+
+function expandIpv6(ip) {
+  if (ip.includes(".")) return null;
+  const parts = ip.split("::");
+  if (parts.length > 2) return null;
+  const left = parts[0] ? parts[0].split(":") : [];
+  const right = parts.length === 2 && parts[1] ? parts[1].split(":") : [];
+  if (parts.length === 1 && left.length !== 8) return null;
+  const missing = 8 - left.length - right.length;
+  if (missing < 0 || (parts.length === 1 && missing !== 0)) return null;
+  const rawGroups = [...left, ...Array(missing).fill("0"), ...right];
+  if (rawGroups.length !== 8) return null;
+  const groups = rawGroups.map((group) => {
+    if (!/^[0-9a-f]{1,4}$/.test(group)) return Number.NaN;
+    return parseInt(group, 16);
+  });
+  return groups.some(Number.isNaN) ? null : groups;
 }
 
 async function isBlockedUrl(url, lookupCache) {

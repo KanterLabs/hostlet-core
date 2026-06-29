@@ -25,6 +25,8 @@ pub enum ServerSelectionError {
 #[derive(Debug)]
 struct AppRunnerCandidate {
     id: Uuid,
+    kind: String,
+    status: String,
     capabilities: Vec<String>,
     draining: bool,
     max_concurrent_apps: i32,
@@ -35,6 +37,8 @@ impl AppRunnerCandidate {
     fn from_row(row: sqlx::postgres::PgRow) -> Self {
         Self {
             id: row.get("id"),
+            kind: row.get("kind"),
+            status: row.get("status"),
             capabilities: row.get("capabilities"),
             draining: row.get("draining"),
             max_concurrent_apps: row.get("max_concurrent_apps"),
@@ -43,6 +47,12 @@ impl AppRunnerCandidate {
     }
 
     fn validate(self) -> Result<Uuid, ServerSelectionError> {
+        if self.kind != "local" {
+            return Err(ServerSelectionError::NotFound);
+        }
+        if self.status != "online" {
+            return Err(ServerSelectionError::NotFound);
+        }
         if !self
             .capabilities
             .iter()
@@ -76,6 +86,8 @@ async fn select_requested_app_runner(
 ) -> Result<Uuid, ServerSelectionError> {
     let row = sqlx::query(
         "SELECT s.id,
+                s.kind,
+                s.status,
                 s.capabilities,
                 s.draining,
                 s.max_concurrent_apps,
@@ -99,6 +111,8 @@ async fn select_requested_app_runner(
 async fn select_available_app_runner(state: &AppState) -> Result<Uuid, ServerSelectionError> {
     let row = sqlx::query(
         "SELECT s.id,
+                s.kind,
+                s.status,
                 s.capabilities,
                 s.draining,
                 s.max_concurrent_apps,
@@ -108,6 +122,8 @@ async fn select_available_app_runner(state: &AppState) -> Result<Uuid, ServerSel
            ON a.server_id=s.id
           AND a.current_deployment_id IS NOT NULL
          WHERE s.capabilities @> ARRAY[$1]::TEXT[]
+           AND s.kind='local'
+           AND s.status='online'
            AND s.draining=false
          GROUP BY s.id
          HAVING COUNT(a.id)::bigint < s.max_concurrent_apps
@@ -160,6 +176,34 @@ mod tests {
         let selected = select_app_runner(&state, None).await.unwrap();
 
         assert_eq!(selected, idle_server_id);
+    }
+
+    #[tokio::test]
+    async fn db_select_app_runner_rejects_remote_or_offline_server() {
+        let Some(state) = crate::state::db_test_state_from_env().await else {
+            return;
+        };
+        reset_capacity_db(&state).await;
+        let user_id = insert_capacity_user(&state).await;
+        let remote_id =
+            insert_server_with_kind_status(&state, user_id, "remote-runner", "remote", "online")
+                .await;
+        let offline_id =
+            insert_server_with_kind_status(&state, user_id, "offline-runner", "local", "offline")
+                .await;
+
+        assert!(matches!(
+            select_app_runner(&state, Some(remote_id))
+                .await
+                .unwrap_err(),
+            ServerSelectionError::NotFound
+        ));
+        assert!(matches!(
+            select_app_runner(&state, Some(offline_id))
+                .await
+                .unwrap_err(),
+            ServerSelectionError::NotFound
+        ));
     }
 
     #[tokio::test]
@@ -230,14 +274,26 @@ mod tests {
     }
 
     async fn insert_server(state: &AppState, user_id: Uuid, name: &str) -> Uuid {
+        insert_server_with_kind_status(state, user_id, name, "local", "online").await
+    }
+
+    async fn insert_server_with_kind_status(
+        state: &AppState,
+        user_id: Uuid,
+        name: &str,
+        kind: &str,
+        status: &str,
+    ) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO servers
                (user_id,name,kind,status,capabilities,draining,max_concurrent_apps,max_concurrent_builds)
-             VALUES ($1,$2,'local','online',ARRAY['app_runner']::TEXT[],false,8,1)
+             VALUES ($1,$2,$3,$4,ARRAY['app_runner']::TEXT[],false,8,1)
              RETURNING id",
         )
         .bind(user_id)
         .bind(format!("capacity-{name}"))
+        .bind(kind)
+        .bind(status)
         .fetch_one(&state.db)
         .await
         .unwrap()

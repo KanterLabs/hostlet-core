@@ -52,14 +52,6 @@ pub(in crate::web) fn hostlet_public_cloudflare_host(
     Ok(host)
 }
 
-pub(in crate::web) fn hostlet_legacy_prefixed_host(state: &AppState, host: &str) -> bool {
-    let Some(base_domain) = state.base_domain.as_ref() else {
-        return false;
-    };
-    host.strip_suffix(&format!(".{base_domain}"))
-        .is_some_and(|label| label.starts_with(&state.domain_prefix) && !label.contains('.'))
-}
-
 pub(in crate::web) fn reserved_public_domain_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),

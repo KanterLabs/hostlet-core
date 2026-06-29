@@ -7,7 +7,7 @@ source "${ROOT}/scripts/ci-metrics-lib.sh"
 RAILPACK_BIN="${HOSTLET_RAILPACK_BIN:-railpack}"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 BUILDKIT_CONTAINER="${HOSTLET_RAILPACK_BUILDKIT_CONTAINER:-hostlet-railpack-buildkit-ci-${RUN_ID}}"
-BUILDKIT_IMAGE="${HOSTLET_RAILPACK_BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1}"
+BUILDKIT_IMAGE="${HOSTLET_RAILPACK_BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f}"
 TMP_DIR="$(mktemp -d "/tmp/hostlet-railpack-fixtures-${RUN_ID}.XXXXXX")"
 METRICS_FILE="${HOSTLET_RAILPACK_METRICS_FILE:-${TMP_DIR}/metrics.json}"
 
@@ -25,7 +25,12 @@ if ! command -v "${RAILPACK_BIN}" >/dev/null 2>&1; then
   exit 1
 fi
 
-docker run -d --name "${BUILDKIT_CONTAINER}" --privileged "${BUILDKIT_IMAGE}" >/dev/null
+BUILDKIT_RUN_ARGS=(run -d --name "${BUILDKIT_CONTAINER}")
+case "${HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED:-false}" in
+  1|true|TRUE|yes|YES) BUILDKIT_RUN_ARGS+=(--privileged) ;;
+esac
+BUILDKIT_RUN_ARGS+=("${BUILDKIT_IMAGE}")
+docker "${BUILDKIT_RUN_ARGS[@]}" >/dev/null
 export BUILDKIT_HOST="docker-container://${BUILDKIT_CONTAINER}"
 ci_metrics_init "${METRICS_FILE}"
 

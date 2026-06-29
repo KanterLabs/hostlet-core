@@ -565,17 +565,14 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
 }
 
 /// Handle a `reconcile_request` event posted by the agent when it detects that
-/// a current, successful deployment has lost its container.
+/// a current deployment has lost its container.
 ///
-/// Security boundary: the app lookup is scoped to `server_id` via
-/// `a.server_id=$2` — an agent can only trigger repairs for apps on its own
-/// server.  The event flows through `/api/agent/events`, which authenticates
-/// the connecting server before dispatching here.
-///
-/// Idempotency: `crate::deploy::create_and_send_deploy` calls
-/// `ensure_no_active_deployment` and is guarded by the unique index
-/// `idx_deployments_one_active_per_app`, so a duplicate request is a no-op.
-async fn handle_reconcile_request(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+/// Agent-originated redeploy is intentionally disabled: the same long-lived
+/// agent token that authenticates health events also authenticates job claims,
+/// and redeploy jobs contain decrypted env vars plus transient GitHub token
+/// material. Runtime health events remain the API-side source of truth for
+/// operators and future server-side repair policy.
+async fn handle_reconcile_request(_state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
     let (Some(app_id), Some(deployment_id)) =
         (msg_uuid(msg, "app_id"), msg_uuid(msg, "deployment_id"))
     else {
@@ -588,54 +585,13 @@ async fn handle_reconcile_request(state: &AppState, server_id: Uuid, msg: &serde
         return;
     }
 
-    // Load server-scoped state in a single query.  The `a.server_id=$2`
-    // clause is the security boundary — an agent may only repair apps on its
-    // own server.
-    let row = sqlx::query(
-        "SELECT a.user_id, a.current_deployment_id, d.status AS dep_status, d.commit_sha \
-         FROM apps a \
-         JOIN deployments d ON d.id = a.current_deployment_id \
-         WHERE a.id = $1 AND a.server_id = $2",
-    )
-    .bind(app_id)
-    .bind(server_id)
-    .fetch_optional(&state.db)
-    .await;
-
-    let Ok(Some(row)) = row else {
-        // App not found on this server, or no current deployment.
-        return;
-    };
-
-    let current_deployment_id: Option<Uuid> = row.get("current_deployment_id");
-    let dep_status: String = row.get("dep_status");
-    let commit_sha: String = row.get("commit_sha");
-    let user_id: Uuid = row.get("user_id");
-
-    // Only act when the agent's stale request still matches the current
-    // desired state and that deployment was last known-good (success).
-    if current_deployment_id != Some(deployment_id) {
-        return; // desired state changed; stale request — no action
-    }
-    if dep_status != "success" {
-        return; // only self-heal apps that were previously healthy
-    }
-
-    // Redeploy the same revision that was lost.  This regenerates the image
-    // and container via the full signed enqueue + env-decrypt pipeline.
-    // An Err("active deployment already running") is the expected idempotency
-    // no-op and is warned-and-swallowed; any other error is also swallowed
-    // because the health pass will retry on the next interval.
-    if let Err(err) =
-        crate::deploy::create_and_send_deploy(state, user_id, app_id, &commit_sha).await
-    {
-        tracing::warn!(
-            %app_id,
-            %deployment_id,
-            error = %err,
-            "reconcile_request: failed to enqueue redeploy (may be an expected idempotency no-op)"
-        );
-    }
+    tracing::warn!(
+        %server_id,
+        %app_id,
+        %deployment_id,
+        reason,
+        "ignored agent reconcile_request; agent-originated secret-bearing redeploy is disabled"
+    );
 }
 
 pub(in crate::agent) async fn prune_health_events(state: &AppState, app_id: Uuid) {

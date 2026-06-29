@@ -1,4 +1,4 @@
-use crate::env::nonempty_env;
+use crate::env::{looks_like_public_placeholder_secret, nonempty_env};
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
@@ -35,6 +35,9 @@ impl Crypto {
         // is a placeholder even if it happened to decode to 32 bytes.
         if !allow_insecure_dev_defaults && key.len() < 32 {
             bail!("ENCRYPTION_KEY must not be a short development value");
+        }
+        if !allow_insecure_dev_defaults && looks_like_public_placeholder_secret(&key) {
+            bail!("ENCRYPTION_KEY must not use the public example placeholder value");
         }
         Ok(crypto)
     }

@@ -117,14 +117,16 @@ pub fn is_mappable_relative_bind(source: &str) -> bool {
 
 /// Validates an absolute container mount path (e.g. `/app/data`): absolute, at
 /// most 256 chars, not the bare root `/`, no `..` segment, and free of control
-/// characters and backslashes. Used to vet the data-volume mount path before the
-/// agent mounts a managed volume there.
+/// characters, backslashes, and Docker `--mount` option delimiters. Used to vet
+/// the data-volume mount path before the agent mounts a managed volume there.
 pub fn valid_container_mount_path(value: &str) -> bool {
     value.starts_with('/')
         && value != "/"
         && value.len() <= 256
         && !value.split('/').any(|part| part == "..")
-        && !value.chars().any(|c| c.is_control() || c == '\\')
+        && !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | ',' | '='))
 }
 
 /// Detects the container path an app declares for persistent data, from the
@@ -674,6 +676,8 @@ services:
         assert!(!valid_container_mount_path("app/data"));
         assert!(!valid_container_mount_path("/app/../etc"));
         assert!(!valid_container_mount_path("/app\\data"));
+        assert!(!valid_container_mount_path("/host,type=bind,source=/"));
+        assert!(!valid_container_mount_path("/app/data=prod"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGING_WORKFLOW="${ROOT}/.github/workflows/staging.yml"
 SELF_HOSTED_LIB="${ROOT}/scripts/ci-self-hosted-lib.sh"
 CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
+PR_WORKFLOW="${ROOT}/.github/workflows/pr-homelab-ci.yml"
 STAGING_DEPLOYABILITY="${ROOT}/.github/workflows/deployability.yml"
 FULL_CI_WORKFLOW="${ROOT}/.github/workflows/full-ci.yml"
 
@@ -50,7 +51,12 @@ assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_T
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
 assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3'
 assert_contains "${CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
-assert_contains "${CI_WORKFLOW}" 'github.event_name != '\''pull_request'\'' || github.event.pull_request.head.repo.full_name == github.repository'
+assert_not_contains "${CI_WORKFLOW}" 'pull_request:'
+assert_contains "${PR_WORKFLOW}" 'pull_request_target:'
+assert_contains "${PR_WORKFLOW}" "homelab-ci-approved"
+assert_contains "${PR_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${PR_WORKFLOW}" 'persist-credentials: false'
+assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner.sh'
 assert_contains "${CI_WORKFLOW}" 'node --version && pnpm --version'
 assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
@@ -108,18 +114,18 @@ for needle in required:
         raise SystemExit(f"dispatch payload missing {needle}")
 PY
 
-python3 - "${CI_WORKFLOW}" <<'PY'
+python3 - "${PR_WORKFLOW}" <<'PY'
 import sys
 from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
 self_hosted_jobs = workflow.count("runs-on: [self-hosted, Linux, X64, hostlet-core]")
-trusted_guards = workflow.count(
-    "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+approved_guards = workflow.count(
+    "if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'"
 )
-if self_hosted_jobs != trusted_guards:
+if self_hosted_jobs < 6 or approved_guards < 5:
     raise SystemExit(
-        f"each self-hosted CI job must have the trusted PR guard: jobs={self_hosted_jobs} guards={trusted_guards}"
+        f"PR homelab CI must be label-gated on self-hosted runners: jobs={self_hosted_jobs} guards={approved_guards}"
     )
 PY
 

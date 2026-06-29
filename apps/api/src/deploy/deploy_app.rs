@@ -75,6 +75,7 @@ impl DeployApp {
         env: serde_json::Map<String, Value>,
         github_token: Option<String>,
     ) -> Value {
+        let runtime_config = deploy_safe_runtime_config(self.runtime_config.clone());
         json!({
             "type": "deploy", "deployment_id": deployment_id, "app_id": app_id,
             "route_key": route_key,
@@ -84,7 +85,7 @@ impl DeployApp {
             "domain": self.domain, "env": env,
             "runtime_kind": self.runtime_kind,
             "hostlet_config_path": self.hostlet_config_path,
-            "runtime_config": self.runtime_config,
+            "runtime_config": runtime_config,
             "packaging_strategy": self.packaging_strategy,
             "root_directory": self.root_directory,
             "install_command": self.install_command,
@@ -94,5 +95,43 @@ impl DeployApp {
             "cpu_limit": self.cpu_limit,
             "github_token": github_token
         })
+    }
+}
+
+fn deploy_safe_runtime_config(mut runtime_config: Value) -> Value {
+    if runtime_config.get("dataMountPath").is_some_and(|value| {
+        !value
+            .as_str()
+            .is_some_and(hostlet_contracts::compose::valid_container_mount_path)
+    }) {
+        if let Some(object) = runtime_config.as_object_mut() {
+            object.remove("dataMountPath");
+        }
+    }
+    runtime_config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deploy_runtime_config_drops_unsafe_data_mount_path() {
+        let value = deploy_safe_runtime_config(
+            serde_json::json!({"dataMountPath": "/host,type=bind,source=/", "compose": {"x": 1}}),
+        );
+
+        assert!(value.get("dataMountPath").is_none());
+        assert_eq!(value.pointer("/compose/x"), Some(&serde_json::json!(1)));
+    }
+
+    #[test]
+    fn deploy_runtime_config_preserves_valid_data_mount_path() {
+        let value = deploy_safe_runtime_config(serde_json::json!({"dataMountPath": "/app/data"}));
+
+        assert_eq!(
+            value.get("dataMountPath"),
+            Some(&serde_json::json!("/app/data"))
+        );
     }
 }

@@ -33,48 +33,55 @@ PY
 
 echo "screenshotter smoke passed"
 
+run_redirect_block_test() {
+  local label="$1"
+  local location="$2"
+  local redirect_port=""
+  for port in 18080 18082 18083 18084 18085; do
+    docker rm -f "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true
+    if ! docker run -d --rm --network host --name "${REDIRECT_CONTAINER}" \
+      --entrypoint node \
+      "${IMAGE}" \
+      -e "require('http').createServer((_, res) => { res.writeHead(302, { Location: '${location}' }); res.end(); }).listen(${port}, '127.0.0.1');" \
+      > "${TMP_DIR}/redirect-container" 2> "${TMP_DIR}/redirect-start.log"; then
+      continue
+    fi
+    if docker run --rm --network host --entrypoint node \
+      "${IMAGE}" \
+      -e "require('http').get('http://127.0.0.1:${port}/', (res) => process.exit(res.statusCode === 302 ? 0 : 1)).on('error', () => process.exit(1));" \
+      >/dev/null 2>&1; then
+      redirect_port="${port}"
+      break
+    fi
+  done
+
+  if [ -z "${redirect_port}" ]; then
+    echo "redirect server did not start on a Chromium-safe port"
+    cat "${TMP_DIR}/redirect-start.log" 2>/dev/null || true
+    exit 1
+  fi
+
+  if docker run --rm --network host \
+    "${IMAGE}" \
+    "http://127.0.0.1:${redirect_port}/" \
+    /out/blocked.jpg > "${TMP_DIR}/ssrf-${label}.log" 2>&1; then
+    echo "SSRF regression: screenshotter followed ${label} redirect"
+    cat "${TMP_DIR}/ssrf-${label}.log"
+    exit 1
+  fi
+
+  if ! grep -q "blocked request to" "${TMP_DIR}/ssrf-${label}.log"; then
+    echo "SSRF regression: expected 'blocked request to' marker not found for ${label}"
+    cat "${TMP_DIR}/ssrf-${label}.log"
+    exit 1
+  fi
+}
+
 # SSRF regression: a tenant app can 302-redirect the host-networked browser to a
-# host-local origin. The target origin (127.0.0.1:PORT) is allowed, but the
-# redirect hop to a different loopback origin must be blocked. --network host is
-# intentional here so the negative test exercises the real production posture.
-REDIRECT_PORT=""
-for port in 18080 18082 18083 18084 18085; do
-  docker rm -f "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true
-  if ! docker run -d --rm --network host --name "${REDIRECT_CONTAINER}" \
-    --entrypoint node \
-    "${IMAGE}" \
-    -e "require('http').createServer((_, res) => { res.writeHead(302, { Location: 'http://127.0.0.1:18081/' }); res.end(); }).listen(${port}, '127.0.0.1');" \
-    > "${TMP_DIR}/redirect-container" 2> "${TMP_DIR}/redirect-start.log"; then
-    continue
-  fi
-  if docker run --rm --network host --entrypoint node \
-    "${IMAGE}" \
-    -e "require('http').get('http://127.0.0.1:${port}/', (res) => process.exit(res.statusCode === 302 ? 0 : 1)).on('error', () => process.exit(1));" \
-    >/dev/null 2>&1; then
-    REDIRECT_PORT="${port}"
-    break
-  fi
-done
-
-if [ -z "${REDIRECT_PORT}" ]; then
-  echo "redirect server did not start on a Chromium-safe port"
-  cat "${TMP_DIR}/redirect-start.log" 2>/dev/null || true
-  exit 1
-fi
-
-if docker run --rm --network host \
-  "${IMAGE}" \
-  "http://127.0.0.1:${REDIRECT_PORT}/" \
-  /out/blocked.jpg > "${TMP_DIR}/ssrf.log" 2>&1; then
-  echo "SSRF regression: screenshotter followed redirect to a loopback origin"
-  cat "${TMP_DIR}/ssrf.log"
-  exit 1
-fi
-
-if ! grep -q "blocked request to" "${TMP_DIR}/ssrf.log"; then
-  echo "SSRF regression: expected 'blocked request to' marker not found"
-  cat "${TMP_DIR}/ssrf.log"
-  exit 1
-fi
+# host-local origin. The target origins are allowed, but the redirect hop to a
+# different loopback origin must be blocked. --network host is intentional here
+# so the negative test exercises the real production posture.
+run_redirect_block_test "loopback" "http://127.0.0.1:18081/"
+run_redirect_block_test "mapped-ipv6" "http://[::ffff:7f00:1]:18081/"
 
 echo "screenshotter SSRF regression passed"

@@ -25,7 +25,7 @@ pub(crate) struct ReleaseAsset {
 
 #[derive(Default)]
 pub(crate) struct ReleaseImages {
-    api: Option<ReleaseImage>,
+    pub(crate) api: Option<ReleaseImage>,
     pub(crate) web: Option<ReleaseImage>,
     pub(crate) agent: Option<ReleaseImage>,
     pub(crate) screenshotter: Option<ReleaseImage>,
@@ -52,6 +52,96 @@ impl ReleaseInfo {
             && self.images.web.is_some()
             && self.images.agent.is_some()
             && self.images.screenshotter.is_some()
+    }
+
+    pub(crate) fn has_release_image_digests(&self) -> bool {
+        self.images.all().iter().all(|image| {
+            image
+                .and_then(|image| image.digest.as_deref())
+                .is_some_and(valid_image_digest)
+        })
+    }
+
+    pub(crate) fn image_env(&self) -> anyhow::Result<BTreeMap<String, String>> {
+        self.images.env()
+    }
+}
+
+impl ReleaseImages {
+    fn all(&self) -> [Option<&ReleaseImage>; 4] {
+        [
+            self.api.as_ref(),
+            self.web.as_ref(),
+            self.agent.as_ref(),
+            self.screenshotter.as_ref(),
+        ]
+    }
+
+    fn env(&self) -> anyhow::Result<BTreeMap<String, String>> {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "HOSTLET_API_IMAGE".into(),
+            self.api
+                .as_ref()
+                .context("release is missing api image metadata")?
+                .immutable_reference()?,
+        );
+        env.insert(
+            "HOSTLET_WEB_IMAGE".into(),
+            self.web
+                .as_ref()
+                .context("release is missing web image metadata")?
+                .immutable_reference()?,
+        );
+        env.insert(
+            "HOSTLET_AGENT_IMAGE".into(),
+            self.agent
+                .as_ref()
+                .context("release is missing agent image metadata")?
+                .immutable_reference()?,
+        );
+        env.insert(
+            "HOSTLET_SCREENSHOTTER_IMAGE".into(),
+            self.screenshotter
+                .as_ref()
+                .context("release is missing screenshotter image metadata")?
+                .immutable_reference()?,
+        );
+        Ok(env)
+    }
+}
+
+impl ReleaseImage {
+    fn immutable_reference(&self) -> anyhow::Result<String> {
+        let digest = self
+            .digest
+            .as_deref()
+            .filter(|digest| valid_image_digest(digest))
+            .with_context(|| {
+                format!("release image {} is missing a valid digest", self.reference)
+            })?;
+        Ok(format!("{}@{}", image_repository(&self.reference), digest))
+    }
+}
+
+fn valid_image_digest(digest: &str) -> bool {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn image_repository(reference: &str) -> &str {
+    let without_digest = reference
+        .split_once('@')
+        .map_or(reference, |(repo, _)| repo);
+    let last_slash = without_digest.rfind('/').unwrap_or(0);
+    match without_digest.rfind(':') {
+        Some(colon) if colon > last_slash => &without_digest[..colon],
+        _ => without_digest,
     }
 }
 
@@ -408,6 +498,43 @@ mod tests {
         assert!(
             parse_release_image(Some(&serde_json::json!({ "digest": "sha256:abc" }))).is_none()
         );
+    }
+
+    #[test]
+    fn image_env_uses_digest_refs_and_rejects_missing_digest() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut release = base_release();
+        release.images = ReleaseImages {
+            api: Some(ReleaseImage {
+                reference: "ghcr.io/example/hostlet-api:v0.4.1".into(),
+                digest: Some(digest.into()),
+            }),
+            web: Some(ReleaseImage {
+                reference: "localhost:5000/example/hostlet-web:v0.4.1".into(),
+                digest: Some(digest.into()),
+            }),
+            agent: Some(ReleaseImage {
+                reference: "ghcr.io/example/hostlet-agent@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                digest: Some(digest.into()),
+            }),
+            screenshotter: Some(ReleaseImage {
+                reference: "ghcr.io/example/hostlet-screenshotter:v0.4.1".into(),
+                digest: Some(digest.into()),
+            }),
+        };
+
+        let env = release.image_env().unwrap();
+
+        assert_eq!(
+            env.get("HOSTLET_API_IMAGE").map(String::as_str),
+            Some("ghcr.io/example/hostlet-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            env.get("HOSTLET_WEB_IMAGE").map(String::as_str),
+            Some("localhost:5000/example/hostlet-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        release.images.api.as_mut().unwrap().digest = None;
+        assert!(release.image_env().is_err());
     }
 
     #[test]

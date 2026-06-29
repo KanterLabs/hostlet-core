@@ -451,6 +451,7 @@ mod tests {
 
     #[test]
     fn release_manifest_parses_image_metadata() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let manifest = serde_json::json!({
             "version": "v0.4.1",
             "image_registry": "ghcr.io/shanekanterman04",
@@ -458,19 +459,19 @@ mod tests {
             "images": {
                 "api": {
                     "ref": "ghcr.io/shanekanterman04/hostlet-api:v0.4.1",
-                    "digest": "sha256:api"
+                    "digest": digest
                 },
                 "web": {
                     "ref": "ghcr.io/shanekanterman04/hostlet-web:v0.4.1",
-                    "digest": "sha256:web"
+                    "digest": digest
                 },
                 "agent": {
                     "ref": "ghcr.io/shanekanterman04/hostlet-agent:v0.4.1",
-                    "digest": "sha256:agent"
+                    "digest": digest
                 },
                 "screenshotter": {
                     "ref": "ghcr.io/shanekanterman04/hostlet-screenshotter:v0.4.1",
-                    "digest": "sha256:screenshotter"
+                    "digest": digest
                 }
             }
         });
@@ -487,7 +488,7 @@ mod tests {
         );
         assert_eq!(
             release.images.agent.as_ref().unwrap().digest.as_deref(),
-            Some("sha256:agent")
+            Some(digest)
         );
         assert_eq!(
             release
@@ -497,8 +498,9 @@ mod tests {
                 .unwrap()
                 .digest
                 .as_deref(),
-            Some("sha256:screenshotter")
+            Some(digest)
         );
+        assert!(release.has_release_image_digests());
     }
 
     #[test]
@@ -511,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn update_env_image_tag_rewrites_existing_env_file() {
+    fn update_env_release_images_rewrites_existing_env_file() {
         let root = std::env::temp_dir().join(format!("hostlet-cli-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -522,12 +524,38 @@ mod tests {
         )
         .unwrap();
 
-        update_env_image_tag(&root, "v0.4.1").unwrap();
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut release = test_release();
+        release.image_tag = Some("v0.4.1".into());
+        release.images = ReleaseImages {
+            api: Some(ReleaseImage {
+                reference: "ghcr.io/example/hostlet-api:v0.4.1".into(),
+                digest: Some(digest.into()),
+            }),
+            web: Some(ReleaseImage {
+                reference: "ghcr.io/example/hostlet-web:v0.4.1".into(),
+                digest: Some(digest.into()),
+            }),
+            agent: Some(ReleaseImage {
+                reference: "ghcr.io/example/hostlet-agent:v0.4.1".into(),
+                digest: Some(digest.into()),
+            }),
+            screenshotter: Some(ReleaseImage {
+                reference: "ghcr.io/example/hostlet-screenshotter:v0.4.1".into(),
+                digest: Some(digest.into()),
+            }),
+        };
+
+        update_env_release_images(&root, &release).unwrap();
         let env = read_env_file(&env_path).unwrap();
 
         assert_eq!(
             env.get("HOSTLET_IMAGE_TAG").map(String::as_str),
             Some("v0.4.1")
+        );
+        assert_eq!(
+            env.get("HOSTLET_API_IMAGE").map(String::as_str),
+            Some("ghcr.io/example/hostlet-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
         assert_eq!(
             env.get("POSTGRES_PASSWORD").map(String::as_str),

@@ -60,7 +60,19 @@ pub(crate) fn secret_from_env(
     if !allow_insecure_dev_defaults && value.len() < 32 {
         anyhow::bail!("{key} must be at least 32 characters");
     }
+    if !allow_insecure_dev_defaults && looks_like_public_placeholder_secret(&value) {
+        anyhow::bail!("{key} must not use the public example placeholder value");
+    }
     Ok(value)
+}
+
+pub(crate) fn looks_like_public_placeholder_secret(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.starts_with("replace-with-")
+        || normalized.starts_with("change-me-")
+        || normalized.starts_with("change_me")
+        || normalized.contains("not-a-secret")
+        || normalized.contains("ci-only-not-a-secret")
 }
 
 /// Return `true` when `key` is set to a truthy value (`1`, `true`, `yes` —
@@ -137,5 +149,18 @@ mod tests {
     fn bool_env_missing_is_false() {
         std::env::remove_var("__HOSTLET_TEST_BOOL_ABSENT");
         assert!(!bool_env("__HOSTLET_TEST_BOOL_ABSENT"));
+    }
+
+    #[test]
+    fn detects_public_placeholder_secrets() {
+        assert!(looks_like_public_placeholder_secret(
+            "replace-with-32-plus-random-characters"
+        ));
+        assert!(looks_like_public_placeholder_secret(
+            "ci-only-not-a-secret-agent-token-01"
+        ));
+        assert!(!looks_like_public_placeholder_secret(
+            "4d89f4e18a7bb4a01b51c83924492f46"
+        ));
     }
 }

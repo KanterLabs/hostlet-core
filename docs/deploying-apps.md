@@ -26,7 +26,10 @@ to keep it warm between builds; with keepalive enabled, Hostlet stops it after
 `HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS` of no Railpack builds (default `1800`). Set
 `HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB` to cap the BuildKit container memory.
 After a cold start, Hostlet waits up to `HOSTLET_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS`
-(default `30`) for the BuildKit daemon to become ready before building.
+(default `30`) for the BuildKit daemon to become ready before building. The managed
+BuildKit container is not privileged by default; set
+`HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED=true` only for hosts that explicitly require
+the old privileged backend.
 
 ## Compose Apps
 

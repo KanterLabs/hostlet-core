@@ -161,7 +161,7 @@ pub(in crate::web) async fn ensure_cloudflare_app_dns(
     }
 
     let record_id = if let Some(record) = existing.first() {
-        if owned.is_none() && !hostlet_legacy_prefixed_host(state, &host) {
+        if owned.is_none() {
             anyhow::bail!(
                 "{host} already has a Cloudflare CNAME record not managed by this Hostlet app"
             );
@@ -246,17 +246,7 @@ pub(in crate::web) async fn delete_cloudflare_app_dns(
         return Ok(());
     }
 
-    // No owned record. We only touch unmanaged Cloudflare records when the host
-    // carries our legacy prefix; anything else is left untouched.
-    if !hostlet_legacy_prefixed_host(state, &host) {
-        return Ok(());
-    }
-
-    // Legacy-prefixed fallback: sweep any matching CNAME records directly.
-    for record in cloudflare_list_cname_records(client, &base, token, &host).await? {
-        cloudflare_delete_record(client, &base, token, &record.id).await?;
-    }
-
+    // No owned record. Leave Cloudflare untouched.
     Ok(())
 }
 
