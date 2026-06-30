@@ -442,6 +442,11 @@ fn schedule_railpack_buildkit_idle_stop(cfg: Config, deployment_id: Uuid, contai
 mod tests {
     use super::*;
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn generated_packaging_miss_falls_through_to_railpack() {
         assert!(should_try_railpack(&anyhow::anyhow!(NO_NATIVE_BUILD_PLAN)));
@@ -483,6 +488,7 @@ mod tests {
 
     #[test]
     fn railpack_buildkit_container_can_be_overridden_for_ci() {
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var(
             "HOSTLET_RAILPACK_BUILDKIT_CONTAINER",
             "hostlet-buildkit-ci-123",
@@ -579,6 +585,7 @@ mod tests {
 
     #[test]
     fn railpack_buildkit_run_args_include_optional_memory_limit() {
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB", "512");
         std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED");
 
@@ -592,6 +599,7 @@ mod tests {
 
     #[test]
     fn railpack_buildkit_run_args_include_privileged_only_when_opted_in() {
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED", "true");
 
         let args = railpack_buildkit_run_args("moby/buildkit:buildx-stable-1", "hostlet-buildkit");
