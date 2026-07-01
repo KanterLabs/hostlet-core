@@ -368,7 +368,15 @@ pub async fn create_and_send_deploy(
                     .decrypt(row.get::<String, _>("value_ciphertext").as_str())?),
             );
         }
-        let github_token = github_access_token(state, user_id).await.ok().flatten();
+        // Deploy-clone credential comes from the active RepositoryAccessProvider:
+        // self-hosted uses the user's OAuth token; cloud mints a GitHub App
+        // installation token scoped to this repo. A provider error (e.g. cloud
+        // App not installed for the repo) fails the deploy with an actionable
+        // message rather than silently cloning unauthenticated.
+        let github_token = state
+            .repo_access_provider
+            .token_for_deploy(state, user_id, &app.repo_full_name)
+            .await?;
         let payload = app.deploy_payload(
             deployment_id,
             app_id,
@@ -703,25 +711,6 @@ fn is_active_deploy_unique_violation(err: &sqlx::Error) -> bool {
         && db_err
             .message()
             .contains("idx_deployments_one_active_per_app")
-}
-
-async fn github_access_token(state: &AppState, user_id: Uuid) -> anyhow::Result<Option<String>> {
-    let row = sqlx::query(
-        "SELECT access_token_ciphertext
-         FROM github_accounts
-         WHERE user_id=$1
-         ORDER BY updated_at DESC
-         LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?;
-    row.map(|row| {
-        state
-            .crypto
-            .decrypt(row.get::<String, _>("access_token_ciphertext").as_str())
-    })
-    .transpose()
 }
 
 #[cfg(test)]
