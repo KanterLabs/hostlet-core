@@ -40,6 +40,7 @@ import {
   StorageMeter,
   SummaryItem,
   ToggleCard,
+  UptimeStrip,
 } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 import {
@@ -298,6 +299,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       <Metric label="Container" value={health.containerName || "unknown"} />
                       <Metric label="Target" value={health.checkedUrl || "waiting"} />
                     </MetricsGrid>
+                    <UptimeStrip checks={healthEvents} className="mt-4" />
                     {healthEvents.length > 0 && (
                       <div className="mt-4 overflow-hidden rounded-md border border-line bg-surface">
                         {healthEvents.slice(0, 5).map((event) => (

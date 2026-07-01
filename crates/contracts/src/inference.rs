@@ -1,3 +1,4 @@
+use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,6 +12,24 @@ pub struct DockerfileInference {
 pub struct PackageInference {
     pub framework: &'static str,
     pub package_manager: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandSuggestion {
+    pub command: String,
+    pub source_file: String,
+    pub source_detail: String,
+    pub confidence: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RepoCommandFiles<'a> {
+    pub procfile: Option<&'a str>,
+    pub package_json: Option<&'a str>,
+    pub railway_json: Option<&'a str>,
+    pub render_yaml: Option<(&'a str, &'a str)>,
+    pub dockerfile: Option<&'a str>,
 }
 
 pub fn infer_package_json(
@@ -85,6 +104,158 @@ fn package_manager_from_field(value: &str) -> Option<&'static str> {
         "npm" => Some("npm"),
         _ => None,
     }
+}
+
+pub fn detect_start_command(files: RepoCommandFiles<'_>) -> Option<CommandSuggestion> {
+    files
+        .procfile
+        .and_then(procfile_start_command)
+        .or_else(|| files.package_json.and_then(package_json_start_command))
+        .or_else(|| files.railway_json.and_then(railway_start_command))
+        .or_else(|| {
+            files
+                .render_yaml
+                .and_then(|(source_file, contents)| render_start_command(source_file, contents))
+        })
+        .or_else(|| files.dockerfile.and_then(dockerfile_start_command))
+}
+
+fn command_suggestion(
+    command: impl Into<String>,
+    source_file: &str,
+    source_detail: &str,
+    confidence: &'static str,
+) -> Option<CommandSuggestion> {
+    let command = command.into();
+    let command = crate::clean_command(Some(command)).ok().flatten()?;
+    Some(CommandSuggestion {
+        command,
+        source_file: source_file.to_string(),
+        source_detail: source_detail.to_string(),
+        confidence,
+    })
+}
+
+fn procfile_start_command(contents: &str) -> Option<CommandSuggestion> {
+    for line in contents.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((process, command)) = line.split_once(':') else {
+            continue;
+        };
+        if process.trim() == "web" {
+            return command_suggestion(command.trim(), "Procfile", "web", "high");
+        }
+    }
+    None
+}
+
+fn package_json_start_command(contents: &str) -> Option<CommandSuggestion> {
+    let package: Value = serde_json::from_str(contents).ok()?;
+    let scripts = package.get("scripts").and_then(Value::as_object)?;
+    let package_manager = infer_package_manager(contents, false, false, false);
+    for script in ["start", "preview", "serve"] {
+        let Some(command) = scripts.get(script).and_then(Value::as_str) else {
+            continue;
+        };
+        if command.trim().is_empty() {
+            continue;
+        }
+        crate::clean_command(Some(command.to_string()))
+            .ok()
+            .flatten()?;
+        return command_suggestion(
+            package_script_command(package_manager, script),
+            "package.json",
+            &format!("scripts.{script}"),
+            if script == "start" { "high" } else { "medium" },
+        );
+    }
+    None
+}
+
+fn package_script_command(package_manager: &str, script: &str) -> String {
+    if package_manager == "bun" {
+        format!("bun run {script}")
+    } else {
+        format!("{package_manager} run {script}")
+    }
+}
+
+fn railway_start_command(contents: &str) -> Option<CommandSuggestion> {
+    let value: Value = serde_json::from_str(contents).ok()?;
+    let (command, detail) = value
+        .pointer("/deploy/startCommand")
+        .and_then(Value::as_str)
+        .map(|command| (command, "deploy.startCommand"))
+        .or_else(|| {
+            value
+                .get("startCommand")
+                .and_then(Value::as_str)
+                .map(|command| (command, "startCommand"))
+        })?;
+    command_suggestion(command, "railway.json", detail, "medium")
+}
+
+fn render_start_command(source_file: &str, contents: &str) -> Option<CommandSuggestion> {
+    let value: serde_yaml::Value = serde_yaml::from_str(contents).ok()?;
+    let services = value
+        .get("services")
+        .and_then(|value| value.as_sequence())?;
+    for (index, service) in services.iter().enumerate() {
+        let Some(command) = service.get("startCommand").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        return command_suggestion(
+            command,
+            source_file,
+            &format!("services[{index}].startCommand"),
+            "medium",
+        );
+    }
+    None
+}
+
+fn dockerfile_start_command(contents: &str) -> Option<CommandSuggestion> {
+    let mut latest = None;
+    for line in contents.lines().map(str::trim) {
+        let upper = line.to_ascii_uppercase();
+        if upper.starts_with("CMD ") {
+            latest = Some(("CMD", line[4..].trim()));
+        } else if upper.starts_with("ENTRYPOINT ") {
+            latest = Some(("ENTRYPOINT", line[10..].trim()));
+        }
+    }
+    let (instruction, raw) = latest?;
+    let command = docker_instruction_command(raw)?;
+    command_suggestion(command, "Dockerfile", instruction, "low")
+}
+
+fn docker_instruction_command(raw: &str) -> Option<String> {
+    if raw.starts_with('[') {
+        let parts: Vec<String> = serde_json::from_str(raw).ok()?;
+        let command = parts.join(" ");
+        return (!command.trim().is_empty()).then_some(command);
+    }
+    (!raw.trim().is_empty()).then(|| raw.to_string())
+}
+
+pub fn with_command_suggestion(
+    mut inspection: Value,
+    suggestion: Option<CommandSuggestion>,
+) -> Value {
+    let Some(suggestion) = suggestion else {
+        return inspection;
+    };
+    let Some(map) = inspection.as_object_mut() else {
+        return inspection;
+    };
+    map.insert(
+        "commandSuggestions".to_string(),
+        serde_json::json!({ "start": suggestion }),
+    );
+    inspection
 }
 
 /// The backing services inferred from a repo (its dependency manifests, or a bare
@@ -728,6 +899,98 @@ mod service_detection_tests {
 
     fn set(items: &[&str]) -> std::collections::HashSet<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn start_command_prefers_procfile_web_process() {
+        let suggestion = detect_start_command(RepoCommandFiles {
+            procfile: Some("worker: node worker.js\nweb: node server.js\n"),
+            package_json: Some(r#"{"scripts":{"start":"next start"}}"#),
+            ..RepoCommandFiles::default()
+        })
+        .unwrap();
+
+        assert_eq!(suggestion.command, "node server.js");
+        assert_eq!(suggestion.source_file, "Procfile");
+        assert_eq!(suggestion.source_detail, "web");
+        assert_eq!(suggestion.confidence, "high");
+    }
+
+    #[test]
+    fn package_json_start_command_uses_package_manager_script() {
+        let suggestion = detect_start_command(RepoCommandFiles {
+            package_json: Some(
+                r#"{"packageManager":"pnpm@10.0.0","scripts":{"start":"next start"}}"#,
+            ),
+            ..RepoCommandFiles::default()
+        })
+        .unwrap();
+
+        assert_eq!(suggestion.command, "pnpm run start");
+        assert_eq!(suggestion.source_file, "package.json");
+        assert_eq!(suggestion.source_detail, "scripts.start");
+        assert_eq!(suggestion.confidence, "high");
+    }
+
+    #[test]
+    fn package_json_preview_is_medium_confidence_fallback() {
+        let suggestion = detect_start_command(RepoCommandFiles {
+            package_json: Some(r#"{"scripts":{"preview":"vite preview --host 0.0.0.0"}}"#),
+            ..RepoCommandFiles::default()
+        })
+        .unwrap();
+
+        assert_eq!(suggestion.command, "npm run preview");
+        assert_eq!(suggestion.source_detail, "scripts.preview");
+        assert_eq!(suggestion.confidence, "medium");
+    }
+
+    #[test]
+    fn railway_and_render_configs_can_supply_start_commands() {
+        let railway = detect_start_command(RepoCommandFiles {
+            railway_json: Some(r#"{"deploy":{"startCommand":"python main.py"}}"#),
+            ..RepoCommandFiles::default()
+        })
+        .unwrap();
+        assert_eq!(railway.command, "python main.py");
+        assert_eq!(railway.source_file, "railway.json");
+        assert_eq!(railway.source_detail, "deploy.startCommand");
+
+        let render = detect_start_command(RepoCommandFiles {
+            render_yaml: Some((
+                "render.yml",
+                "services:\n  - type: web\n    startCommand: gunicorn app:app\n",
+            )),
+            ..RepoCommandFiles::default()
+        })
+        .unwrap();
+        assert_eq!(render.command, "gunicorn app:app");
+        assert_eq!(render.source_file, "render.yml");
+        assert_eq!(render.source_detail, "services[0].startCommand");
+    }
+
+    #[test]
+    fn dockerfile_cmd_is_low_confidence_fallback() {
+        let suggestion = detect_start_command(RepoCommandFiles {
+            dockerfile: Some("FROM node:22\nCMD [\"node\", \"server.js\"]\n"),
+            ..RepoCommandFiles::default()
+        })
+        .unwrap();
+
+        assert_eq!(suggestion.command, "node server.js");
+        assert_eq!(suggestion.source_file, "Dockerfile");
+        assert_eq!(suggestion.source_detail, "CMD");
+        assert_eq!(suggestion.confidence, "low");
+    }
+
+    #[test]
+    fn invalid_detected_commands_are_ignored() {
+        let suggestion = detect_start_command(RepoCommandFiles {
+            package_json: Some(r#"{"scripts":{"start":"node server.js\nrm -rf /"}}"#),
+            ..RepoCommandFiles::default()
+        });
+
+        assert!(suggestion.is_none());
     }
 
     #[test]
