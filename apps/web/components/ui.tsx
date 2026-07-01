@@ -10,6 +10,7 @@ export { Field, FilterTabs, SelectField, ToggleCard } from "@/components/ui/form
 export { SecretField } from "@/components/ui/secret-field";
 export { ServiceCard, ServiceStack, type ServiceSummary } from "@/components/ui/service-card";
 export { StorageMeter } from "@/components/ui/storage-meter";
+export { UsageBar } from "@/components/ui/usage-bar";
 export { ToastProvider, useToast } from "@/components/ui/toast";
 
 // shadcn-style primitives (token-driven, brand-matched). New surfaces should

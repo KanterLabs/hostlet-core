@@ -456,6 +456,35 @@ pub(crate) async fn stop_container_job(payload: &Value) -> anyhow::Result<()> {
     .await
 }
 
+/// Concise, user-facing reasons for a failed screenshot capture. They flow
+/// verbatim to the dashboard via the agent job's `failure_summary` field.
+const SCREENSHOT_ERR_TIMEOUT: &str = "Timed out loading the page";
+const SCREENSHOT_ERR_BLOCKED: &str = "Blocked a private or loopback address";
+const SCREENSHOT_ERR_SITE: &str = "The site returned an error";
+const SCREENSHOT_ERR_SERVICE: &str = "Screenshot service crashed";
+const SCREENSHOT_ERR_UPLOAD: &str = "Failed to upload the screenshot";
+
+/// Classifies a screenshot-pipeline error into one of the reasons above by
+/// matching stable Docker/Playwright/SSRF-guard phrases in the whole error
+/// chain; unrecognized output falls back to a generic service crash.
+fn screenshot_failure_reason(err: &anyhow::Error) -> &'static str {
+    let detail = format!("{err:#}").to_ascii_lowercase();
+    if detail.contains("private or local address")
+        || detail.contains("public hostname")
+        || detail.contains("blocked request")
+        || detail.contains("blocked redirect")
+        || detail.contains("err_blocked_by_client")
+    {
+        SCREENSHOT_ERR_BLOCKED
+    } else if detail.contains("timeout") || detail.contains("timed out") {
+        SCREENSHOT_ERR_TIMEOUT
+    } else if detail.contains("net::err") || detail.contains("too many redirects") {
+        SCREENSHOT_ERR_SITE
+    } else {
+        SCREENSHOT_ERR_SERVICE
+    }
+}
+
 pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
     let app_id = payload_uuid(payload, "app_id").context("screenshot job missing app_id")?;
     let deployment_id =
@@ -465,7 +494,11 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
         .get("capture_url")
         .and_then(|value| value.as_str())
         .context("screenshot job missing capture_url")?;
-    validate_capture_url(capture_url)?;
+    if let Err(err) = validate_capture_url(capture_url) {
+        return Err(reported_deployment_failure(
+            screenshot_failure_reason(&err).to_string(),
+        ));
+    }
     let width = payload
         .get("width")
         .and_then(|value| value.as_i64())
@@ -491,17 +524,29 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
             "Capturing deployment screenshot.",
         )
         .await;
-        run_screenshotter_container(
-            job_id,
-            screenshotter_image(payload),
-            capture_url,
-            &size_env,
-            &output_file,
-        )
-        .await?;
-        let bytes = tokio::fs::read(&output_file)
-            .await
-            .context("screenshotter did not produce an image")?;
+        // Run + read under one categorized boundary so failures map to a reason.
+        let capture: anyhow::Result<Vec<u8>> = async {
+            run_screenshotter_container(
+                job_id,
+                screenshotter_image(payload),
+                capture_url,
+                &size_env,
+                &output_file,
+            )
+            .await?;
+            tokio::fs::read(&output_file)
+                .await
+                .context("screenshotter did not produce an image")
+        }
+        .await;
+        let bytes = match capture {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let reason = screenshot_failure_reason(&err);
+                tracing::warn!(error = %format!("{err:#}"), reason, "screenshot capture failed");
+                return Err(reported_deployment_failure(reason.to_string()));
+            }
+        };
         upload_screenshot(
             cfg,
             ScreenshotUpload {
@@ -514,7 +559,11 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
                 bytes,
             },
         )
-        .await?;
+        .await
+        .map_err(|err| {
+            tracing::warn!(error = %format!("{err:#}"), "screenshot upload failed");
+            reported_deployment_failure(SCREENSHOT_ERR_UPLOAD.to_string())
+        })?;
         Ok(())
     }
     .await;
