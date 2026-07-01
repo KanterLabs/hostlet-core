@@ -360,6 +360,7 @@ pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()
             restart_container_job(&cfg, &payload).await?;
             Ok(())
         }
+        Some("stop_container") => stop_container_job(&payload).await,
         Some("docker_cleanup") => docker_cleanup_job(&payload).await,
         _ => Ok(()),
     }

@@ -437,6 +437,25 @@ pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyh
     Ok(())
 }
 
+/// Stop (without removing) the container for a suspended app — the reversible
+/// counterpart to app deletion, used when Hostlet Cloud billing goes inactive.
+/// `docker stop` on an already-stopped or already-removed container is treated
+/// as success (idempotent), since the caller (the billing reaper) may retry
+/// after a partial failure. Reactivation reuses [`restart_container_job`]
+/// (`docker restart` also starts a stopped container), so no "start" job type
+/// is needed.
+pub(crate) async fn stop_container_job(payload: &Value) -> anyhow::Result<()> {
+    let Some(target) = health_target_from_payload(payload) else {
+        bail!("stop job missing valid health target");
+    };
+    run_quiet_absent_ok(
+        "docker",
+        &["stop", &target.container_name],
+        &["No such container"],
+    )
+    .await
+}
+
 pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
     let app_id = payload_uuid(payload, "app_id").context("screenshot job missing app_id")?;
     let deployment_id =

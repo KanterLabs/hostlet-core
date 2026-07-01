@@ -49,6 +49,7 @@ pub const APP_SELECT_BODY: &str = r#"
           a.cpu_limit,
           a.public_exposure,
           a.auto_deploy,
+          a.suspended_at,
           a.created_at,
           s.id AS server_id,
           s.name AS server_name,
@@ -194,6 +195,7 @@ pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_js
         "cpuLimit": or_default::<Option<f64>>(&r, "cpu_limit", None),
         "publicExposure": or_default(&r, "public_exposure", false),
         "autoDeploy": or_default(&r, "auto_deploy", false),
+        "suspendedAt": opt::<chrono::DateTime<chrono::Utc>>(&r, "suspended_at"),
         "createdAt": opt::<chrono::DateTime<chrono::Utc>>(&r, "created_at"),
         "server": opt::<Uuid>(&r, "server_id").map(|id| serde_json::json!({
             "id": id,

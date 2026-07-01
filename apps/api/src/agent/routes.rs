@@ -54,6 +54,7 @@ pub async fn health_targets(
           AND d.status IN ('success','rolled_back')
           AND d.container_name IS NOT NULL
           AND d.published_port IS NOT NULL
+          AND a.suspended_at IS NULL
         ORDER BY a.created_at ASC
         "#,
     )
