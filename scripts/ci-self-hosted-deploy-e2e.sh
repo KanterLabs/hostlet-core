@@ -402,8 +402,10 @@ deploy_railpack_fixture() {
   local repo_name="$2"
   local health_path="$3"
   local expected="$4"
+  local container_port="${5:-3000}"
   local railpack_payload railpack_app_payload railpack_app_id railpack_deploy_payload railpack_deployment_id
   local railpack_detail railpack_published_port railpack_container railpack_logs railpack_delete_payload railpack_delete_job
+  local railpack_mapped_port
 
   railpack_payload="$(cat <<JSON
 {
@@ -411,7 +413,7 @@ deploy_railpack_fixture() {
   "repo_full_name":"hostlet-ci/${repo_name}",
   "branch":"main",
   "server_id":null,
-  "container_port":3000,
+  "container_port":${container_port},
   "health_path":"${health_path}",
   "domain":"",
   "runtime_kind":"single",
@@ -439,6 +441,21 @@ JSON
   railpack_container="hostlet-app-${railpack_app_id}-${railpack_deployment_id}"
   curl -fsS "http://127.0.0.1:${railpack_published_port}${health_path}" >/dev/null
   curl -fsS "http://127.0.0.1:${railpack_published_port}/" | grep -q "${expected}"
+  # The declared container_port must round-trip through runtime metadata and drive
+  # the actual published mapping, so a non-default port proves the variable PORT
+  # plumbing (create -> railpack PORT env -> container listen port -> agent health
+  # probe -> published route) is honored rather than a hard-coded 3000.
+  printf '%s' "${railpack_detail}" | json_get containerPort | grep -qx "${container_port}"
+  railpack_mapped_port="$(docker inspect -f "{{(index (index .NetworkSettings.Ports \"${container_port}/tcp\") 0).HostPort}}" "${railpack_container}")"
+  if [ "${railpack_mapped_port}" != "${railpack_published_port}" ]; then
+    echo "expected container_port ${container_port} to map to published port ${railpack_published_port}, got ${railpack_mapped_port}" >&2
+    exit 1
+  fi
+  if [ "${container_port}" != "3000" ] && \
+    docker inspect -f '{{range $p, $_ := .NetworkSettings.Ports}}{{println $p}}{{end}}' "${railpack_container}" | grep -qx '3000/tcp'; then
+    echo "expected non-default port app ${fixture_name} to not expose 3000/tcp" >&2
+    exit 1
+  fi
   printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.buildBackend | grep -q '^railpack$'
   printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.packagingStrategy | grep -q '^generated$'
   printf '%s' "${railpack_detail}" | json_get latestDeployment.runtimeMetadata.readOnlyRootFilesystem | grep -q '^false$'
@@ -788,6 +805,10 @@ else
     IFS=: read -r fixture_name repo_name health_path expected <<<"${fixture}"
     deploy_railpack_fixture "${fixture_name}" "${repo_name}" "${health_path}" "${expected}"
   done
+  # CORE-11 regression: at least one deploy must run on a non-default container_port
+  # (8080) so the full self-hosted path is exercised for a port other than 3000.
+  # Reuses the go fixture repo under a distinct app name.
+  deploy_railpack_fixture "go-altport" "go-api" "/health" "hostlet-generated-go" 8080
 fi
 
 compose_payload="$(cat <<JSON

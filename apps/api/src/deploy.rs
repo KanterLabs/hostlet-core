@@ -334,6 +334,13 @@ pub async fn create_and_send_deploy(
         }
     }
     let server_id = app.server_id;
+    // Re-check the assigned server's capacity before enqueuing. `select_app_runner`
+    // reserves a slot at app-create time by counting *live* apps, but an app
+    // created before its first deploy counts toward no server there, so several
+    // apps can be placed on a server with room for one. Enforce the real cap here.
+    // This closes the create-many-then-deploy gap; see `ensure_server_has_capacity`
+    // for the residual truly-concurrent-deploy race and why it is bounded/low-risk.
+    crate::server_capacity::ensure_server_has_capacity(state, server_id, app_id).await?;
     let insert_deployment = sqlx::query(
         "INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,runtime_kind) \
          VALUES ($1,$2,'queued',$3,now(),$4) RETURNING id",

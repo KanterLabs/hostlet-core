@@ -123,6 +123,10 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
             "/api/system/operator-cleanup",
             get(web::operator_cleanup_preview).post(web::operator_run_cleanup),
         )
+        // CORE-02: global cleanup is restricted to the operator agent token or
+        // the owner (first user) session; any other authenticated user gets 403.
+        // See `authorize_global_cleanup` in `web/cleanup.rs`.
+        // `/api/system/operator-cleanup` is the primary operator surface.
         .route(
             "/api/system/cleanup",
             get(web::cleanup_preview).post(web::run_cleanup),

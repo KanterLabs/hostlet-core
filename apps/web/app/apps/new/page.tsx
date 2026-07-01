@@ -25,17 +25,36 @@ type CloudflareStatus = {
   defaultDomainPattern?: string | null;
 };
 
+// Editing any of these fields changes *what* an inspection describes, so a prior
+// inspection (and its inferred env drafts) no longer applies and must be cleared.
+const INSPECTION_KEY_FIELDS: readonly (keyof CreateAppForm)[] = ["repo_full_name", "branch", "root_directory"];
+
+// Stable identity of an inspection target. Compared against the current form to
+// detect when an inspection has gone stale relative to the fields being submitted.
+function inspectionKeyOf(form: Pick<CreateAppForm, "repo_full_name" | "branch" | "root_directory">) {
+  return JSON.stringify([form.repo_full_name, form.branch, form.root_directory]);
+}
+
 export default function CreateApp() {
   const router = useRouter();
   const [form, setForm] = useState<CreateAppForm>(defaultCreateAppForm);
   // Typed, single-field updater: avoids repeated `{ ...form, x }` spreads in JSX
   // and uses the functional updater form to sidestep stale-closure bugs.
   const setField = useCallback(
-    <K extends keyof CreateAppForm>(key: K, value: CreateAppForm[K]) =>
-      setForm((current) => ({ ...current, [key]: value })),
+    <K extends keyof CreateAppForm>(key: K, value: CreateAppForm[K]) => {
+      setForm((current) => ({ ...current, [key]: value }));
+      // Changing the repo/branch/root invalidates any prior inspection and its
+      // env drafts — clear them so the user must re-inspect before deploying.
+      if (INSPECTION_KEY_FIELDS.includes(key)) {
+        setInspection(null);
+        setInspectionKey(null);
+        setEnvValues({});
+      }
+    },
     [],
   );
   const [inspection, setInspection] = useState<RepoInspection | null>(null);
+  const [inspectionKey, setInspectionKey] = useState<string | null>(null);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [inspecting, setInspecting] = useState(false);
   const [repoLink, setRepoLink] = useState("");
@@ -85,6 +104,7 @@ export default function CreateApp() {
       name: current.name || repo.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
     }));
     setInspection(null);
+    setInspectionKey(null);
     setEnvValues({});
   }
 
@@ -97,6 +117,7 @@ export default function CreateApp() {
       name: current.name || repo.full_name.split("/")[1].replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
     }));
     setInspection(null);
+    setInspectionKey(null);
     setEnvValues({});
   }
 
@@ -109,9 +130,14 @@ export default function CreateApp() {
         method: "POST",
         body: JSON.stringify({ repo_full_name: form.repo_full_name, branch: form.branch }),
       });
+      // Merge inference into the form, then key the inspection to the *resulting*
+      // repo/branch/root (inspection can rewrite branch/root_directory) so later
+      // edits to those fields are detected as stale.
+      const merged = mergeInspectionIntoForm(form, result);
       setInspection(result);
       setEnvValues(envValuesFromInspection(result));
-      setForm((current) => mergeInspectionIntoForm(current, result));
+      setForm(merged);
+      setInspectionKey(inspectionKeyOf(merged));
       setMessage(result.deployable ? "Repository inspected. Create and deploy when ready." : "Hostlet could not infer a deployable runtime.");
     } catch (error) {
       setMessage(`Inspect failed. ${error instanceof Error ? error.message : "Check the public GitHub URL."}`);
@@ -122,6 +148,13 @@ export default function CreateApp() {
 
   async function submit() {
     if (creating) return;
+    // Guard against submitting inferred env/runtime metadata from an inspection
+    // whose repo/branch/root no longer matches the form (the button is also
+    // disabled in this state, but never deploy stale metadata).
+    if (inspection && inspectionKey !== inspectionKeyOf(form)) {
+      setMessage("Inspect this repo and branch again before deploying.");
+      return;
+    }
     setCreating(true);
     setMessage("Creating app...");
     try {
@@ -156,7 +189,11 @@ export default function CreateApp() {
   }, [cloudflare?.baseDomain, form.name, form.repo_full_name]);
   const routePreview = form.domain.trim() || generatedDomain || "Hostlet will generate one";
   const requiredEnvMissing = inspection?.env?.some((item) => item.required && !envValues[item.key]?.trim()) || false;
-  const createDisabledReason = createAppDisabledReason({ form, requiredEnvMissing, inspection });
+  // A non-null inspection whose key drifted from the current fields is stale.
+  const inspectionStale = inspection !== null && inspectionKey !== inspectionKeyOf(form);
+  const createDisabledReason = inspectionStale
+    ? "Re-inspect this repo and branch before deploying."
+    : createAppDisabledReason({ form, requiredEnvMissing, inspection });
   const canCreate = !createDisabledReason;
 
   return (

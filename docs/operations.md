@@ -45,6 +45,15 @@ raw secret values, private keys, or plaintext app environment files.
 
 Restores require the original `ENCRYPTION_KEY`. Without it, encrypted GitHub tokens and app environment variables cannot be decrypted.
 
+`scripts/backup.sh` can also push the snapshot off-host: set `HOSTLET_BACKUP_BUCKET`
+(a `gs://` path) to sync via `gsutil`, or `HOSTLET_BACKUP_S3_BUCKET` (an `s3://` path,
+optionally with `HOSTLET_BACKUP_S3_ENDPOINT` for a non-AWS S3-compatible endpoint such as
+Cloudflare R2 or MinIO) to sync via the `aws` CLI. Both are no-ops when unset; set at most
+one. S3-compatible credentials/region come from the standard `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` environment variables — `hostlet backup`
+inherits your shell's environment, so exporting these before running it (or in a cron/
+systemd unit's environment) is enough; nothing needs to be set in `.env`.
+
 ## Troubleshooting
 
 - If API startup fails after an environment change, check Postgres credential compatibility with the existing persistent volume.

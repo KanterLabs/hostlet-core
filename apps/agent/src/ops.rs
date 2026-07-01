@@ -22,10 +22,35 @@ use reconcile::{
 pub(crate) use resource_stats::{parse_docker_bytes, publish_resource_stats};
 pub(crate) use storage_stats::publish_storage_stats;
 
+/// Build a unique temp path in the *same directory* as the final route file so
+/// the write + atomic rename never crosses a filesystem boundary. A per-process
+/// PID is not sufficient: a deploy and a runtime health-repair can rewrite the
+/// same app's `.caddy` file concurrently within a single agent process, so the
+/// random UUID suffix guarantees two writers never share a temp path and cannot
+/// clobber each other's in-flight write.
+fn route_temp_path(target: &Path) -> PathBuf {
+    target.with_extension(format!(
+        "caddy.tmp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ))
+}
+
 pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
-    let tmp = target.with_extension(format!("caddy.tmp-{}", std::process::id()));
-    tokio::fs::write(&tmp, contents).await?;
-    tokio::fs::rename(tmp, target).await?;
+    use tokio::io::AsyncWriteExt;
+    let tmp = route_temp_path(target);
+    // `create_new` refuses to open a path that already exists, so even in the
+    // astronomically unlikely event of a UUID collision we never truncate a
+    // temp file a concurrent writer is still using.
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .await?;
+    file.write_all(contents.as_bytes()).await?;
+    file.flush().await?;
+    drop(file);
+    tokio::fs::rename(&tmp, target).await?;
     Ok(())
 }
 
@@ -898,3 +923,22 @@ pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
 }
 
 pub(crate) use hostlet_contracts::valid_container_name;
+
+#[cfg(test)]
+mod route_temp_tests {
+    use super::route_temp_path;
+    use std::path::Path;
+
+    #[test]
+    fn temp_paths_for_same_target_are_distinct() {
+        let target = Path::new("/etc/caddy/snippets/app.caddy");
+        let first = route_temp_path(target);
+        let second = route_temp_path(target);
+        // Two concurrent writers of the same route file must never collide.
+        assert_ne!(first, second);
+        // Both temp files must live alongside the final route file so the
+        // subsequent rename stays within one directory (atomic on the FS).
+        assert_eq!(first.parent(), target.parent());
+        assert_eq!(second.parent(), target.parent());
+    }
+}

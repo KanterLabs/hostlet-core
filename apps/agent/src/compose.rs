@@ -616,7 +616,7 @@ pub(crate) async fn run_log(
     bin: &str,
     args: &[&str],
 ) -> anyhow::Result<()> {
-    run_log_streamed(cfg, deployment_id, None, &[], bin, args).await
+    run_log_streamed(cfg, deployment_id, None, &[], bin, args, false).await
 }
 
 pub(crate) async fn run_log_in_dir_env(
@@ -627,11 +627,17 @@ pub(crate) async fn run_log_in_dir_env(
     bin: &str,
     args: &[&str],
 ) -> anyhow::Result<()> {
-    run_log_streamed(cfg, deployment_id, Some(dir), envs, bin, args).await
+    run_log_streamed(cfg, deployment_id, Some(dir), envs, bin, args, true).await
 }
 
 /// Spawns `bin args`, streaming stdout/stderr back as deployment logs. When
-/// `dir` is `Some`, the command runs with that working directory.
+/// `dir` is `Some`, the command runs with that working directory. When
+/// `isolate_env` is set the child starts from a wiped environment (see
+/// `harden_host_command_env`); this is reserved for commands that re-parse the
+/// repo-controlled compose file and interpolate `${VAR}`. Management commands
+/// (git, `docker stop`, …) never interpolate repo content, so they keep the
+/// agent's functional environment (git transport config, proxy vars) and only
+/// receive the baseline linker/PATH hardening.
 async fn run_log_streamed(
     cfg: &Config,
     deployment_id: Uuid,
@@ -639,6 +645,7 @@ async fn run_log_streamed(
     envs: &[(&str, &str)],
     bin: &str,
     args: &[&str],
+    isolate_env: bool,
 ) -> anyhow::Result<()> {
     log(
         cfg,
@@ -651,10 +658,19 @@ async fn run_log_streamed(
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
+    // For compose-file-parsing commands, clear the inherited agent environment
+    // (see `harden_host_command_env`) BEFORE layering on the curated per-deploy
+    // interpolation env, so a tenant compose file's `${HOSTLET_AGENT_TOKEN}` can
+    // never resolve an inherited host secret while the intended `${VAR}` values
+    // still apply. Management commands keep the agent's functional environment.
+    if isolate_env {
+        harden_host_command_env(&mut cmd);
+    } else {
+        sanitize_management_command_env(&mut cmd);
+    }
     for (key, value) in envs {
         cmd.env(key, value);
     }
-    harden_host_command_env(&mut cmd);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -697,7 +713,47 @@ async fn run_log_streamed(
     Ok(())
 }
 
-fn harden_host_command_env(cmd: &mut Command) {
+/// Hardens a host Docker/Compose command so a repo-controlled compose file can
+/// never interpolate the agent's own environment. Docker Compose resolves
+/// `${VAR}` in service `environment:` blocks from the *spawned command's*
+/// environment, so a tenant that writes `environment: {X: '${HOSTLET_AGENT_TOKEN}'}`
+/// would otherwise bake the agent's host-wide secrets (HOSTLET_*, AWS_*,
+/// DATABASE_URL, GITHUB_*, …) into their container — on cloud that is the one
+/// shared agent token / job-signing secret for every co-located tenant.
+///
+/// `env_clear` is the primary defense: the child starts from an empty
+/// environment and only a tiny, secret-free allowlist is re-added — a fixed
+/// safe `PATH` plus the Docker client transport variables (and only when the
+/// host actually sets them; rootless Docker needs `XDG_RUNTIME_DIR` to find the
+/// user daemon socket). Callers layer the curated per-deploy interpolation env
+/// on top *after* calling this.
+pub(crate) fn harden_host_command_env(cmd: &mut Command) {
+    cmd.env_clear();
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    for key in [
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CONFIG",
+        "XDG_RUNTIME_DIR",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            cmd.env(key, value);
+        }
+    }
+}
+
+/// Baseline hardening for host management commands (git checkout/submodule,
+/// `docker stop`, `docker volume create`, …) that never re-parse a
+/// repo-controlled compose file and so carry no `${VAR}` interpolation vector.
+/// Unlike `harden_host_command_env`, the environment is NOT cleared: these
+/// commands still need the agent's functional environment (git transport config
+/// such as `protocol.file.allow`/`insteadOf`, proxy settings, `HOME`). Only
+/// dynamic-linker overrides are dropped and `PATH` is pinned to a known-good set
+/// so an injected `LD_PRELOAD`/`PATH` cannot redirect the spawned binary.
+fn sanitize_management_command_env(cmd: &mut Command) {
     for (key, _) in std::env::vars() {
         if key.starts_with("LD_") || key.starts_with("DYLD_") {
             cmd.env_remove(key);
@@ -819,6 +875,29 @@ mod tests {
         let failed = compose_health_failure_message(&health_err, Some(&cleanup_err));
         assert!(failed.contains("Failed to remove the unhealthy Compose project"));
         assert!(failed.contains("docker failed"));
+    }
+
+    #[tokio::test]
+    async fn harden_host_command_env_strips_inherited_agent_secrets() {
+        // Simulate the agent process holding its host-wide secret, then confirm
+        // a hardened Docker/Compose spawn cannot see it: `env_clear` must wipe
+        // the inherited environment so tenant `${HOSTLET_AGENT_TOKEN}`
+        // interpolation resolves to empty instead of the real token.
+        std::env::set_var("HOSTLET_AGENT_TOKEN", "super-secret-token");
+
+        let mut cmd = Command::new("sh");
+        harden_host_command_env(&mut cmd);
+        cmd.args(["-c", "printf '%s' \"${HOSTLET_AGENT_TOKEN:-}\""]);
+        let output = cmd.output().await.expect("spawn sh");
+
+        std::env::remove_var("HOSTLET_AGENT_TOKEN");
+
+        assert!(output.status.success(), "sh probe should exit cleanly");
+        assert!(
+            output.stdout.is_empty(),
+            "HOSTLET_AGENT_TOKEN leaked into the child env: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     #[test]

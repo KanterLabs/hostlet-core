@@ -174,10 +174,15 @@ pub(crate) async fn command_output_in_dir_env(
     timeout: Duration,
 ) -> anyhow::Result<Output> {
     let mut cmd = Command::new(bin);
-    cmd.current_dir(dir).args(args).kill_on_drop(true);
+    cmd.current_dir(dir).kill_on_drop(true);
+    // `docker compose ps` re-parses the repo-controlled compose file and
+    // interpolates `${VAR}`, so it must never inherit the agent's host secrets:
+    // clear the environment first, then layer on the curated interpolation env.
+    harden_host_command_env(&mut cmd);
     for (key, value) in envs {
         cmd.env(key, value);
     }
+    cmd.args(args);
     match tokio::time::timeout(timeout, cmd.output()).await {
         Ok(output) => output.with_context(|| format!("failed to start {bin}")),
         Err(_) => bail!("{bin} timed out after {} seconds", timeout.as_secs()),
@@ -362,5 +367,33 @@ mod tests {
             "other_default",
             "hostlet-app-abc"
         ));
+    }
+
+    #[tokio::test]
+    async fn command_output_in_dir_env_strips_inherited_agent_secrets() {
+        // The `docker compose ps -q` read path re-parses the tenant compose file
+        // and interpolates `${VAR}` from the spawned env, so it must clear the
+        // inherited agent environment. Set the host-wide token in the parent and
+        // confirm the child resolves it to empty rather than the real secret.
+        std::env::set_var("HOSTLET_AGENT_TOKEN", "super-secret-token");
+
+        let output = super::command_output_in_dir_env(
+            std::path::Path::new("."),
+            &[],
+            "sh",
+            &["-c", "printf '%s' \"${HOSTLET_AGENT_TOKEN:-}\""],
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .expect("run sh probe");
+
+        std::env::remove_var("HOSTLET_AGENT_TOKEN");
+
+        assert!(output.status.success(), "sh probe should exit cleanly");
+        assert!(
+            output.stdout.is_empty(),
+            "HOSTLET_AGENT_TOKEN leaked into the child env: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }

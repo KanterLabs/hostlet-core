@@ -140,3 +140,32 @@ if [[ -n "${HOSTLET_BACKUP_BUCKET:-}" ]]; then
 else
   echo "HOSTLET_BACKUP_BUCKET not set — skipping off-host upload."
 fi
+
+# ---------------------------------------------------------------------------
+# Off-host upload to an S3-compatible bucket (optional, independent of the
+# gsutil hook above — set at most one of the two).
+# Set HOSTLET_BACKUP_S3_BUCKET to an s3://bucket[/prefix] path to enable
+# off-host durability via `aws s3 sync` against any S3-compatible endpoint
+# (AWS S3, Cloudflare R2, MinIO, ...). When unset this step is a no-op.
+# Credentials/region come from the standard AWS CLI environment variables
+# (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION) — this script
+# does not read, generate, or store them itself.
+# Set HOSTLET_BACKUP_S3_ENDPOINT for a non-AWS endpoint, e.g. Cloudflare R2:
+#   HOSTLET_BACKUP_S3_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
+# Example: HOSTLET_BACKUP_S3_BUCKET=s3://my-bucket/hostlet-backups
+# ---------------------------------------------------------------------------
+if [[ -n "${HOSTLET_BACKUP_S3_BUCKET:-}" ]]; then
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "ERROR: HOSTLET_BACKUP_S3_BUCKET is set but the aws CLI is not installed/on PATH. Local backup is complete; off-host upload failed." >&2
+    exit 1
+  fi
+  echo "Uploading backup to $HOSTLET_BACKUP_S3_BUCKET/hostlet-$STAMP ..."
+  if [[ -n "${HOSTLET_BACKUP_S3_ENDPOINT:-}" ]]; then
+    aws s3 sync --endpoint-url "$HOSTLET_BACKUP_S3_ENDPOINT" "$BACKUP_DIR" "$HOSTLET_BACKUP_S3_BUCKET/hostlet-$STAMP"
+  else
+    aws s3 sync "$BACKUP_DIR" "$HOSTLET_BACKUP_S3_BUCKET/hostlet-$STAMP"
+  fi
+  echo "Off-host S3 upload complete: $HOSTLET_BACKUP_S3_BUCKET/hostlet-$STAMP"
+else
+  echo "HOSTLET_BACKUP_S3_BUCKET not set — skipping off-host S3 upload."
+fi

@@ -187,8 +187,11 @@ run_fixture() {
   docker rm -f "${container}" >/dev/null
 }
 
+# `go` runs on a non-default PORT (8080) so the variable-port path is covered:
+# railpack plan/build/run all receive PORT=8080, the container listens there, and
+# the health probe + published-port lookup target 8080/tcp. The rest stay on 3000.
 run_fixture python 3000 /health hostlet-generated-python 150000000 180 60
-run_fixture go 3000 /health hostlet-generated-go 60000000 180 60
+run_fixture go 8080 /health hostlet-generated-go 60000000 180 60
 run_fixture rust 3000 /health hostlet-generated-rust 60000000 180 60
 run_fixture static 3000 / hostlet-generated-static 80000000 180 60
 run_fixture node 3000 /health hostlet-ci 180000000 180 60

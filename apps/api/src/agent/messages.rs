@@ -79,7 +79,7 @@ pub(in crate::agent) async fn handle_agent_message(
         Some("heartbeat") => handle_heartbeat(state, server_id).await,
         Some("deployment_status") => handle_deployment_status(state, server_id, &msg).await,
         Some("log") => handle_log(state, server_id, &msg).await,
-        Some("resource_stats") => handle_resource_stats(state, &msg).await,
+        Some("resource_stats") => handle_resource_stats(state, server_id, &msg).await,
         Some("storage_stats") => handle_storage_stats(state, server_id, &msg).await,
         Some("health_status") => handle_health_status(state, server_id, &msg).await,
         Some("job_status") => handle_job_status(state, server_id, &msg).await,
@@ -93,6 +93,22 @@ async fn handle_heartbeat(state: &AppState, server_id: Uuid) {
         .bind(server_id)
         .execute(&state.db)
         .await;
+}
+
+/// Return the agent-reported top-level `container_name` only when it is a managed
+/// `hostlet-*` name (per `valid_container_name`). An authenticated agent must not
+/// be able to persist an arbitrary or another app's container name, because a
+/// stored name can later flow into delete-cleanup payloads; invalid names are
+/// dropped (and logged) so the caller keeps the previously stored value.
+fn deployment_container_name(msg: &serde_json::Value, deployment_id: Uuid) -> Option<&str> {
+    match msg.get("container_name").and_then(|v| v.as_str()) {
+        Some(name) if valid_container_name(name) => Some(name),
+        Some(name) => {
+            tracing::warn!(%name, %deployment_id, "rejected invalid deployment container name");
+            None
+        }
+        None => None,
+    }
 }
 
 async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
@@ -129,6 +145,9 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
             }
         }
     }
+    // Validate the top-level container name before persisting it; a bogus or
+    // cross-app value is dropped so COALESCE preserves the stored name.
+    let container_name = deployment_container_name(msg, id);
     // Update the deployment in place: COALESCE keeps existing columns when the
     // agent omits a field, runtime_metadata is replaced only when supplied, and
     // finished_at is stamped once the deployment reaches a terminal status.
@@ -149,7 +168,7 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
     )
     .bind(&status)
     .bind(msg.get("image_tag").and_then(|v| v.as_str()))
-    .bind(msg.get("container_name").and_then(|v| v.as_str()))
+    .bind(container_name)
     .bind(bounded_i32(msg, "published_port", PORT_RANGE))
     .bind(failure_summary.as_deref())
     .bind(msg.get("compose_project").and_then(|v| v.as_str()))
@@ -262,8 +281,10 @@ async fn handle_storage_stats(state: &AppState, server_id: Uuid, msg: &serde_jso
     let Some(used_bytes) = bounded_i64(msg, "usedBytes", RESOURCE_BYTES_RANGE) else {
         return;
     };
-    // Display-only footprint fields. Older agents omit them, so default to 0;
-    // they never gate deploys (only `used_bytes`, the managed volume, does).
+    // Footprint fields; older agents omit them, so default to 0. `image_bytes`
+    // (built-image bytes) intentionally counts toward the storage quota alongside
+    // `used_bytes`, the managed volume (deliberate policy, commit c363aa6). The
+    // container writable layer (`container_bytes`) is display-only and never gates.
     let image_bytes = bounded_i64(msg, "imageBytes", RESOURCE_BYTES_RANGE).unwrap_or(0);
     let container_bytes = bounded_i64(msg, "containerBytes", RESOURCE_BYTES_RANGE).unwrap_or(0);
     // Sanitize the per-volume breakdown: cap the count and validate each entry
@@ -347,7 +368,7 @@ async fn handle_log(state: &AppState, server_id: Uuid, msg: &serde_json::Value) 
     });
 }
 
-async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
+async fn handle_resource_stats(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
     let Some(container) = msg.get("container").and_then(|v| v.as_str()) else {
         return;
     };
@@ -365,7 +386,10 @@ async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
     let percent = |key: &str| bounded_f64(msg, key, RESOURCE_PERCENT_MAX);
     let bytes = |key: &str| bounded_i64(msg, key, RESOURCE_BYTES_RANGE);
     let count = |key: &str| bounded_i64(msg, key, RESOURCE_COUNT_RANGE);
-    // Keep the latest sample per container (upsert keyed on container_name).
+    // Keep the latest sample per container (upsert keyed on container_name), but
+    // only when the reported container belongs to a deployment or Compose service
+    // on this agent's own server. Without this guard a compromised agent token
+    // could overwrite the stats of another server's `hostlet-*` container.
     let _ = sqlx::query(
         r#"
                 INSERT INTO app_resource_snapshots
@@ -373,7 +397,14 @@ async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
                    cpu_percent_value,memory_usage_bytes,memory_limit_bytes,memory_percent_value,
                    network_rx_bytes,network_tx_bytes,block_read_bytes,block_write_bytes,pids_current,
                    sampled_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+                SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now()
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM deployments d
+                  LEFT JOIN deployment_services ds ON ds.deployment_id = d.id
+                  WHERE d.server_id = $17
+                    AND ($1 = d.container_name OR $1 = ds.container_name)
+                )
                 ON CONFLICT (container_name) DO UPDATE SET
                   cpu_percent=EXCLUDED.cpu_percent,
                   memory_usage=EXCLUDED.memory_usage,
@@ -409,6 +440,7 @@ async fn handle_resource_stats(state: &AppState, msg: &serde_json::Value) {
     .bind(bytes("blockReadBytes"))
     .bind(bytes("blockWriteBytes"))
     .bind(count("pidsCurrent"))
+    .bind(server_id)
     .execute(&state.db)
     .await;
 }
@@ -617,4 +649,38 @@ pub(in crate::agent) async fn prune_health_events(state: &AppState, app_id: Uuid
     .bind(MAX_HEALTH_EVENTS_PER_APP)
     .execute(&state.db)
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // CORE-04: the top-level deployment container name is only persisted when it
+    // is a managed `hostlet-*` name; arbitrary or cross-app values are dropped so
+    // COALESCE preserves the stored name rather than trusting agent input.
+    #[test]
+    fn deployment_container_name_accepts_only_managed_names() {
+        let id = Uuid::from_u128(1);
+        assert_eq!(
+            deployment_container_name(
+                &serde_json::json!({ "container_name": "hostlet-app-123" }),
+                id
+            ),
+            Some("hostlet-app-123")
+        );
+        // Non-hostlet, path-traversal, and over-long names are rejected.
+        assert_eq!(
+            deployment_container_name(&serde_json::json!({ "container_name": "postgres" }), id),
+            None
+        );
+        assert_eq!(
+            deployment_container_name(
+                &serde_json::json!({ "container_name": "hostlet-app/../../bad" }),
+                id
+            ),
+            None
+        );
+        // A missing field also stays None (COALESCE keeps the existing value).
+        assert_eq!(deployment_container_name(&serde_json::json!({}), id), None);
+    }
 }
