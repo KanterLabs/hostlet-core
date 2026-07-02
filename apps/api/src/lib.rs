@@ -8,6 +8,7 @@ pub mod deployment_policy;
 pub mod device_flow;
 pub mod env;
 pub mod github;
+pub mod health_alerts;
 pub mod job_control;
 pub mod operator;
 pub mod password;

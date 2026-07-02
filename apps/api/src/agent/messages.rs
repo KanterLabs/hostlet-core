@@ -1,4 +1,5 @@
 use super::*;
+use crate::health_alerts::{is_health_down_status, HealthTransitionEvent};
 
 /// Max bytes retained from a single deployment log line before truncation.
 const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
@@ -467,6 +468,11 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
     let success_count = bounded_i32(msg, "success_count", HEALTH_COUNTER_RANGE).unwrap_or(0);
     let checked_url = capped_str(msg, "checked_url", HEALTH_TEXT_MAX_CHARS);
     let error = capped_str(msg, "error", HEALTH_TEXT_MAX_CHARS);
+    let previous_status = if is_health_down_status(status) {
+        previous_health_status(state, server_id, app_id).await
+    } else {
+        None
+    };
     // Upsert the latest health snapshot for the app (one row per app_id), but only
     // when the app belongs to this server. last_healthy_at advances only on a
     // 'healthy' status and is otherwise preserved.
@@ -515,6 +521,24 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
     if updated == 0 {
         return;
     }
+    if health_transition_needs_alert(status, previous_status.as_deref()) {
+        state.health_event_hooks.handle_health_transition(
+            state.clone(),
+            HealthTransitionEvent {
+                app_id,
+                deployment_id,
+                container_name: container.map(str::to_string),
+                status: status.to_string(),
+                previous_status,
+                checked_url: checked_url.clone(),
+                http_status,
+                latency_ms,
+                failure_count,
+                success_count,
+                error: error.clone(),
+            },
+        );
+    }
     if let (Some(deployment_id), Some(published_port)) = (deployment_id, published_port) {
         let _ = sqlx::query(
             r#"
@@ -555,6 +579,30 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
     .execute(&state.db)
     .await;
     prune_health_events(state, app_id).await;
+}
+
+async fn previous_health_status(state: &AppState, server_id: Uuid, app_id: Uuid) -> Option<String> {
+    match sqlx::query_scalar(
+        "SELECT hs.status
+         FROM app_health_snapshots hs
+         JOIN apps a ON a.id=hs.app_id
+         WHERE hs.app_id=$1 AND a.server_id=$2",
+    )
+    .bind(app_id)
+    .bind(server_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(status) => status,
+        Err(err) => {
+            tracing::warn!(error = %err, %app_id, "failed to load previous app health status");
+            None
+        }
+    }
+}
+
+fn health_transition_needs_alert(status: &str, previous_status: Option<&str>) -> bool {
+    is_health_down_status(status) && !previous_status.is_some_and(is_health_down_status)
 }
 
 async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
