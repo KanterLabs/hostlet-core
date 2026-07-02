@@ -136,6 +136,8 @@ async function rejectBlockedRedirects(startUrl, allowedOrigin, lookupCache) {
 async function probeVisualReadiness(page) {
   return page.evaluate(async () => {
     const hasStylesheets = document.styleSheets.length > 0;
+    const declaredStylesheets = document.querySelectorAll('link[rel~="stylesheet"], style').length;
+    const hasInlineStyles = document.querySelector("[style]") !== null;
     const bodyFont = document.body
       ? window.getComputedStyle(document.body).fontFamily || ""
       : "";
@@ -164,7 +166,9 @@ async function probeVisualReadiness(page) {
       defaultFont = null;
     }
 
-    const looksUnstyled = !hasStylesheets && defaultFont !== null && bodyFont === defaultFont;
+    const expectsAuthoredCss = declaredStylesheets > 0;
+    const looksUnstyled =
+      expectsAuthoredCss && !hasStylesheets && !hasInlineStyles && defaultFont !== null && bodyFont === defaultFont;
     if (looksUnstyled) return false;
 
     const images = Array.from(document.images || []);
