@@ -58,6 +58,10 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         screenshots::sweep_orphaned_screenshot_files(&sweep_state).await;
     });
     runtime_recovery::spawn_runtime_recovery_task(state.clone());
+    // Unlike the orphan sweep above, this one does recur: it periodically
+    // re-queues portfolio screenshot captures for apps whose newest
+    // screenshot has gone stale, even though a screenshot already exists.
+    screenshots::spawn_recapture_sweep_task(state.clone());
     if state.update_checks_enabled {
         let update_state = state.clone();
         tokio::spawn(async move {

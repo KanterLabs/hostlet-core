@@ -12,6 +12,13 @@ if (!targetUrl || !outputPath) {
 const match = /^(\d+)x(\d+)$/.exec(process.env.HOSTLET_SCREENSHOT_SIZE || "1280x720");
 const width = match ? Number(match[1]) : 1280;
 const height = match ? Number(match[2]) : 720;
+const deviceScaleFactor = 2;
+
+// Floor scales with deviceScaleFactor so a 2x capture (roughly 4x the pixels
+// of 1x) isn't held to the same byte count as a 1x one. The base is the 1x
+// value; env override applies before scaling so operators tune one number.
+const MIN_BYTES_BASE_1X = Number(process.env.HOSTLET_SCREENSHOT_MIN_BYTES) || 35000;
+const sizeFloorBytes = MIN_BYTES_BASE_1X * deviceScaleFactor;
 
 // The capture target's own origin is always allowed because self-hosted apps
 // legitimately resolve to local addresses (split-horizon DNS, host-published
@@ -121,6 +128,90 @@ async function rejectBlockedRedirects(startUrl, allowedOrigin, lookupCache) {
   throw new Error("too many redirects while validating screenshot target");
 }
 
+// A capture is "visually ready" once authored CSS has plausibly applied and,
+// if the page has <img> elements, at least one has actually decoded. This
+// catches the class of bug where the page is DOM-complete and networkidle
+// but the stylesheet/asset hadn't landed yet, producing an unstyled or
+// blank-image screenshot that then gets stored permanently.
+async function probeVisualReadiness(page) {
+  return page.evaluate(async () => {
+    const hasStylesheets = document.styleSheets.length > 0;
+    const bodyFont = document.body
+      ? window.getComputedStyle(document.body).fontFamily || ""
+      : "";
+
+    // Chromium resolves the browser's default serif font to a concrete font
+    // name (e.g. "Times New Roman", or "Liberation Serif" where the Times
+    // family is substituted), not the literal string "serif" — so the
+    // default is measured from a pristine same-context reference frame with
+    // no authored CSS rather than guessed as a hardcoded string. A measurement
+    // failure (e.g. a page CSP blocking the reference frame) fails open —
+    // it only skips the font check, it doesn't fail the probe.
+    let defaultFont = null;
+    try {
+      const reference = document.createElement("iframe");
+      reference.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden;";
+      reference.srcdoc = "<!DOCTYPE html><html><body></body></html>";
+      document.body.appendChild(reference);
+      await new Promise((resolve, reject) => {
+        reference.addEventListener("load", resolve, { once: true });
+        setTimeout(() => reject(new Error("reference frame load timed out")), 2000);
+      });
+      defaultFont = reference.contentWindow.getComputedStyle(reference.contentDocument.body)
+        .fontFamily;
+      reference.remove();
+    } catch {
+      defaultFont = null;
+    }
+
+    const looksUnstyled = !hasStylesheets && defaultFont !== null && bodyFont === defaultFont;
+    if (looksUnstyled) return false;
+
+    const images = Array.from(document.images || []);
+    if (images.length > 0 && !images.some((img) => img.naturalWidth > 0)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+async function ensureVisuallyReady(page) {
+  if (await probeVisualReadiness(page)) return true;
+  console.error("screenshot validity probe failed; waiting 5s and re-probing once");
+  await page.waitForTimeout(5000);
+  return probeVisualReadiness(page);
+}
+
+async function captureWithSizeFloor(page, outputPath) {
+  let buffer = await page.screenshot({
+    path: outputPath,
+    type: "jpeg",
+    quality: 82,
+    fullPage: false,
+  });
+  if (buffer.length >= sizeFloorBytes) return buffer;
+
+  console.error(
+    `screenshot capture too small (${buffer.length} bytes < ${sizeFloorBytes} byte floor); ` +
+      "retrying once after an extra settle"
+  );
+  await page.waitForTimeout(3000);
+  await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+  buffer = await page.screenshot({
+    path: outputPath,
+    type: "jpeg",
+    quality: 82,
+    fullPage: false,
+  });
+  if (buffer.length < sizeFloorBytes) {
+    throw new Error(
+      `capture rejected: screenshot buffer ${buffer.length} bytes is below the ` +
+        `${sizeFloorBytes} byte floor after retry`
+    );
+  }
+  return buffer;
+}
+
 async function main() {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   const browser = await chromium.launch({
@@ -130,7 +221,7 @@ async function main() {
   try {
     const context = await browser.newContext({
       viewport: { width, height },
-      deviceScaleFactor: 1,
+      deviceScaleFactor,
       serviceWorkers: "block",
     });
     const page = await context.newPage();
@@ -170,17 +261,20 @@ async function main() {
     }
     await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+
+    if (!(await ensureVisuallyReady(page))) {
+      throw new Error(
+        "capture rejected: page failed the visual-readiness probe after retry " +
+          "(no stylesheets/font change and/or no decoded images)"
+      );
+    }
+
     // Create the output directory only once navigation succeeds — placing this
     // after the SSRF guard and page.goto means SSRF-blocked runs exit before
     // touching the filesystem, which matters when running as a non-root user
     // without write access to the output directory's parent.
     fs.mkdirSync(require("path").dirname(outputPath), { recursive: true });
-    await page.screenshot({
-      path: outputPath,
-      type: "jpeg",
-      quality: 82,
-      fullPage: false,
-    });
+    await captureWithSizeFloor(page, outputPath);
   } finally {
     await browser.close();
   }
