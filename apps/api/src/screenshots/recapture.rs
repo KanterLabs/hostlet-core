@@ -140,15 +140,24 @@ async fn stale_screenshot_deployment_ids(state: &AppState) -> anyhow::Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static RECAPTURE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_recapture_env() -> MutexGuard<'static, ()> {
+        RECAPTURE_ENV_LOCK.lock().unwrap()
+    }
 
     #[test]
     fn recapture_max_age_defaults_to_30_days() {
+        let _guard = lock_recapture_env();
         std::env::remove_var("HOSTLET_SCREENSHOT_RECAPTURE_DAYS");
         assert_eq!(recapture_max_age(), chrono::Duration::days(30));
     }
 
     #[test]
     fn recapture_max_age_honors_env_override() {
+        let _guard = lock_recapture_env();
         std::env::set_var("HOSTLET_SCREENSHOT_RECAPTURE_DAYS", "7");
         assert_eq!(recapture_max_age(), chrono::Duration::days(7));
         std::env::remove_var("HOSTLET_SCREENSHOT_RECAPTURE_DAYS");
@@ -156,6 +165,7 @@ mod tests {
 
     #[test]
     fn recapture_max_age_ignores_invalid_override() {
+        let _guard = lock_recapture_env();
         std::env::set_var("HOSTLET_SCREENSHOT_RECAPTURE_DAYS", "not-a-number");
         assert_eq!(recapture_max_age(), chrono::Duration::days(30));
         std::env::remove_var("HOSTLET_SCREENSHOT_RECAPTURE_DAYS");
