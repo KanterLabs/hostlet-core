@@ -108,6 +108,7 @@ expect_status 204 -c "${COOKIE_JAR}" -X POST "${base}/api/unlock" "${ORIGIN_CSRF
 user_id="00000000-0000-0000-0000-000000000101"
 docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
 INSERT INTO users (id, github_id, login) VALUES ('${user_id}', 9001, 'ci-user') ON CONFLICT (github_id) DO UPDATE SET login=EXCLUDED.login;
+UPDATE servers SET status='online' WHERE id='${LOCAL_SERVER_ID:-00000000-0000-0000-0000-000000000001}';
 SQL
 unlock_cookie="$(awk '$6 == "hostlet_unlock" { print $7 }' "${COOKIE_JAR}" | tail -1)"
 AUTH_COOKIE="hostlet_unlock=${unlock_cookie}; hostlet_session=$(signed_cookie "${user_id}")"

@@ -385,7 +385,7 @@ fn agent_headers(state: &AppState, content_type: &'static str) -> HeaderMap {
     headers.insert(
         "x-hostlet-agent-token",
         std::env::var("LOCAL_AGENT_TOKEN")
-            .unwrap_or_else(|_| "ci-only-not-a-secret-agent-token-01".into())
+            .unwrap_or_else(|_| "4d89f4e18a7bb4a01b51c83924492f46".into())
             .parse()
             .unwrap(),
     );

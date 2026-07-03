@@ -150,12 +150,12 @@ export_self_hosted_env() {
   export PUBLIC_WEBHOOK_URL="http://127.0.0.1:${api_port}"
   export HOSTLET_ALLOWED_WEB_ORIGINS="http://127.0.0.1:3000"
   export HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS=false
-  export HOSTLET_SETUP_TOKEN=ci-only-not-a-secret-setup-token-01
+  export HOSTLET_SETUP_TOKEN=7b3f9c4a0e21d58f93a64b7c2d10e8f5
   export HOSTLET_ALLOWED_GITHUB_LOGINS=ci-user
   export ENCRYPTION_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
-  export JOB_SIGNING_SECRET=ci-only-not-a-secret-job-signing-01
-  export SESSION_SECRET=ci-only-not-a-secret-session-secret-01
-  export LOCAL_AGENT_TOKEN=ci-only-not-a-secret-agent-token-01
-  export GITHUB_WEBHOOK_SECRET=ci-only-not-a-secret-webhook-secret-01
+  export JOB_SIGNING_SECRET=9f6b2c8d4a1e73f05c92d6b4180aef35
+  export SESSION_SECRET=2d7a91c0f4b63e8d5a20c7f149b6e3d8
+  export LOCAL_AGENT_TOKEN=4d89f4e18a7bb4a01b51c83924492f46
+  export GITHUB_WEBHOOK_SECRET=8c2f0b95d7a14e63b491f0d6a2c85e17
   export HOSTLET_UPDATE_CHECKS=false
 }

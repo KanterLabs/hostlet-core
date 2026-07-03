@@ -43,13 +43,13 @@ compose_config() {
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-ci-only-not-a-secret-postgres}" \
   PUBLIC_API_URL="${PUBLIC_API_URL:-http://localhost:8080}" \
   PUBLIC_WEB_URL="${PUBLIC_WEB_URL:-http://localhost:3000}" \
-  HOSTLET_SETUP_TOKEN="${HOSTLET_SETUP_TOKEN:-ci-only-not-a-secret-setup-token-01}" \
+  HOSTLET_SETUP_TOKEN="${HOSTLET_SETUP_TOKEN:-7b3f9c4a0e21d58f93a64b7c2d10e8f5}" \
   HOSTLET_ALLOWED_GITHUB_LOGINS="${HOSTLET_ALLOWED_GITHUB_LOGINS:-ci-user}" \
   ENCRYPTION_KEY="${ENCRYPTION_KEY:-YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=}" \
-  JOB_SIGNING_SECRET="${JOB_SIGNING_SECRET:-ci-only-not-a-secret-job-signing-01}" \
-  SESSION_SECRET="${SESSION_SECRET:-ci-only-not-a-secret-session-secret-01}" \
-  LOCAL_AGENT_TOKEN="${LOCAL_AGENT_TOKEN:-ci-only-not-a-secret-agent-token-01}" \
-  GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-ci-only-not-a-secret-webhook-secret-01}" \
+  JOB_SIGNING_SECRET="${JOB_SIGNING_SECRET:-9f6b2c8d4a1e73f05c92d6b4180aef35}" \
+  SESSION_SECRET="${SESSION_SECRET:-2d7a91c0f4b63e8d5a20c7f149b6e3d8}" \
+  LOCAL_AGENT_TOKEN="${LOCAL_AGENT_TOKEN:-4d89f4e18a7bb4a01b51c83924492f46}" \
+  GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-8c2f0b95d7a14e63b491f0d6a2c85e17}" \
   DOCKER_GID="${DOCKER_GID:-998}" \
   HOSTLET_IMAGE_TAG="${HOSTLET_IMAGE_TAG:-v0.0.0}" \
   HOSTLET_API_IMAGE="${HOSTLET_API_IMAGE:-ghcr.io/shanekanterman04/hostlet-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
