@@ -57,6 +57,8 @@ fn screenshot_create_args_use_container_copy_path_without_host_bind() {
     assert!(args
         .iter()
         .any(|arg| arg == SCREENSHOT_CONTAINER_OUTPUT_PATH));
+    assert!(SCREENSHOT_CONTAINER_OUTPUT_PATH.ends_with(".webp"));
+    assert_eq!(SCREENSHOT_CONTENT_TYPE, "image/webp");
     assert!(!SCREENSHOT_CONTAINER_OUTPUT_PATH.starts_with("/tmp/"));
 }
 

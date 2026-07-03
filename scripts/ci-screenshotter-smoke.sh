@@ -85,16 +85,16 @@ docker run --rm \
   -v "${TMP_DIR}:/out" \
   "${IMAGE}" \
   "${SMOKE_URL}" \
-  /out/screenshot.jpg
+  /out/screenshot.webp
 
-python3 - "${TMP_DIR}/screenshot.jpg" <<'PY'
+python3 - "${TMP_DIR}/screenshot.webp" <<'PY'
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 data = path.read_bytes()
-if len(data) < 128 or not data.startswith(b"\xff\xd8\xff"):
-    raise SystemExit("screenshotter did not produce a JPEG")
+if len(data) < 128 or not (data.startswith(b"RIFF") and data[8:12] == b"WEBP"):
+    raise SystemExit("screenshotter did not produce a WebP")
 PY
 
 echo "screenshotter smoke passed"

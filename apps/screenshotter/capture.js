@@ -1,4 +1,5 @@
 const fs = require("fs");
+const path = require("path");
 const dns = require("dns").promises;
 const net = require("net");
 const { chromium } = require("playwright-core");
@@ -13,11 +14,21 @@ const match = /^(\d+)x(\d+)$/.exec(process.env.HOSTLET_SCREENSHOT_SIZE || "1280x
 const width = match ? Number(match[1]) : 1280;
 const height = match ? Number(match[2]) : 720;
 const deviceScaleFactor = 2;
+const outputExtension = path.extname(outputPath).toLowerCase();
+const outputFormat = (process.env.HOSTLET_SCREENSHOT_FORMAT || outputExtension.slice(1) || "webp")
+  .toLowerCase()
+  .replace("jpg", "jpeg");
+if (!["jpeg", "webp"].includes(outputFormat)) {
+  console.error("HOSTLET_SCREENSHOT_FORMAT/output extension must be jpeg, jpg, or webp");
+  process.exit(2);
+}
+const screenshotQuality = Number(process.env.HOSTLET_SCREENSHOT_QUALITY) || 82;
 
 // Floor scales with deviceScaleFactor so a 2x capture (roughly 4x the pixels
 // of 1x) isn't held to the same byte count as a 1x one. The base is the 1x
 // value; env override applies before scaling so operators tune one number.
-const MIN_BYTES_BASE_1X = Number(process.env.HOSTLET_SCREENSHOT_MIN_BYTES) || 35000;
+const MIN_BYTES_BASE_1X =
+  Number(process.env.HOSTLET_SCREENSHOT_MIN_BYTES) || (outputFormat === "webp" ? 14000 : 35000);
 const sizeFloorBytes = MIN_BYTES_BASE_1X * deviceScaleFactor;
 
 // The capture target's own origin is always allowed because self-hosted apps
@@ -186,13 +197,29 @@ async function ensureVisuallyReady(page) {
   return probeVisualReadiness(page);
 }
 
-async function captureWithSizeFloor(page, outputPath) {
-  let buffer = await page.screenshot({
+async function captureScreenshot(page, outputPath) {
+  if (outputFormat === "webp") {
+    const client = await page.context().newCDPSession(page);
+    const capture = await client.send("Page.captureScreenshot", {
+      format: "webp",
+      quality: screenshotQuality,
+      fromSurface: true,
+      captureBeyondViewport: false,
+    });
+    const buffer = Buffer.from(capture.data, "base64");
+    fs.writeFileSync(outputPath, buffer);
+    return buffer;
+  }
+  return page.screenshot({
     path: outputPath,
     type: "jpeg",
-    quality: 82,
+    quality: screenshotQuality,
     fullPage: false,
   });
+}
+
+async function captureWithSizeFloor(page, outputPath) {
+  let buffer = await captureScreenshot(page, outputPath);
   if (buffer.length >= sizeFloorBytes) return buffer;
 
   console.error(
@@ -201,12 +228,7 @@ async function captureWithSizeFloor(page, outputPath) {
   );
   await page.waitForTimeout(3000);
   await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
-  buffer = await page.screenshot({
-    path: outputPath,
-    type: "jpeg",
-    quality: 82,
-    fullPage: false,
-  });
+  buffer = await captureScreenshot(page, outputPath);
   if (buffer.length < sizeFloorBytes) {
     throw new Error(
       `capture rejected: screenshot buffer ${buffer.length} bytes is below the ` +
