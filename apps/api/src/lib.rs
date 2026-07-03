@@ -8,6 +8,7 @@ pub mod deployment_policy;
 pub mod device_flow;
 pub mod env;
 pub mod github;
+pub mod health_alerts;
 pub mod job_control;
 pub mod operator;
 pub mod password;
@@ -58,6 +59,10 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         screenshots::sweep_orphaned_screenshot_files(&sweep_state).await;
     });
     runtime_recovery::spawn_runtime_recovery_task(state.clone());
+    // Unlike the orphan sweep above, this one does recur: it periodically
+    // re-queues portfolio screenshot captures for apps whose newest
+    // screenshot has gone stale, even though a screenshot already exists.
+    screenshots::spawn_recapture_sweep_task(state.clone());
     if state.update_checks_enabled {
         let update_state = state.clone();
         tokio::spawn(async move {
@@ -123,6 +128,10 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
             "/api/system/operator-cleanup",
             get(web::operator_cleanup_preview).post(web::operator_run_cleanup),
         )
+        // CORE-02: global cleanup is restricted to the operator agent token or
+        // the owner (first user) session; any other authenticated user gets 403.
+        // See `authorize_global_cleanup` in `web/cleanup.rs`.
+        // `/api/system/operator-cleanup` is the primary operator surface.
         .route(
             "/api/system/cleanup",
             get(web::cleanup_preview).post(web::run_cleanup),

@@ -47,7 +47,7 @@ run_pnpm exec playwright install chromium
 # cleanup (which keeps base images) plus this prewarm means no cold multi-GB
 # re-pulls. `docker image inspect` first makes the pull a no-op when present.
 for image in \
-  zricethezav/gitleaks:v8.30.1 \
+  zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
   postgres:16-alpine \
   moby/buildkit:buildx-stable-1 \
   node:22-alpine \

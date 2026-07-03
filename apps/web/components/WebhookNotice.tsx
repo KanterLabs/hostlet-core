@@ -1,7 +1,7 @@
 "use client";
 
 import { useTimedReset } from "@/lib/useTimedReset";
-import { Copy, GitBranch, Globe2, Play } from "lucide-react";
+import { Copy, GitBranch, Globe2, Play, Wrench } from "lucide-react";
 import { webhookReadiness } from "@/lib/webhooks";
 import { StatusPill } from "@/components/ui";
 
@@ -27,11 +27,14 @@ export function WebhookNotice({
   onManualDeploy,
   deployDisabled,
   className = "",
+  collapsible = false,
 }: {
   autoDeployEnabled?: boolean;
   onManualDeploy?: () => void;
   deployDisabled?: boolean;
   className?: string;
+  /** Tuck the notice inside a default-collapsed "Advanced / Debug" expander. */
+  collapsible?: boolean;
 }) {
   const [copyState, flashCopyState] = useTimedReset(COPY_IDLE_LABEL, COPY_RESET_MS);
   const readiness = webhookReadiness();
@@ -55,34 +58,47 @@ export function WebhookNotice({
     }
   }
 
-  return (
-    <section className={`rounded-lg border p-4 ${tone.card} ${className}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            {ready ? <Globe2 size={18} className={tone.icon} /> : <GitBranch size={18} className={tone.icon} />}
-            <h2 className={tone.heading}>{title}</h2>
-            <StatusPill status={ready ? "connected" : "needs attention"} label={statusLabel} />
-          </div>
-          <p className={`mt-2 max-w-2xl text-sm ${tone.body}`}>{description}</p>
-          {autoDeployWarning && <p className="mt-2 max-w-2xl text-sm font-medium text-warning-fg">{autoDeployWarning}</p>}
-          <div className="mt-3 break-all rounded-md bg-surface-alt px-3 py-2 font-mono text-xs text-ink ring-1 ring-line">
-            {readiness.webhookUrl}
-          </div>
+  const content = (
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          {ready ? <Globe2 size={18} className={tone.icon} /> : <GitBranch size={18} className={tone.icon} />}
+          <h2 className={tone.heading}>{title}</h2>
+          <StatusPill status={ready ? "connected" : "needs attention"} label={statusLabel} />
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" className="button-secondary" onClick={copyWebhookUrl}>
-            <Copy size={16} />
-            {copyState}
-          </button>
-          {!ready && onManualDeploy && (
-            <button type="button" className="button" disabled={deployDisabled} onClick={onManualDeploy}>
-              <Play size={16} />
-              Deploy latest
-            </button>
-          )}
+        <p className={`mt-2 max-w-2xl text-sm ${tone.body}`}>{description}</p>
+        {autoDeployWarning && <p className="mt-2 max-w-2xl text-sm font-medium text-warning-fg">{autoDeployWarning}</p>}
+        <div className="mt-3 break-all rounded-md bg-surface-alt px-3 py-2 font-mono text-xs text-ink ring-1 ring-line">
+          {readiness.webhookUrl}
         </div>
       </div>
-    </section>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="button-secondary" onClick={copyWebhookUrl}>
+          <Copy size={16} />
+          {copyState}
+        </button>
+        {!ready && onManualDeploy && (
+          <button type="button" className="button" disabled={deployDisabled} onClick={onManualDeploy}>
+            <Play size={16} />
+            Deploy latest
+          </button>
+        )}
+      </div>
+    </div>
   );
+
+  if (collapsible) {
+    return (
+      <details className={`overflow-hidden rounded-lg border border-line bg-surface ${className}`}>
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium text-ink [&::-webkit-details-marker]:hidden">
+          <Wrench size={15} className="text-muted" />
+          Advanced / Debug
+          <span className="ml-auto font-normal text-muted">GitHub webhook &amp; manual deploy</span>
+        </summary>
+        <div className={`border-t p-4 ${tone.card}`}>{content}</div>
+      </details>
+    );
+  }
+
+  return <section className={`rounded-lg border p-4 ${tone.card} ${className}`}>{content}</section>;
 }

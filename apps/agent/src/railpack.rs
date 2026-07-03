@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 const RAILPACK_BUILDKIT_CONTAINER: &str = "hostlet-railpack-buildkit";
-const DEFAULT_RAILPACK_BUILDKIT_IMAGE: &str = "moby/buildkit:buildx-stable-1";
+const DEFAULT_RAILPACK_BUILDKIT_IMAGE: &str =
+    "moby/buildkit:buildx-stable-1@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f";
 const DEFAULT_RAILPACK_BUILDKIT_IDLE_SECONDS: u64 = 1_800;
 const DEFAULT_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS: u64 = 30;
 const RAILPACK_BUILDKIT_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -324,6 +325,20 @@ fn railpack_buildkit_keepalive_value(value: Option<&str>) -> bool {
     })
 }
 
+fn railpack_buildkit_privileged() -> bool {
+    let value = std::env::var("HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED").ok();
+    railpack_buildkit_privileged_value(value.as_deref())
+}
+
+fn railpack_buildkit_privileged_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
 fn railpack_buildkit_idle_seconds() -> u64 {
     std::env::var("HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS")
         .ok()
@@ -377,8 +392,10 @@ fn railpack_buildkit_run_args(image: &str, container: &str) -> Vec<String> {
         "-d".to_string(),
         "--name".to_string(),
         container.to_string(),
-        "--privileged".to_string(),
     ];
+    if railpack_buildkit_privileged() {
+        args.push("--privileged".to_string());
+    }
     if let Some(memory_mb) = railpack_buildkit_memory_limit_mb() {
         args.push("--memory".to_string());
         args.push(format!("{memory_mb}m"));
@@ -425,6 +442,11 @@ fn schedule_railpack_buildkit_idle_stop(cfg: Config, deployment_id: Uuid, contai
 mod tests {
     use super::*;
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn generated_packaging_miss_falls_through_to_railpack() {
         assert!(should_try_railpack(&anyhow::anyhow!(NO_NATIVE_BUILD_PLAN)));
@@ -466,6 +488,7 @@ mod tests {
 
     #[test]
     fn railpack_buildkit_container_can_be_overridden_for_ci() {
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var(
             "HOSTLET_RAILPACK_BUILDKIT_CONTAINER",
             "hostlet-buildkit-ci-123",
@@ -520,6 +543,20 @@ mod tests {
     }
 
     #[test]
+    fn railpack_buildkit_privileged_defaults_to_disabled() {
+        assert!(!railpack_buildkit_privileged_value(None));
+        assert!(!railpack_buildkit_privileged_value(Some("")));
+        assert!(!railpack_buildkit_privileged_value(Some("false")));
+    }
+
+    #[test]
+    fn railpack_buildkit_privileged_accepts_true_values() {
+        assert!(railpack_buildkit_privileged_value(Some("1")));
+        assert!(railpack_buildkit_privileged_value(Some("true")));
+        assert!(railpack_buildkit_privileged_value(Some(" YES ")));
+    }
+
+    #[test]
     fn railpack_buildkit_idle_seconds_defaults_and_rejects_invalid_values() {
         assert_eq!(railpack_buildkit_idle_seconds_value("45"), Some(45));
         assert_eq!(railpack_buildkit_idle_seconds_value(" 1800 "), Some(1_800));
@@ -548,13 +585,27 @@ mod tests {
 
     #[test]
     fn railpack_buildkit_run_args_include_optional_memory_limit() {
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB", "512");
+        std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED");
 
         let args = railpack_buildkit_run_args("moby/buildkit:buildx-stable-1", "hostlet-buildkit");
 
+        assert!(!args.contains(&"--privileged".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["--memory", "512m"]));
         assert_eq!(args.last().unwrap(), "moby/buildkit:buildx-stable-1");
         std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB");
+    }
+
+    #[test]
+    fn railpack_buildkit_run_args_include_privileged_only_when_opted_in() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED", "true");
+
+        let args = railpack_buildkit_run_args("moby/buildkit:buildx-stable-1", "hostlet-buildkit");
+
+        assert!(args.contains(&"--privileged".to_string()));
+        std::env::remove_var("HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED");
     }
 
     #[test]

@@ -39,6 +39,14 @@ pub fn clean_runtime_config(value: &serde_json::Value) -> Result<(), &'static st
     if value.to_string().len() > 32_000 {
         return Err("runtime config is too large");
     }
+    if let Some(data_mount_path) = value.get("dataMountPath") {
+        let Some(data_mount_path) = data_mount_path.as_str() else {
+            return Err("runtime config dataMountPath must be a string");
+        };
+        if !crate::compose::valid_container_mount_path(data_mount_path) {
+            return Err("runtime config dataMountPath is invalid");
+        }
+    }
     Ok(())
 }
 
@@ -93,6 +101,42 @@ pub fn validate_env_pairs<'a>(
     Ok(())
 }
 
+pub fn dangerous_host_process_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        "PATH"
+            | "HOME"
+            | "IFS"
+            | "CDPATH"
+            | "ENV"
+            | "BASH_ENV"
+            | "SHELLOPTS"
+            | "GLOBIGNORE"
+            | "RUSTC_WRAPPER"
+            | "RUSTFLAGS"
+            | "CARGO"
+            | "CARGO_HOME"
+            | "RUSTUP_HOME"
+            | "DOCKER_CONFIG"
+            | "DOCKER_CONTEXT"
+            | "DOCKER_HOST"
+            | "DOCKER_TLS"
+            | "DOCKER_TLS_VERIFY"
+            | "DOCKER_CERT_PATH"
+            | "BUILDKIT_HOST"
+            | "COMPOSE_FILE"
+            | "COMPOSE_PROJECT_NAME"
+            | "COMPOSE_PROFILES"
+            | "COMPOSE_ENV_FILES"
+    ) || key.starts_with("LD_")
+        || key.starts_with("DYLD_")
+        || key.starts_with("COMPOSE_")
+}
+
+pub fn valid_host_process_env_key(key: &str) -> bool {
+    valid_env_key(key) && !dangerous_host_process_env_key(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +179,17 @@ mod tests {
     }
 
     #[test]
+    fn clean_runtime_config_validates_data_mount_path() {
+        assert!(clean_runtime_config(&serde_json::json!({"dataMountPath": "/app/data"})).is_ok());
+        assert!(clean_runtime_config(&serde_json::json!({"dataMountPath": "/"})).is_err());
+        assert!(clean_runtime_config(
+            &serde_json::json!({"dataMountPath": "/host,type=bind,source=/"})
+        )
+        .is_err());
+        assert!(clean_runtime_config(&serde_json::json!({"dataMountPath": 1})).is_err());
+    }
+
+    #[test]
     fn clean_hostlet_config_path_defaults_and_validates() {
         assert_eq!(clean_hostlet_config_path(None), Ok("hostlet.yml".into()));
         assert_eq!(
@@ -165,5 +220,25 @@ mod tests {
             validate_env_pairs([("KEY", "v"), ("KEY", "w")]),
             Err("env var keys must be unique")
         );
+    }
+
+    #[test]
+    fn host_process_env_key_rejects_process_control_names() {
+        assert!(valid_host_process_env_key("DATABASE_URL"));
+        assert!(valid_host_process_env_key("APP_SETTING"));
+        for key in [
+            "PATH",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DOCKER_HOST",
+            "DOCKER_CONFIG",
+            "BUILDKIT_HOST",
+            "COMPOSE_FILE",
+            "COMPOSE_PROJECT_NAME",
+            "COMPOSE_PROFILES",
+        ] {
+            assert!(!valid_host_process_env_key(key), "{key} must be rejected");
+        }
     }
 }

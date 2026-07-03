@@ -1,6 +1,8 @@
 use crate::crypto::{hash_token, Crypto};
 use crate::deployment_policy::{DeploymentStatusPolicy, NoopDeploymentStatusPolicy};
 use crate::env::{bool_env, http_client, nonempty_env, screenshot_dir, secret_from_env};
+use crate::health_alerts::{HealthEventHooks, NoopHealthEventHooks};
+use crate::policies::{RepositoryAccessProvider, SelfHostedRepositoryAccessProvider};
 use crate::rate_limit::RateLimiter;
 use crate::screenshots::{NoopScreenshotHooks, ScreenshotHooks};
 use anyhow::{bail, Context};
@@ -58,6 +60,7 @@ pub struct AppState {
     pub screenshot_dir: PathBuf,
     pub screenshot_hooks: Arc<dyn ScreenshotHooks>,
     pub deployment_status_policy: Arc<dyn DeploymentStatusPolicy>,
+    pub repo_access_provider: Arc<dyn RepositoryAccessProvider>,
     pub allowed_web_origins: Vec<String>,
     pub base_domain: Option<String>,
     pub domain_prefix: String,
@@ -69,6 +72,7 @@ pub struct AppState {
     pub setup_token: Option<String>,
     pub allowed_github_logins: Option<HashSet<String>>,
     pub update_checks_enabled: bool,
+    pub health_event_hooks: Arc<dyn HealthEventHooks>,
     pub agents: Arc<RwLock<HashMap<Uuid, AgentConnection>>>,
     pub rate_limiter: Arc<RateLimiter>,
     pub logs: broadcast::Sender<LogEvent>,
@@ -149,6 +153,7 @@ impl AppState {
             screenshot_dir,
             screenshot_hooks: Arc::new(NoopScreenshotHooks),
             deployment_status_policy: Arc::new(NoopDeploymentStatusPolicy),
+            repo_access_provider: Arc::new(SelfHostedRepositoryAccessProvider),
             allowed_web_origins,
             base_domain: base_domain(),
             domain_prefix: domain_prefix(),
@@ -160,6 +165,7 @@ impl AppState {
             setup_token,
             allowed_github_logins,
             update_checks_enabled: update_checks_enabled(),
+            health_event_hooks: Arc::new(NoopHealthEventHooks),
             agents: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Arc::new(RateLimiter::default()),
             logs,
@@ -178,6 +184,12 @@ impl AppState {
         policy: Arc<dyn DeploymentStatusPolicy>,
     ) -> Self {
         self.deployment_status_policy = policy;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_health_event_hooks(mut self, hooks: Arc<dyn HealthEventHooks>) -> Self {
+        self.health_event_hooks = hooks;
         self
     }
 }

@@ -21,15 +21,17 @@ concurrency:
 
 jobs:
   secrets:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - run: scripts/ci-verify-runner.sh
-      - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 detect --source=/repo --redact --verbose
+      - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --redact --verbose
 
   rust:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     env:
       # Cap cargo parallelism: several workflows from both repos land on one
@@ -50,6 +52,7 @@ jobs:
       - run: cargo test --workspace
 
   web:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     defaults:
       run:
@@ -63,6 +66,7 @@ jobs:
       - run: pnpm build
 
   images:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [secrets, rust, web]
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
@@ -103,6 +107,7 @@ jobs:
           done
 
   notify-cloud:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [images]
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:

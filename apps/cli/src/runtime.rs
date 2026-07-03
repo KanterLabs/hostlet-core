@@ -157,6 +157,14 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
         .interact_text()?;
 
     let mut env = default_env();
+    let release = latest_release(&http_client()?)
+        .await
+        .context("failed to fetch latest Hostlet release image metadata")?;
+    if !release.has_release_image_digests() {
+        bail!("latest Hostlet release is missing required image digests");
+    }
+    env.extend(release.image_env()?);
+    env.insert("HOSTLET_IMAGE_TAG".into(), release.image_tag());
     env.insert("HOSTLET_ALLOWED_GITHUB_LOGINS".into(), allowed_login);
     env.insert("GITHUB_CLIENT_ID".into(), github_client_id);
 

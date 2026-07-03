@@ -99,6 +99,11 @@ fn string_seq(mapping: &serde_yaml::Mapping, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The Docker control socket path. Mounting it into any container hands over
+/// full host control, so both the preview and the agent reject it as a volume
+/// target regardless of how the mount is expressed.
+const DOCKER_SOCKET_PATH: &str = "/var/run/docker.sock";
+
 /// A Compose volume source is a host bind (rather than a named volume) when it
 /// looks like a path. Mirrors the agent's `is_host_bind_source`.
 pub fn is_host_bind_source(value: &str) -> bool {
@@ -117,14 +122,16 @@ pub fn is_mappable_relative_bind(source: &str) -> bool {
 
 /// Validates an absolute container mount path (e.g. `/app/data`): absolute, at
 /// most 256 chars, not the bare root `/`, no `..` segment, and free of control
-/// characters and backslashes. Used to vet the data-volume mount path before the
-/// agent mounts a managed volume there.
+/// characters, backslashes, and Docker `--mount` option delimiters. Used to vet
+/// the data-volume mount path before the agent mounts a managed volume there.
 pub fn valid_container_mount_path(value: &str) -> bool {
     value.starts_with('/')
         && value != "/"
         && value.len() <= 256
         && !value.split('/').any(|part| part == "..")
-        && !value.chars().any(|c| c.is_control() || c == '\\')
+        && !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | ',' | '='))
 }
 
 /// Detects the container path an app declares for persistent data, from the
@@ -203,6 +210,61 @@ pub fn parse_compose_services(compose_yaml: &str, web_service: &str) -> Vec<Serv
     summaries
 }
 
+/// Returns the warning tail (everything after the `Service {name} ` prefix) for a
+/// single `volumes:` entry the agent's `validate_compose_subset` would reject at
+/// deploy time, or `None` when the entry is within the safe named-volume subset.
+///
+/// Handles both the short-form `source:target` string and the long-form
+/// `{type, source, target}` mapping the earlier preview skipped, so the preview
+/// flags exactly what the agent blocks. Short-form relative, within-repo binds
+/// return `None` because the agent auto-maps them onto a managed volume before
+/// validating; long-form entries are never auto-mapped, so any host-backed
+/// source — relative or absolute — is flagged.
+fn volume_subset_warning(volume: &serde_yaml::Value) -> Option<String> {
+    if let Some(text) = volume.as_str() {
+        let mut parts = text.split(':');
+        let source = parts.next().unwrap_or("");
+        if is_host_bind_source(source) && !is_mappable_relative_bind(source) {
+            return Some(format!(
+                "uses a host bind mount ({text}); only named volumes are allowed."
+            ));
+        }
+        if matches!(parts.next(), Some(target) if target == DOCKER_SOCKET_PATH) {
+            return Some(format!(
+                "mounts the Docker socket ({text}); Hostlet will reject it at deploy."
+            ));
+        }
+        return None;
+    }
+    let mapping = volume.as_mapping()?;
+    let volume_type = map_get(mapping, "type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let source = map_get(mapping, "source")
+        .or_else(|| map_get(mapping, "src"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if volume_type == "bind" || is_host_bind_source(source) {
+        let detail = if source.is_empty() {
+            "type: bind".to_string()
+        } else {
+            format!("source: {source}")
+        };
+        return Some(format!(
+            "uses a host bind mount ({detail}); only named volumes are allowed."
+        ));
+    }
+    let target = map_get(mapping, "target")
+        .or_else(|| map_get(mapping, "dst"))
+        .or_else(|| map_get(mapping, "destination"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if target == DOCKER_SOCKET_PATH {
+        return Some("mounts the Docker socket; Hostlet will reject it at deploy.".to_string());
+    }
+    None
+}
+
 /// Soft, non-failing mirror of the agent's `validate_compose_subset`. Returns a
 /// human-readable warning for each thing the agent would reject at deploy time,
 /// so inspection can warn before the user commits. An empty result means the
@@ -248,14 +310,14 @@ pub fn compose_subset_warnings(compose_yaml: &str, web_service: &str) -> Vec<Str
                 ));
             }
         }
-        for volume in string_seq(mapping, "volumes") {
-            let source = volume.split(':').next().unwrap_or("");
-            if is_host_bind_source(source) && !is_mappable_relative_bind(source) {
-                // Relative, within-repo binds are auto-mapped to a managed volume
-                // at deploy time, so only absolute/escaping binds block here.
-                warnings.push(format!(
-                    "Service {name} uses a host bind mount ({volume}); only named volumes are allowed."
-                ));
+        if let Some(volumes) = map_get(mapping, "volumes").and_then(|v| v.as_sequence()) {
+            // Covers both short-form strings and the long-form `{type, source,
+            // target}` mappings; relative, within-repo string binds are auto-mapped
+            // by the agent so they intentionally produce no warning.
+            for volume in volumes {
+                if let Some(tail) = volume_subset_warning(volume) {
+                    warnings.push(format!("Service {name} {tail}"));
+                }
             }
         }
     }
@@ -645,6 +707,53 @@ services:
     }
 
     #[test]
+    fn preview_warns_on_long_form_absolute_bind() {
+        // The long-form `{type: bind, source, target}` object the preview used to
+        // skip. The agent rejects it at deploy, so the preview must warn too.
+        let bind_type = "services:\n  web:\n    build: .\n    volumes:\n      - type: bind\n        source: /etc\n        target: /host\n";
+        assert!(compose_subset_warnings(bind_type, "web")
+            .iter()
+            .any(|w| w.contains("web") && w.contains("host bind mount")));
+        // Even without an explicit `type: bind`, an absolute source is host-backed.
+        let absolute_source = "services:\n  web:\n    build: .\n    volumes:\n      - source: /etc\n        target: /host\n";
+        assert!(compose_subset_warnings(absolute_source, "web")
+            .iter()
+            .any(|w| w.contains("host bind mount")));
+    }
+
+    #[test]
+    fn preview_warns_on_long_form_relative_bind_the_agent_rejects() {
+        // Long-form entries are never auto-mapped (only short-form strings are),
+        // so a relative host-backed source is still blocking — mirror that.
+        let compose = "services:\n  web:\n    build: .\n    volumes:\n      - type: volume\n        source: data/cache\n        target: /app/data\n";
+        assert!(compose_subset_warnings(compose, "web")
+            .iter()
+            .any(|w| w.contains("host bind mount")));
+    }
+
+    #[test]
+    fn preview_warns_on_long_form_docker_socket_target() {
+        // A named source but a socket target is rejected by the agent even though
+        // the source itself is safe.
+        let compose = "services:\n  web:\n    build: .\n    volumes:\n      - type: volume\n        source: docker-sock\n        target: /var/run/docker.sock\nvolumes:\n  docker-sock:\n";
+        assert!(compose_subset_warnings(compose, "web")
+            .iter()
+            .any(|w| w.contains("Docker socket")));
+    }
+
+    #[test]
+    fn preview_allows_string_form_relative_bind_and_long_form_named_volume() {
+        // Short-form relative, within-repo bind: the agent auto-maps it, so the
+        // preview must not flag it (that would make the app undeployable).
+        let string_relative =
+            "services:\n  web:\n    build: .\n    volumes:\n      - ./data:/app/data\n";
+        assert!(compose_subset_warnings(string_relative, "web").is_empty());
+        // A long-form named volume is the accepted subset — also no warning.
+        let long_named = "services:\n  web:\n    build: .\n    volumes:\n      - type: volume\n        source: app-data\n        target: /data\nvolumes:\n  app-data:\n";
+        assert!(compose_subset_warnings(long_named, "web").is_empty());
+    }
+
+    #[test]
     fn detects_declared_data_mount_path_from_relative_bind() {
         let compose = "services:\n  web:\n    build: .\n    volumes:\n      - ./data:/app/data\n";
         assert_eq!(
@@ -674,6 +783,8 @@ services:
         assert!(!valid_container_mount_path("app/data"));
         assert!(!valid_container_mount_path("/app/../etc"));
         assert!(!valid_container_mount_path("/app\\data"));
+        assert!(!valid_container_mount_path("/host,type=bind,source=/"));
+        assert!(!valid_container_mount_path("/app/data=prod"));
     }
 
     #[test]

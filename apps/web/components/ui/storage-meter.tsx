@@ -1,5 +1,6 @@
 import { formatBytes } from "@/lib/format";
 import { cx } from "@/components/ui/cx";
+import { UsageBar } from "@/components/ui/usage-bar";
 
 type StorageMeterProps = {
   usedBytes?: number | null;
@@ -20,7 +21,6 @@ export function StorageMeter({ usedBytes, limitBytes, label = "Storage", classNa
   const ratio = limit > 0 ? used / limit : 0;
   const pct = Math.min(100, Math.max(0, Math.round(ratio * 100)));
   const over = limit > 0 && used > limit;
-  const fill = over || ratio >= 0.9 ? "bg-red-500" : ratio >= 0.7 ? "bg-amber-500" : "bg-emerald-500";
   return (
     <div className={cx("rounded-md border border-line bg-surface p-3", className)}>
       <div className="flex items-center justify-between gap-2">
@@ -34,19 +34,7 @@ export function StorageMeter({ usedBytes, limitBytes, label = "Storage", classNa
           )}
         </span>
       </div>
-      <div
-        className="mt-2 h-2 w-full overflow-hidden rounded-full bg-surface-alt"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={pct}
-        aria-label={`${label} usage`}
-      >
-        <div
-          className={cx("h-full rounded-full transition-all", fill)}
-          style={{ width: `${Math.max(pct, used > 0 ? 2 : 0)}%` }}
-        />
-      </div>
+      <UsageBar pct={pct} over={over} label={`${label} usage`} className="mt-2" />
     </div>
   );
 }

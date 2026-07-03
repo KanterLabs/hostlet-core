@@ -57,7 +57,55 @@ fn screenshot_create_args_use_container_copy_path_without_host_bind() {
     assert!(args
         .iter()
         .any(|arg| arg == SCREENSHOT_CONTAINER_OUTPUT_PATH));
+    assert!(SCREENSHOT_CONTAINER_OUTPUT_PATH.ends_with(".webp"));
+    assert_eq!(SCREENSHOT_CONTENT_TYPE, "image/webp");
     assert!(!SCREENSHOT_CONTAINER_OUTPUT_PATH.starts_with("/tmp/"));
+}
+
+#[test]
+fn screenshot_failure_reason_maps_known_categories() {
+    let cases = [
+        (
+            "blocked request to http://10.0.0.1 (resolves to a private or local address)",
+            SCREENSHOT_ERR_BLOCKED,
+        ),
+        (
+            "capture_url must use a public hostname",
+            SCREENSHOT_ERR_BLOCKED,
+        ),
+        (
+            "screenshotter exited with exit status: 1: page.goto: net::ERR_BLOCKED_BY_CLIENT",
+            SCREENSHOT_ERR_BLOCKED,
+        ),
+        (
+            "screenshotter exited with exit status: 1: page.goto: Timeout 15000ms exceeded",
+            SCREENSHOT_ERR_TIMEOUT,
+        ),
+        ("docker timed out after 45 seconds", SCREENSHOT_ERR_TIMEOUT),
+        (
+            "screenshotter exited with exit status: 1: page.goto: net::ERR_CONNECTION_REFUSED",
+            SCREENSHOT_ERR_SITE,
+        ),
+        (
+            "too many redirects while validating screenshot target",
+            SCREENSHOT_ERR_SITE,
+        ),
+        (
+            "screenshotter container create failed with exit status: 125: no such image",
+            SCREENSHOT_ERR_SERVICE,
+        ),
+        (
+            "screenshotter did not produce an image",
+            SCREENSHOT_ERR_SERVICE,
+        ),
+    ];
+    for (message, expected) in cases {
+        assert_eq!(
+            screenshot_failure_reason(&anyhow::anyhow!("{message}")),
+            expected,
+            "unexpected category for {message}"
+        );
+    }
 }
 
 #[test]

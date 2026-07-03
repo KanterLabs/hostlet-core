@@ -7,30 +7,34 @@ import { IconFrame, Panel } from "@/components/ui/layout";
 
 type StatusVariant = "active" | "success" | "failed" | "warning";
 
-const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: LucideIcon; tone: string }> = {
+const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: LucideIcon; tone: string; chartColor: string }> = {
   active: {
     values: ["queued", "pending", "waiting", "running", "building", "starting", "health_checking", "routing"],
     icon: Loader2,
     tone: "bg-warning-bg text-warning-fg ring-warning-border",
+    chartColor: "hsl(var(--warning-fg))",
   },
   success: {
     values: ["success", "online", "connected", "open", "enabled", "healthy", "live"],
     icon: CheckCircle2,
     tone: "bg-success-bg text-success-fg ring-success-border",
+    chartColor: "hsl(var(--success-fg))",
   },
   failed: {
     values: ["failed", "offline", "missing", "closed", "disabled", "not configured", "unhealthy", "rolled_back"],
     icon: XCircle,
     tone: "bg-danger-bg text-danger-fg ring-danger-border",
+    chartColor: "hsl(var(--danger-fg))",
   },
   warning: {
     values: ["needs attention", "not deployed", "degraded"],
     icon: AlertTriangle,
     tone: "bg-warning-bg text-warning-fg ring-warning-border",
+    chartColor: "hsl(var(--warning-fg))",
   },
 };
 
-const DEFAULT_STATUS = { icon: CircleDashed, tone: "bg-neutral-100 text-neutral-800 ring-neutral-300 dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700" };
+const DEFAULT_STATUS = { icon: CircleDashed, tone: "bg-neutral-100 text-neutral-800 ring-neutral-300 dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700", chartColor: "var(--muted)" };
 
 export function statusLabel(status?: string | null) {
   const value = (status || "unknown").replaceAll("_", " ").trim().toLowerCase();
@@ -43,19 +47,26 @@ export function statusLabel(status?: string | null) {
   return labels[value] || value || "unknown";
 }
 
-export function statusToneClass(status?: string | null) {
+function resolveStatusVariant(status?: string | null): StatusVariant | undefined {
   const value = statusLabel(status);
-  const variant = (Object.keys(STATUS_VARIANTS) as StatusVariant[]).find((key) =>
+  return (Object.keys(STATUS_VARIANTS) as StatusVariant[]).find((key) =>
     STATUS_VARIANTS[key].values.includes(value),
   );
+}
+
+export function statusToneClass(status?: string | null) {
+  const variant = resolveStatusVariant(status);
   return variant ? STATUS_VARIANTS[variant].tone : DEFAULT_STATUS.tone;
+}
+
+export function statusChartColor(status?: string | null) {
+  const variant = resolveStatusVariant(status);
+  return variant ? STATUS_VARIANTS[variant].chartColor : DEFAULT_STATUS.chartColor;
 }
 
 export function StatusPill({ status, label }: { status?: string | null; label?: string }) {
   const value = statusLabel(status);
-  const variant = (Object.keys(STATUS_VARIANTS) as StatusVariant[]).find((key) =>
-    STATUS_VARIANTS[key].values.includes(value),
-  );
+  const variant = resolveStatusVariant(status);
   const { icon: Icon, tone } = variant ? STATUS_VARIANTS[variant] : DEFAULT_STATUS;
   const active = variant === "active";
 

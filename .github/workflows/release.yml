@@ -18,13 +18,12 @@ jobs:
   # (which builds + publishes the release images) needs this to pass first.
   # Runs on both tag push and workflow_dispatch so a release can be dry-run-validated.
   release-validation:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: scripts/ci-verify-runner.sh
-      - name: Use runner's cached rustup
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: scripts/ci-self-hosted-api-smoke.sh
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
@@ -32,6 +31,7 @@ jobs:
       - run: scripts/ci-self-hosted-deploy-e2e.sh
 
   linux-cli:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     needs: [release-validation]
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     env:
@@ -39,15 +39,9 @@ jobs:
       # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
       CARGO_BUILD_JOBS: "2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: scripts/ci-verify-runner.sh
-      - name: Use runner's cached rustup
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
-      - run: |
-          mkdir -p "$RUNNER_TEMP/bin"
-          ln -sf /usr/bin/unzip "$RUNNER_TEMP/bin/unzip"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: cargo build --release -p hostlet
       - run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -149,19 +143,19 @@ jobs:
             "image_tag": "${IMAGE_TAG}",
             "images": {
               "api": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-api:${IMAGE_TAG}",
+                "ref": "ghcr.io/shanekanterman04/hostlet-api@${HOSTLET_API_DIGEST:-}",
                 "digest": "${HOSTLET_API_DIGEST:-}"
               },
               "web": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-web:${IMAGE_TAG}",
+                "ref": "ghcr.io/shanekanterman04/hostlet-web@${HOSTLET_WEB_DIGEST:-}",
                 "digest": "${HOSTLET_WEB_DIGEST:-}"
               },
               "agent": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-agent:${IMAGE_TAG}",
+                "ref": "ghcr.io/shanekanterman04/hostlet-agent@${HOSTLET_AGENT_DIGEST:-}",
                 "digest": "${HOSTLET_AGENT_DIGEST:-}"
               },
               "screenshotter": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-screenshotter:${IMAGE_TAG}",
+                "ref": "ghcr.io/shanekanterman04/hostlet-screenshotter@${HOSTLET_SCREENSHOTTER_DIGEST:-}",
                 "digest": "${HOSTLET_SCREENSHOTTER_DIGEST:-}"
               }
             },
@@ -197,19 +191,19 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback \
             --passphrase "$HOSTLET_RELEASE_GPG_PASSPHRASE" \
             --armor --detach-sign dist/hostlet-linux-x64.sha256
-      - uses: anchore/sbom-action@v0
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
         with:
           file: dist/hostlet-linux-x64
           format: spdx-json
           output-file: dist/hostlet-linux-x64.spdx.json
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
           subject-path: |
             dist/hostlet-linux-x64
             dist/hostlet-linux-x64.sha256
             dist/hostlet-release.json
             dist/hostlet-linux-x64.spdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: hostlet-linux-x64
           path: |
@@ -218,7 +212,7 @@ jobs:
             dist/hostlet-linux-x64.sha256.asc*
             dist/hostlet-release.json
             dist/hostlet-linux-x64.spdx.json
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |

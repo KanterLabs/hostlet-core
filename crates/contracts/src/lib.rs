@@ -9,15 +9,16 @@ mod inference;
 mod validation;
 
 pub use inference::{
-    compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
-    infer_dockerfile, infer_package_json, infer_package_manager, infer_service_addons,
-    manifest_dependency_tokens, node_inspection, package_json_dependencies, railpack_inspection,
-    unknown_inspection, with_detected_services, DetectedServices, DockerfileInference,
-    PackageInference,
+    compose_inspection, detect_start_command, dockerfile_inspection, gitea_inspection,
+    infer_addons_from_compose, infer_dockerfile, infer_package_json, infer_package_manager,
+    infer_service_addons, manifest_dependency_tokens, node_inspection, package_json_dependencies,
+    railpack_inspection, unknown_inspection, with_command_suggestion, with_detected_services,
+    CommandSuggestion, DetectedServices, DockerfileInference, PackageInference, RepoCommandFiles,
 };
 pub use validation::{
-    clean_hostlet_config_path, clean_runtime_config, domain_host, valid_app_name, valid_cpu_limit,
-    valid_memory_limit, validate_env_pairs,
+    clean_hostlet_config_path, clean_runtime_config, dangerous_host_process_env_key, domain_host,
+    valid_app_name, valid_cpu_limit, valid_host_process_env_key, valid_memory_limit,
+    validate_env_pairs,
 };
 
 /// Defines a `snake_case` status enum whose wire string is shared by serde, the
@@ -142,9 +143,8 @@ pub fn valid_hostname(value: &str) -> bool {
         })
 }
 
-/// Validates an HTTP health-check path.
-///
-/// Must be an absolute path (leading `/`), at most 256 chars, and free of
+/// Validates an HTTP health-check path. Must be an absolute path (leading `/`),
+/// at most 256 chars, and free of
 /// control characters and backslashes (which would be ambiguous or unsafe in a
 /// URL path).
 pub fn valid_health_path(value: &str) -> bool {

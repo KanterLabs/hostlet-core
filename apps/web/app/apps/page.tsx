@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
-import { Box, ExternalLink, ListFilter, Plus, ScrollText } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Box, Camera, ExternalLink, ListFilter, Plus, ScrollText } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatTimestamp } from "@/lib/time";
 import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
-import { AppShell, EmptyState, FilterTabs, KeyValueGrid, KeyValueItem, PageHeader, Panel, StatusPill } from "@/components/ui";
+import { AppShell, cx, EmptyState, FilterTabs, KeyValueGrid, KeyValueItem, PageHeader, Panel, Skeleton, StatusPill } from "@/components/ui";
 import { appVisitHref, appVisitLabel, isActiveDeploy, shortSha } from "./app-links";
 import { deploymentSummary, webhookSummary } from "@/lib/app-status";
 
@@ -55,10 +55,23 @@ type RuntimeHealth = {
   lastCheckedAt?: string | null;
   lastHealthyAt?: string | null;
 };
+
+// Minimal shape of the per-app screenshot the list needs. The detail page owns
+// the full type; the list only reads the public URL and the deployment it came
+// from (to flag a stale thumbnail).
+type AppScreenshot = {
+  deploymentId?: string | null;
+  publicUrl: string;
+  capturedAt?: string | null;
+};
+
 export default function Apps() {
   const [apps, setApps] = useState<App[]>([]);
   const [message, setMessage] = useState("Loading apps...");
   const [filter, setFilter] = useState<"all" | "active" | "failed" | "public" | "healthy" | "degraded" | "unhealthy" | "unknown">("all");
+  // undefined = not fetched yet (show skeleton), null = fetched but none, object = latest capture.
+  const [screenshots, setScreenshots] = useState<Record<string, AppScreenshot | null>>({});
+  const fetchedScreenshots = useRef<Set<string>>(new Set());
 
   useVisibilityPoll(
     async ({ isActive }) => {
@@ -87,6 +100,30 @@ export default function Apps() {
     });
   }, [apps, filter]);
 
+  // The list API doesn't embed a screenshot per app, so lazily fetch the latest
+  // capture for each deployed app via the same endpoint the detail page uses.
+  // Keyed by deployment id so a fresh deploy re-fetches (auto-refreshing the
+  // thumbnail); anything missing or failing degrades to a neutral placeholder.
+  useEffect(() => {
+    let active = true;
+    for (const app of apps) {
+      if (!app.currentDeploymentId) continue;
+      const key = `${app.id}:${app.currentDeploymentId}`;
+      if (fetchedScreenshots.current.has(key)) continue;
+      fetchedScreenshots.current.add(key);
+      api<AppScreenshot>(`/api/apps/${app.id}/screenshots/latest`)
+        .then((shot) => {
+          if (active) setScreenshots((prev) => ({ ...prev, [app.id]: shot }));
+        })
+        .catch(() => {
+          if (active) setScreenshots((prev) => ({ ...prev, [app.id]: null }));
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [apps]);
+
   return (
     <AppShell>
           <PageHeader
@@ -105,14 +142,17 @@ export default function Apps() {
                 return (
                 <Panel key={app.id} className="overflow-hidden" padded={false}>
                   <div className="flex flex-wrap items-start justify-between gap-4 p-4">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Link href={`/apps/${app.id}`} className="truncate text-lg font-semibold hover:text-action">{app.name}</Link>
-                        <StatusPill status={app.latestDeployment?.status || app.currentDeployment?.status || "not deployed"} />
-                        <StatusPill status={app.health?.status || "unknown"} label={`health ${app.health?.status || "unknown"}`} />
-                        <StatusPill status={app.server?.status || "offline"} label={`machine ${app.server?.status || "offline"}`} />
+                    <div className="flex min-w-0 flex-1 items-start gap-3">
+                      <AppThumbnail app={app} screenshot={screenshots[app.id]} />
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link href={`/apps/${app.id}`} className="truncate text-lg font-semibold hover:text-action">{app.name}</Link>
+                          <StatusPill status={app.latestDeployment?.status || app.currentDeployment?.status || "not deployed"} />
+                          <StatusPill status={app.health?.status || "unknown"} label={`health ${app.health?.status || "unknown"}`} />
+                          <StatusPill status={app.server?.status || "offline"} label={`machine ${app.server?.status || "offline"}`} />
+                        </div>
+                        <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
                       </div>
-                      <p className="muted mt-1 break-all">{app.repoFullName} · {app.branch}</p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
                       {visitHref && (
@@ -156,6 +196,51 @@ export default function Apps() {
             />
           )}
     </AppShell>
+  );
+}
+
+// Subtle, responsive preview for each row. Mirrors the detail page's dashed
+// "No generated screenshot yet" placeholder styling, shows a skeleton while the
+// latest capture loads, and flags a thumbnail that predates the current deploy.
+function AppThumbnail({ app, screenshot }: { app: App; screenshot?: AppScreenshot | null }) {
+  const box = "aspect-video w-24 shrink-0 overflow-hidden rounded-md sm:w-28";
+
+  // Deployed but the latest capture hasn't resolved yet: shimmer in place so the
+  // thumbnail doesn't pop from placeholder to image.
+  if (app.currentDeploymentId && screenshot === undefined) {
+    return <Skeleton className={box} />;
+  }
+
+  if (screenshot?.publicUrl) {
+    const stale =
+      !!app.currentDeploymentId &&
+      !!screenshot.deploymentId &&
+      screenshot.deploymentId !== app.currentDeploymentId;
+    return (
+      <Link
+        href={`/apps/${app.id}`}
+        className={cx(box, "relative block border border-line bg-surface-alt")}
+        title={stale ? "Outdated — from a previous deploy" : "Latest screenshot"}
+      >
+        <img loading="lazy" className="h-full w-full object-cover" src={screenshot.publicUrl} alt={`${app.name} screenshot`} />
+        {stale && (
+          <span className="absolute inset-x-0 bottom-0 bg-warning-bg px-1 py-0.5 text-center text-[10px] font-medium text-warning-fg">
+            Outdated
+          </span>
+        )}
+      </Link>
+    );
+  }
+
+  return (
+    <Link
+      href={`/apps/${app.id}`}
+      className={cx(box, "flex items-center justify-center border border-dashed border-line bg-surface-alt text-muted")}
+      title="No generated screenshot yet."
+    >
+      <Camera size={16} aria-hidden="true" />
+      <span className="sr-only">No generated screenshot yet</span>
+    </Link>
   );
 }
 

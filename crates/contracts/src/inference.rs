@@ -1,3 +1,4 @@
+use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,6 +12,24 @@ pub struct DockerfileInference {
 pub struct PackageInference {
     pub framework: &'static str,
     pub package_manager: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandSuggestion {
+    pub command: String,
+    pub source_file: String,
+    pub source_detail: String,
+    pub confidence: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RepoCommandFiles<'a> {
+    pub procfile: Option<&'a str>,
+    pub package_json: Option<&'a str>,
+    pub railway_json: Option<&'a str>,
+    pub render_yaml: Option<(&'a str, &'a str)>,
+    pub dockerfile: Option<&'a str>,
 }
 
 pub fn infer_package_json(
@@ -85,6 +104,158 @@ fn package_manager_from_field(value: &str) -> Option<&'static str> {
         "npm" => Some("npm"),
         _ => None,
     }
+}
+
+pub fn detect_start_command(files: RepoCommandFiles<'_>) -> Option<CommandSuggestion> {
+    files
+        .procfile
+        .and_then(procfile_start_command)
+        .or_else(|| files.package_json.and_then(package_json_start_command))
+        .or_else(|| files.railway_json.and_then(railway_start_command))
+        .or_else(|| {
+            files
+                .render_yaml
+                .and_then(|(source_file, contents)| render_start_command(source_file, contents))
+        })
+        .or_else(|| files.dockerfile.and_then(dockerfile_start_command))
+}
+
+fn command_suggestion(
+    command: impl Into<String>,
+    source_file: &str,
+    source_detail: &str,
+    confidence: &'static str,
+) -> Option<CommandSuggestion> {
+    let command = command.into();
+    let command = crate::clean_command(Some(command)).ok().flatten()?;
+    Some(CommandSuggestion {
+        command,
+        source_file: source_file.to_string(),
+        source_detail: source_detail.to_string(),
+        confidence,
+    })
+}
+
+fn procfile_start_command(contents: &str) -> Option<CommandSuggestion> {
+    for line in contents.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((process, command)) = line.split_once(':') else {
+            continue;
+        };
+        if process.trim() == "web" {
+            return command_suggestion(command.trim(), "Procfile", "web", "high");
+        }
+    }
+    None
+}
+
+fn package_json_start_command(contents: &str) -> Option<CommandSuggestion> {
+    let package: Value = serde_json::from_str(contents).ok()?;
+    let scripts = package.get("scripts").and_then(Value::as_object)?;
+    let package_manager = infer_package_manager(contents, false, false, false);
+    for script in ["start", "preview", "serve"] {
+        let Some(command) = scripts.get(script).and_then(Value::as_str) else {
+            continue;
+        };
+        if command.trim().is_empty() {
+            continue;
+        }
+        crate::clean_command(Some(command.to_string()))
+            .ok()
+            .flatten()?;
+        return command_suggestion(
+            package_script_command(package_manager, script),
+            "package.json",
+            &format!("scripts.{script}"),
+            if script == "start" { "high" } else { "medium" },
+        );
+    }
+    None
+}
+
+fn package_script_command(package_manager: &str, script: &str) -> String {
+    if package_manager == "bun" {
+        format!("bun run {script}")
+    } else {
+        format!("{package_manager} run {script}")
+    }
+}
+
+fn railway_start_command(contents: &str) -> Option<CommandSuggestion> {
+    let value: Value = serde_json::from_str(contents).ok()?;
+    let (command, detail) = value
+        .pointer("/deploy/startCommand")
+        .and_then(Value::as_str)
+        .map(|command| (command, "deploy.startCommand"))
+        .or_else(|| {
+            value
+                .get("startCommand")
+                .and_then(Value::as_str)
+                .map(|command| (command, "startCommand"))
+        })?;
+    command_suggestion(command, "railway.json", detail, "medium")
+}
+
+fn render_start_command(source_file: &str, contents: &str) -> Option<CommandSuggestion> {
+    let value: serde_yaml::Value = serde_yaml::from_str(contents).ok()?;
+    let services = value
+        .get("services")
+        .and_then(|value| value.as_sequence())?;
+    for (index, service) in services.iter().enumerate() {
+        let Some(command) = service.get("startCommand").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        return command_suggestion(
+            command,
+            source_file,
+            &format!("services[{index}].startCommand"),
+            "medium",
+        );
+    }
+    None
+}
+
+fn dockerfile_start_command(contents: &str) -> Option<CommandSuggestion> {
+    let mut latest = None;
+    for line in contents.lines().map(str::trim) {
+        let upper = line.to_ascii_uppercase();
+        if upper.starts_with("CMD ") {
+            latest = Some(("CMD", line[4..].trim()));
+        } else if upper.starts_with("ENTRYPOINT ") {
+            latest = Some(("ENTRYPOINT", line[10..].trim()));
+        }
+    }
+    let (instruction, raw) = latest?;
+    let command = docker_instruction_command(raw)?;
+    command_suggestion(command, "Dockerfile", instruction, "low")
+}
+
+fn docker_instruction_command(raw: &str) -> Option<String> {
+    if raw.starts_with('[') {
+        let parts: Vec<String> = serde_json::from_str(raw).ok()?;
+        let command = parts.join(" ");
+        return (!command.trim().is_empty()).then_some(command);
+    }
+    (!raw.trim().is_empty()).then(|| raw.to_string())
+}
+
+pub fn with_command_suggestion(
+    mut inspection: Value,
+    suggestion: Option<CommandSuggestion>,
+) -> Value {
+    let Some(suggestion) = suggestion else {
+        return inspection;
+    };
+    let Some(map) = inspection.as_object_mut() else {
+        return inspection;
+    };
+    map.insert(
+        "commandSuggestions".to_string(),
+        serde_json::json!({ "start": suggestion }),
+    );
+    inspection
 }
 
 /// The backing services inferred from a repo (its dependency manifests, or a bare
@@ -723,174 +894,4 @@ fn object_map(value: Value) -> serde_json::Map<String, Value> {
 }
 
 #[cfg(test)]
-mod service_detection_tests {
-    use super::*;
-
-    fn set(items: &[&str]) -> std::collections::HashSet<String> {
-        items.iter().map(|item| item.to_string()).collect()
-    }
-
-    #[test]
-    fn package_json_dependencies_lowercases_deps_and_dev_deps() {
-        let deps = package_json_dependencies(
-            r#"{"dependencies":{"PG":"^8","ioredis":"^5"},"devDependencies":{"Vitest":"^1"}}"#,
-        );
-        assert!(deps.contains("pg"));
-        assert!(deps.contains("ioredis"));
-        assert!(deps.contains("vitest"));
-    }
-
-    #[test]
-    fn node_postgres_and_redis_deps_map_to_catalog_addons() {
-        let detected = infer_service_addons(&set(&["pg", "ioredis", "react"]));
-        // Catalog order: postgres before redis.
-        assert_eq!(detected.addons, vec!["postgres", "redis"]);
-        assert!(detected.warnings.is_empty());
-    }
-
-    #[test]
-    fn no_data_deps_detect_nothing() {
-        let detected = infer_service_addons(&set(&["react", "next", "lodash"]));
-        assert!(detected.addons.is_empty());
-        assert!(detected.warnings.is_empty());
-    }
-
-    #[test]
-    fn bare_pg_matches_only_exactly_not_as_substring() {
-        // `pg` is exact-match: a package that merely contains "pg" must not trip it.
-        assert!(infer_service_addons(&set(&["imagepg-tools"]))
-            .addons
-            .is_empty());
-        assert_eq!(infer_service_addons(&set(&["pg"])).addons, vec!["postgres"]);
-    }
-
-    #[test]
-    fn orm_dependency_infers_postgres_default() {
-        assert_eq!(
-            infer_service_addons(&set(&["prisma"])).addons,
-            vec!["postgres"]
-        );
-        assert_eq!(
-            infer_service_addons(&set(&["@prisma/client"])).addons,
-            vec!["postgres"]
-        );
-    }
-
-    #[test]
-    fn unsupported_service_is_skipped_with_a_warning_not_an_addon() {
-        let detected = infer_service_addons(&set(&["mongoose"]));
-        assert!(detected.addons.is_empty());
-        assert_eq!(detected.warnings.len(), 1);
-        assert!(detected.warnings[0].contains("mongodb"));
-    }
-
-    #[test]
-    fn python_manifest_tokens_detect_postgres_and_redis() {
-        let tokens = manifest_dependency_tokens("psycopg2-binary==2.9.9\nredis>=5.0\nflask\n");
-        let detected = infer_service_addons(&tokens);
-        assert_eq!(detected.addons, vec!["postgres", "redis"]);
-    }
-
-    #[test]
-    fn go_mod_module_paths_detect_postgres() {
-        let tokens = manifest_dependency_tokens(
-            "module example.com/app\n\nrequire (\n\tgithub.com/lib/pq v1.10.9\n)\n",
-        );
-        assert_eq!(infer_service_addons(&tokens).addons, vec!["postgres"]);
-    }
-
-    #[test]
-    fn cargo_toml_crate_names_detect_postgres() {
-        let tokens =
-            manifest_dependency_tokens("[dependencies]\ntokio-postgres = \"0.7\"\nserde = \"1\"\n");
-        assert_eq!(infer_service_addons(&tokens).addons, vec!["postgres"]);
-    }
-
-    #[test]
-    fn compose_service_images_map_to_catalog_addons() {
-        let compose = "\
-services:
-  api:
-    build: .
-  db:
-    image: postgres:16-alpine
-  cache:
-    image: redis:7-alpine
-  search:
-    image: elasticsearch:8.0
-";
-        let detected = infer_addons_from_compose(compose);
-        // postgres + redis map to the catalog; elasticsearch has no catalog
-        // entry and no signal, so it is silently ignored (not warned).
-        assert_eq!(detected.addons, vec!["postgres", "redis"]);
-    }
-
-    #[test]
-    fn merge_unions_and_keeps_catalog_order() {
-        let mut a = infer_service_addons(&set(&["ioredis"]));
-        let b = infer_service_addons(&set(&["pg"]));
-        a.merge(&b);
-        assert_eq!(a.addons, vec!["postgres", "redis"]);
-    }
-
-    #[test]
-    fn with_detected_services_flips_node_app_to_compose_runtime() {
-        let base = node_inspection(
-            "owner/shop-api",
-            "main",
-            "main",
-            PackageInference {
-                framework: "Next.js",
-                package_manager: "pnpm",
-            },
-            false,
-        );
-        let detected = infer_service_addons(&set(&["pg", "ioredis"]));
-        let value = with_detected_services(base, &detected);
-
-        assert_eq!(value["runtimeKind"], "compose");
-        assert_eq!(value["webService"], "web");
-        assert_eq!(value["deployable"], true);
-        // Detected framework metadata is preserved through the overlay.
-        assert_eq!(value["detectedFramework"], "Next.js");
-        // The create handler resolves these into a generated compose stack.
-        assert_eq!(
-            value.pointer("/runtimeConfig/compose/addOns"),
-            Some(&serde_json::json!([{"key":"postgres"},{"key":"redis"}]))
-        );
-        // Preview: the repo-built web service plus the managed backing services.
-        let services = value["services"].as_array().unwrap();
-        assert_eq!(services.len(), 3);
-        assert_eq!(services[0]["role"], "web");
-        assert_eq!(services[0]["build"], true);
-        assert!(services
-            .iter()
-            .any(|s| s["name"] == "postgres" && s["role"] == "backing"));
-    }
-
-    #[test]
-    fn with_detected_services_leaves_single_apps_single_but_surfaces_skip_notes() {
-        let base = node_inspection(
-            "owner/app",
-            "main",
-            "main",
-            PackageInference {
-                framework: "Node",
-                package_manager: "npm",
-            },
-            false,
-        );
-        let detected = infer_service_addons(&set(&["mongoose"]));
-        let value = with_detected_services(base, &detected);
-
-        // No managed add-on → still a single-runtime app, but the user is told
-        // their Mongo dependency was skipped.
-        assert_eq!(value["runtimeKind"], "single");
-        assert!(value.get("services").is_none());
-        assert!(value["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w.as_str().unwrap().contains("mongodb")));
-    }
-}
+mod tests;

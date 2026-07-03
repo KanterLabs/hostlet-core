@@ -36,10 +36,12 @@ import {
   SectionHeader,
   SelectField,
   ServiceStack,
+  Skeleton,
   StatusPill,
   StorageMeter,
   SummaryItem,
   ToggleCard,
+  UptimeStrip,
 } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
 import {
@@ -100,6 +102,8 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     healthMessage,
     setHealthMessage,
     busyAction,
+    screenshotError,
+    settingsChangedSinceDeploy,
     refreshApp,
     deploy,
     rollback,
@@ -183,6 +187,17 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const visitHref = appVisitHref(app);
   const visitLabel = app ? appVisitLabel(app) : "No route";
   const targetValue = app?.server?.name || "Unknown";
+  const capturing = busyAction === "screenshot";
+  const hasScreenshot = !!(screenshot?.publicUrl && screenshot.capturedAt);
+  // A screenshot is stale when it was captured against a deployment other than
+  // the one currently running (the app has since been redeployed).
+  const screenshotStale = hasScreenshot
+    && !!app?.currentDeploymentId
+    && !!screenshot?.deploymentId
+    && screenshot.deploymentId !== app.currentDeploymentId;
+  const captureLabel = hasScreenshot ? "Re-capture" : "Capture";
+  const canCapture = !busyAction && !!app?.currentDeploymentId && !!app?.publicExposure;
+  const showSettingsDrift = settingsChangedSinceDeploy && !!app?.currentDeploymentId;
 
   return (
     <AppShell>
@@ -207,7 +222,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             <Metric label="Exposure" value={app?.publicExposure ? "public" : "private"} detail={visitLabel} icon={Globe2} />
           </MetricsGrid>
 
-          <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" />
+          <WebhookNotice autoDeployEnabled={!!app?.autoDeploy} onManualDeploy={deploy} deployDisabled={!!busyAction || active} className="mb-6" collapsible />
 
           {app?.runtimeKind === "compose" && <ServiceStack services={app?.services} />}
 
@@ -281,6 +296,16 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
             />
           )}
 
+          {showSettingsDrift && (
+            <Notice
+              tone="warning"
+              className="mb-6"
+              title="Settings changed — redeploy to apply."
+              description="You saved build settings that only reach the running container on the next deploy."
+              action={<button className="button" disabled={!!busyAction || active} onClick={deploy}><Play size={16} />{busyAction === "deploy" ? "Starting..." : "Redeploy"}</button>}
+            />
+          )}
+
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_390px]">
             <div className="space-y-6">
               <section>
@@ -298,6 +323,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       <Metric label="Container" value={health.containerName || "unknown"} />
                       <Metric label="Target" value={health.checkedUrl || "waiting"} />
                     </MetricsGrid>
+                    <UptimeStrip checks={healthEvents} className="mt-4" />
                     {healthEvents.length > 0 && (
                       <div className="mt-4 overflow-hidden rounded-md border border-line bg-surface">
                         {healthEvents.slice(0, 5).map((event) => (
@@ -421,23 +447,50 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   action={
                     <button
                       className="button-secondary"
-                      disabled={!!busyAction || !app?.currentDeploymentId || !app?.publicExposure}
+                      disabled={!canCapture}
                       onClick={captureScreenshot}
-                      title={!app?.publicExposure ? "Publish the app URL before capture" : "Capture screenshot"}
+                      title={!app?.publicExposure ? "Publish the app URL before capture" : hasScreenshot ? "Capture a fresh screenshot" : "Capture screenshot"}
                     >
                       <Camera size={16} />
-                      {busyAction === "screenshot" ? "Capturing..." : "Capture"}
+                      {capturing ? "Capturing..." : captureLabel}
                     </button>
                   }
                 />
-                {screenshot?.publicUrl && screenshot.capturedAt ? (
-                  <a className="mt-4 block overflow-hidden rounded-md border border-line bg-surface-alt" href={screenshot.publicUrl} target="_blank" rel="noreferrer">
-                    <img className="aspect-video w-full object-cover" src={screenshot.publicUrl} alt={`${app?.name || "App"} screenshot`} />
-                  </a>
+                {capturing ? (
+                  <div className="mt-4 overflow-hidden rounded-md border border-line bg-surface-alt">
+                    <Skeleton className="aspect-video w-full rounded-none" />
+                    <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted">
+                      <Camera size={15} className="animate-pulse" />
+                      Capturing…
+                    </div>
+                  </div>
+                ) : hasScreenshot ? (
+                  <>
+                    <a className="mt-4 block overflow-hidden rounded-md border border-line bg-surface-alt" href={screenshot?.publicUrl} target="_blank" rel="noreferrer">
+                      <img className="aspect-video w-full object-cover" src={screenshot?.publicUrl} alt={`${app?.name || "App"} screenshot`} />
+                    </a>
+                    {screenshotStale && (
+                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning-border bg-warning-bg px-3 py-2">
+                        <StatusPill status="needs attention" label="Outdated — from a previous deploy" />
+                        <button className="button-secondary" disabled={!canCapture} onClick={captureScreenshot}>
+                          <Camera size={15} />
+                          Re-capture
+                        </button>
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="mt-4 flex aspect-video items-center justify-center rounded-md border border-dashed border-line bg-surface-alt text-sm text-muted">
                     {screenshotMessage || "Waiting for the first capture."}
                   </div>
+                )}
+                {screenshotError && (
+                  <Notice
+                    tone="danger"
+                    className="mt-3"
+                    description={screenshotError}
+                    action={<button className="button-secondary" disabled={!canCapture} onClick={captureScreenshot}><RotateCcw size={16} />Retry</button>}
+                  />
                 )}
                 <DataList className="mt-4">
                   <SummaryItem label="Captured" value={screenshot?.capturedAt ? formatTimestamp(screenshot.capturedAt) : "waiting"} />

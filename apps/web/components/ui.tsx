@@ -3,12 +3,14 @@ export { CopyButton, IconButton, Menu, MenuButton, copyTextToClipboard } from "@
 export { ConfirmDialog, ConfirmProvider, useConfirm } from "@/components/ui/dialog";
 export { AppShell, IconFrame, PageHeader, Panel, PanelHeader, SectionHeader } from "@/components/ui/layout";
 export { LogViewer, firstErrorLine } from "@/components/ui/logs";
-export { EmptyState, Notice, StatusPill, statusLabel, statusToneClass } from "@/components/ui/status";
+export { EmptyState, Notice, StatusPill, statusChartColor, statusLabel, statusToneClass } from "@/components/ui/status";
+export { UptimeStrip, type UptimeCheck } from "@/components/ui/uptime";
 export { DataList, DataRow, KeyValueGrid, KeyValueItem, Metric, MetricsGrid, Skeleton, SummaryItem } from "@/components/ui/data";
 export { Field, FilterTabs, SelectField, ToggleCard } from "@/components/ui/forms";
 export { SecretField } from "@/components/ui/secret-field";
 export { ServiceCard, ServiceStack, type ServiceSummary } from "@/components/ui/service-card";
 export { StorageMeter } from "@/components/ui/storage-meter";
+export { UsageBar } from "@/components/ui/usage-bar";
 export { ToastProvider, useToast } from "@/components/ui/toast";
 
 // shadcn-style primitives (token-driven, brand-matched). New surfaces should

@@ -15,7 +15,10 @@ use axum::{
     Json,
 };
 use hostlet_contracts::compose::{detect_data_mount_path, with_data_mount_path};
-use hostlet_contracts::{parse_github_repo, valid_commit_sha};
+use hostlet_contracts::{
+    detect_start_command, parse_github_repo, valid_commit_sha, with_command_suggestion,
+    RepoCommandFiles,
+};
 use inference::{
     compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
     infer_dockerfile, infer_package_json, infer_service_addons, manifest_dependency_tokens,
@@ -26,6 +29,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
+
+const GITHUB_INSPECTION_FILE_MAX_BYTES: u64 = 128 * 1024;
 
 #[derive(Deserialize)]
 pub struct RepoInspectRequest {
@@ -318,7 +323,26 @@ async fn inspect_repo(
         }
     }
 
+    let procfile = github_file_text(state, repo, branch, "Procfile", token).await?;
     let dockerfile = github_file_text(state, repo, branch, "Dockerfile", token).await?;
+    let package_json = github_file_text(state, repo, branch, "package.json", token).await?;
+    let railway_json = github_file_text(state, repo, branch, "railway.json", token).await?;
+    let render_yaml = match github_file_text(state, repo, branch, "render.yaml", token).await? {
+        Some(contents) => Some(("render.yaml", contents)),
+        None => github_file_text(state, repo, branch, "render.yml", token)
+            .await?
+            .map(|contents| ("render.yml", contents)),
+    };
+    let command_suggestion = detect_start_command(RepoCommandFiles {
+        procfile: procfile.as_deref(),
+        package_json: package_json.as_deref(),
+        railway_json: railway_json.as_deref(),
+        render_yaml: render_yaml
+            .as_ref()
+            .map(|(source_file, contents)| (*source_file, contents.as_str())),
+        dockerfile: dockerfile.as_deref(),
+    });
+
     // Auto-detected backing services come from two complementary signals: the
     // repo's dependency manifests (per language, below) and a bare compose file's
     // service images (one without a `hostlet.yml` — that explicit form already
@@ -329,8 +353,7 @@ async fn inspect_repo(
     let (compose_addons, data_mount_path) =
         detect_compose_signals(state, repo, branch, token).await?;
 
-    if let Some(package_text) = github_file_text(state, repo, branch, "package.json", token).await?
-    {
+    if let Some(package_text) = package_json {
         let inference = infer_package_json(
             &package_text,
             github_file_text(state, repo, branch, "bun.lock", token)
@@ -355,18 +378,24 @@ async fn inspect_repo(
         );
         let mut detected = infer_service_addons(&package_json_dependencies(&package_text));
         detected.merge(&compose_addons);
-        return Ok(apply_data_mount_path(
-            with_detected_services(base, &detected),
-            data_mount_path.as_deref(),
+        return Ok(with_command_suggestion(
+            apply_data_mount_path(
+                with_detected_services(base, &detected),
+                data_mount_path.as_deref(),
+            ),
+            command_suggestion,
         ));
     }
 
     if let Some(contents) = dockerfile {
         let inference = infer_dockerfile(&contents);
         let base = dockerfile_inspection(repo, branch, default_branch, inference);
-        return Ok(apply_data_mount_path(
-            with_detected_services(base, &compose_addons),
-            data_mount_path.as_deref(),
+        return Ok(with_command_suggestion(
+            apply_data_mount_path(
+                with_detected_services(base, &compose_addons),
+                data_mount_path.as_deref(),
+            ),
+            command_suggestion,
         ));
     }
 
@@ -385,14 +414,20 @@ async fn inspect_repo(
                 DetectedServices::default()
             };
             detected.merge(&compose_addons);
-            return Ok(apply_data_mount_path(
-                with_detected_services(base, &detected),
-                data_mount_path.as_deref(),
+            return Ok(with_command_suggestion(
+                apply_data_mount_path(
+                    with_detected_services(base, &detected),
+                    data_mount_path.as_deref(),
+                ),
+                command_suggestion,
             ));
         }
     }
 
-    Ok(unknown_inspection(repo, branch, default_branch))
+    Ok(with_command_suggestion(
+        unknown_inspection(repo, branch, default_branch),
+        command_suggestion,
+    ))
 }
 
 /// Applies a detected data mount path to an inspection (no-op when none/invalid),
@@ -450,6 +485,13 @@ async fn github_file_text(
         return Ok(None);
     }
     let value: Value = response.error_for_status()?.json().await?;
+    if value
+        .get("size")
+        .and_then(|value| value.as_u64())
+        .is_some_and(|size| size > GITHUB_INSPECTION_FILE_MAX_BYTES)
+    {
+        return Ok(None);
+    }
     let Some(download_url) = value.get("download_url").and_then(|v| v.as_str()) else {
         return Ok(None);
     };

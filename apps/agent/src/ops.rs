@@ -22,10 +22,35 @@ use reconcile::{
 pub(crate) use resource_stats::{parse_docker_bytes, publish_resource_stats};
 pub(crate) use storage_stats::publish_storage_stats;
 
+/// Build a unique temp path in the *same directory* as the final route file so
+/// the write + atomic rename never crosses a filesystem boundary. A per-process
+/// PID is not sufficient: a deploy and a runtime health-repair can rewrite the
+/// same app's `.caddy` file concurrently within a single agent process, so the
+/// random UUID suffix guarantees two writers never share a temp path and cannot
+/// clobber each other's in-flight write.
+fn route_temp_path(target: &Path) -> PathBuf {
+    target.with_extension(format!(
+        "caddy.tmp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ))
+}
+
 pub(crate) async fn write_route_file(target: &Path, contents: &str) -> anyhow::Result<()> {
-    let tmp = target.with_extension(format!("caddy.tmp-{}", std::process::id()));
-    tokio::fs::write(&tmp, contents).await?;
-    tokio::fs::rename(tmp, target).await?;
+    use tokio::io::AsyncWriteExt;
+    let tmp = route_temp_path(target);
+    // `create_new` refuses to open a path that already exists, so even in the
+    // astronomically unlikely event of a UUID collision we never truncate a
+    // temp file a concurrent writer is still using.
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .await?;
+    file.write_all(contents.as_bytes()).await?;
+    file.flush().await?;
+    drop(file);
+    tokio::fs::rename(&tmp, target).await?;
     Ok(())
 }
 
@@ -437,6 +462,54 @@ pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyh
     Ok(())
 }
 
+/// Stop (without removing) the container for a suspended app — the reversible
+/// counterpart to app deletion, used when Hostlet Cloud billing goes inactive.
+/// `docker stop` on an already-stopped or already-removed container is treated
+/// as success (idempotent), since the caller (the billing reaper) may retry
+/// after a partial failure. Reactivation reuses [`restart_container_job`]
+/// (`docker restart` also starts a stopped container), so no "start" job type
+/// is needed.
+pub(crate) async fn stop_container_job(payload: &Value) -> anyhow::Result<()> {
+    let Some(target) = health_target_from_payload(payload) else {
+        bail!("stop job missing valid health target");
+    };
+    run_quiet_absent_ok(
+        "docker",
+        &["stop", &target.container_name],
+        &["No such container"],
+    )
+    .await
+}
+
+/// Concise, user-facing reasons for a failed screenshot capture. They flow
+/// verbatim to the dashboard via the agent job's `failure_summary` field.
+const SCREENSHOT_ERR_TIMEOUT: &str = "Timed out loading the page";
+const SCREENSHOT_ERR_BLOCKED: &str = "Blocked a private or loopback address";
+const SCREENSHOT_ERR_SITE: &str = "The site returned an error";
+const SCREENSHOT_ERR_SERVICE: &str = "Screenshot service crashed";
+const SCREENSHOT_ERR_UPLOAD: &str = "Failed to upload the screenshot";
+
+/// Classifies a screenshot-pipeline error into one of the reasons above by
+/// matching stable Docker/Playwright/SSRF-guard phrases in the whole error
+/// chain; unrecognized output falls back to a generic service crash.
+fn screenshot_failure_reason(err: &anyhow::Error) -> &'static str {
+    let detail = format!("{err:#}").to_ascii_lowercase();
+    if detail.contains("private or local address")
+        || detail.contains("public hostname")
+        || detail.contains("blocked request")
+        || detail.contains("blocked redirect")
+        || detail.contains("err_blocked_by_client")
+    {
+        SCREENSHOT_ERR_BLOCKED
+    } else if detail.contains("timeout") || detail.contains("timed out") {
+        SCREENSHOT_ERR_TIMEOUT
+    } else if detail.contains("net::err") || detail.contains("too many redirects") {
+        SCREENSHOT_ERR_SITE
+    } else {
+        SCREENSHOT_ERR_SERVICE
+    }
+}
+
 pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
     let app_id = payload_uuid(payload, "app_id").context("screenshot job missing app_id")?;
     let deployment_id =
@@ -446,7 +519,11 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
         .get("capture_url")
         .and_then(|value| value.as_str())
         .context("screenshot job missing capture_url")?;
-    validate_capture_url(capture_url)?;
+    if let Err(err) = validate_capture_url(capture_url) {
+        return Err(reported_deployment_failure(
+            screenshot_failure_reason(&err).to_string(),
+        ));
+    }
     let width = payload
         .get("width")
         .and_then(|value| value.as_i64())
@@ -463,7 +540,7 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     // output_dir is unconditionally removed on every exit path, mirroring
     // run_screenshotter_container's own cleanup pattern.
     let result: anyhow::Result<()> = async {
-        let output_file = output_dir.join("screenshot.jpg");
+        let output_file = output_dir.join("screenshot.webp");
         let size_env = format!("HOSTLET_SCREENSHOT_SIZE={width}x{height}");
         log(
             cfg,
@@ -472,17 +549,29 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
             "Capturing deployment screenshot.",
         )
         .await;
-        run_screenshotter_container(
-            job_id,
-            screenshotter_image(payload),
-            capture_url,
-            &size_env,
-            &output_file,
-        )
-        .await?;
-        let bytes = tokio::fs::read(&output_file)
-            .await
-            .context("screenshotter did not produce an image")?;
+        // Run + read under one categorized boundary so failures map to a reason.
+        let capture: anyhow::Result<Vec<u8>> = async {
+            run_screenshotter_container(
+                job_id,
+                screenshotter_image(payload),
+                capture_url,
+                &size_env,
+                &output_file,
+            )
+            .await?;
+            tokio::fs::read(&output_file)
+                .await
+                .context("screenshotter did not produce an image")
+        }
+        .await;
+        let bytes = match capture {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let reason = screenshot_failure_reason(&err);
+                tracing::warn!(error = %format!("{err:#}"), reason, "screenshot capture failed");
+                return Err(reported_deployment_failure(reason.to_string()));
+            }
+        };
         upload_screenshot(
             cfg,
             ScreenshotUpload {
@@ -495,7 +584,11 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
                 bytes,
             },
         )
-        .await?;
+        .await
+        .map_err(|err| {
+            tracing::warn!(error = %format!("{err:#}"), "screenshot upload failed");
+            reported_deployment_failure(SCREENSHOT_ERR_UPLOAD.to_string())
+        })?;
         Ok(())
     }
     .await;
@@ -511,7 +604,8 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     Ok(())
 }
 
-const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/app/hostlet-screenshot.jpg";
+const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/app/hostlet-screenshot.webp";
+const SCREENSHOT_CONTENT_TYPE: &str = "image/webp";
 
 async fn run_screenshotter_container(
     job_id: Uuid,
@@ -639,7 +733,7 @@ async fn upload_screenshot(cfg: &Config, upload: ScreenshotUpload) -> anyhow::Re
     cfg.http
         .post(format!("{}/api/agent/screenshots", cfg.api_url))
         .headers(agent_auth_headers(cfg)?)
-        .header(reqwest::header::CONTENT_TYPE, "image/jpeg")
+        .header(reqwest::header::CONTENT_TYPE, SCREENSHOT_CONTENT_TYPE)
         .query(&[
             ("app_id", upload.app_id.to_string()),
             ("deployment_id", upload.deployment_id.to_string()),
@@ -830,3 +924,22 @@ pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
 }
 
 pub(crate) use hostlet_contracts::valid_container_name;
+
+#[cfg(test)]
+mod route_temp_tests {
+    use super::route_temp_path;
+    use std::path::Path;
+
+    #[test]
+    fn temp_paths_for_same_target_are_distinct() {
+        let target = Path::new("/etc/caddy/snippets/app.caddy");
+        let first = route_temp_path(target);
+        let second = route_temp_path(target);
+        // Two concurrent writers of the same route file must never collide.
+        assert_ne!(first, second);
+        // Both temp files must live alongside the final route file so the
+        // subsequent rename stays within one directory (atomic on the FS).
+        assert_eq!(first.parent(), target.parent());
+        assert_eq!(second.parent(), target.parent());
+    }
+}

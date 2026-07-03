@@ -7,6 +7,28 @@ import type { App, BusyAction, RuntimeHealth, SettingsForm } from "./appDetail.t
 
 type Router = ReturnType<typeof useRouter>;
 
+/**
+ * Build-critical settings only reach the container on the next deploy. Returns
+ * true when the just-saved form differs from the app's last-known build inputs
+ * for any of those fields. Display-only toggles (public exposure, auto deploy)
+ * are intentionally excluded — they apply immediately and never need a redeploy.
+ */
+function buildCriticalSettingsChanged(app: App | null, settings: SettingsForm) {
+  if (!app) return false;
+  return (
+    settings.domain !== (app.domain || "") ||
+    settings.runtime_kind !== (app.runtimeKind || "single") ||
+    (settings.hostlet_config_path || "hostlet.yml") !== (app.hostletConfigPath || "hostlet.yml") ||
+    settings.packaging_strategy !== (app.packagingStrategy || "auto") ||
+    (settings.root_directory || ".") !== (app.rootDirectory || ".") ||
+    (settings.build_command.trim() || "") !== (app.buildCommand || "") ||
+    (settings.start_command.trim() || "") !== (app.startCommand || "") ||
+    Number(settings.container_port) !== (app.containerPort ?? 3000) ||
+    (settings.memory_limit_mb ? Number(settings.memory_limit_mb) : null) !== (app.memoryLimitMb ?? null) ||
+    (settings.cpu_limit ? Number(settings.cpu_limit) : null) !== (app.cpuLimit ?? null)
+  );
+}
+
 type UseAppActionsArgs = {
   id: string;
   app: App | null;
@@ -44,6 +66,14 @@ export function useAppActions({
   const [message, setMessage] = useState("");
   const [healthMessage, setHealthMessage] = useState("Waiting for runtime health.");
   const [busyAction, setBusyAction] = useState<BusyAction>("");
+  // Specific screenshot job error (the agent job's `failure` string) so the
+  // detail page can surface it with a Retry affordance instead of the generic
+  // "Screenshot capture failed." copy.
+  const [screenshotError, setScreenshotError] = useState("");
+  // Local "build-critical settings saved but not yet redeployed" signal. It is
+  // set the moment such a save succeeds and cleared when a deploy is kicked off,
+  // driving the "Settings changed — redeploy to apply" drift banner.
+  const [settingsChangedSinceDeploy, setSettingsChangedSinceDeploy] = useState(false);
 
   // Tracks whether the component that owns this hook is still mounted; used to
   // guard state updates and navigation after async operations complete.
@@ -82,6 +112,7 @@ export function useAppActions({
     setMessage("Starting deployment...");
     try {
       const res = await api<{ deploymentId: string }>(`/api/apps/${id}/deploy`, { method: "POST", body: "{}" });
+      setSettingsChangedSinceDeploy(false);
       router.push(`/deployments/${res.deploymentId}`);
     } catch (error) {
       setMessage(`Deploy failed to start. ${error instanceof Error ? error.message : ""}`);
@@ -167,6 +198,7 @@ export function useAppActions({
         method: "PATCH",
         body: JSON.stringify(payload),
       });
+      if (buildCriticalSettingsChanged(app, settings)) setSettingsChangedSinceDeploy(true);
       await refreshApp();
       setMessage("Settings saved. Redeploy for runtime changes to reach the container.");
     } catch (error) {
@@ -174,7 +206,7 @@ export function useAppActions({
     } finally {
       setBusyAction("");
     }
-  }, [busyAction, settings, id, refreshApp]);
+  }, [app, busyAction, settings, id, refreshApp]);
 
   const saveEnvVar = useCallback(
     async (key: string, value: string) => {
@@ -234,6 +266,7 @@ export function useAppActions({
   const captureScreenshot = useCallback(async () => {
     if (busyAction) return;
     setBusyAction("screenshot");
+    setScreenshotError("");
     setMessage("Requesting screenshot capture...");
     try {
       const result = await api<{ jobId: string }>(`/api/apps/${id}/screenshots`, { method: "POST", body: "{}" });
@@ -244,7 +277,11 @@ export function useAppActions({
       if (!mountedRef.current) return;
       setMessage("Screenshot captured.");
     } catch (error) {
-      setMessage(`Screenshot capture failed. ${error instanceof Error ? error.message : ""}`);
+      // Surface the specific job error (the agent job's `failure` string bubbles
+      // up through waitForAgentJob) rather than a hardcoded capture-failed line.
+      const detail = error instanceof Error ? error.message : "Screenshot capture failed.";
+      setScreenshotError(detail);
+      setMessage(detail);
     } finally {
       setBusyAction("");
     }
@@ -279,6 +316,8 @@ export function useAppActions({
     healthMessage,
     setHealthMessage,
     busyAction,
+    screenshotError,
+    settingsChangedSinceDeploy,
     refreshApp,
     deploy,
     rollback,

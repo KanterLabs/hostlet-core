@@ -4,6 +4,7 @@ use crate::deployment_policy::{
     DeploymentStatusDecision, DeploymentStatusEvent, DeploymentStatusPolicy,
 };
 
+mod health;
 mod lifecycle;
 mod resource;
 mod storage;
@@ -213,21 +214,7 @@ async fn assert_only_valid_log_streams_are_stored(state: &AppState, deployment_i
 }
 
 async fn assert_health_status_is_recorded(state: &AppState, app_id: Uuid, deployment_id: Uuid) {
-    handle_agent_message(
-        state,
-        TEST_SERVER_ID,
-        serde_json::json!({
-            "type": "health_status",
-            "app_id": app_id,
-            "deployment_id": deployment_id,
-            "container_name": format!("hostlet-app-{app_id}"),
-            "status": "healthy",
-            "published_port": 32055,
-            "http_status": 200,
-            "latency_ms": 12
-        }),
-    )
-    .await;
+    send_health_status(state, app_id, deployment_id, "healthy").await;
     assert_eq!(
         health_status(state, app_id).await.as_deref(),
         Some("healthy")
@@ -236,6 +223,28 @@ async fn assert_health_status_is_recorded(state: &AppState, app_id: Uuid, deploy
         deployment_published_port(state, deployment_id).await,
         Some(32055)
     );
+}
+
+async fn send_health_status(state: &AppState, app_id: Uuid, deployment_id: Uuid, status: &str) {
+    handle_agent_message(
+        state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "health_status",
+            "app_id": app_id,
+            "deployment_id": deployment_id,
+            "container_name": format!("hostlet-app-{app_id}"),
+            "status": status,
+            "published_port": 32055,
+            "http_status": if status == "healthy" { 200 } else { 502 },
+            "latency_ms": 12,
+            "failure_count": if status == "healthy" { 0 } else { 3 },
+            "success_count": if status == "healthy" { 1 } else { 0 },
+            "checked_url": "http://127.0.0.1:32055/health",
+            "error": if status == "healthy" { serde_json::Value::Null } else { serde_json::json!("HTTP 502") }
+        }),
+    )
+    .await;
 }
 
 #[tokio::test]

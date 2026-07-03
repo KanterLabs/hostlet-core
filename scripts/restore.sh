@@ -8,18 +8,45 @@ POSTGRES_USER="${POSTGRES_USER:-hostlet}"
 POSTGRES_DB="${POSTGRES_DB:-hostlet}"
 AGENT_VOLUME="${HOSTLET_AGENT_VOLUME:-infra_hostlet-agent}"
 AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-alpine:3.22}"
+# Explicit env file for compose resolution.  Standalone runs against prod need
+# this because compose does not auto-load the project .env when invoked via SSH.
+# Accepted via --env-file <path> flag or HOSTLET_COMPOSE_ENV_FILE env var.
+COMPOSE_ENV_FILE="${HOSTLET_COMPOSE_ENV_FILE:-}"
 
-# Run psql against the running postgres service over docker compose exec.
+# Run psql against the running postgres service over docker compose exec,
+# optionally injecting --env-file so compose can resolve required secrets.
 # Extra args (e.g. -c "...") are forwarded; stdin is passed through so callers
 # can pipe a SQL dump in.
 psql_exec() {
-  docker compose -f "$COMPOSE_FILE" exec -T postgres \
-    psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"
+  if [[ -n "$COMPOSE_ENV_FILE" ]]; then
+    docker compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T postgres \
+      psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"
+  else
+    docker compose -f "$COMPOSE_FILE" exec -T postgres \
+      psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"
+  fi
 }
 
-BACKUP_DIR="${1:-}"
+# Parse flags; positional arg (if any) is the backup source dir.
+BACKUP_DIR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env-file)
+      COMPOSE_ENV_FILE="$2"
+      shift 2
+      ;;
+    --env-file=*)
+      COMPOSE_ENV_FILE="${1#*=}"
+      shift
+      ;;
+    *)
+      BACKUP_DIR="$1"
+      shift
+      ;;
+  esac
+done
 if [[ -z "$BACKUP_DIR" ]]; then
-  echo "Usage: $0 /path/to/hostlet-backup" >&2
+  echo "Usage: $0 [--env-file <path>] /path/to/hostlet-backup" >&2
   exit 1
 fi
 # Reject missing or zero-byte dumps before any destructive step.  A power-loss

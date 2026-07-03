@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   full-web-visual:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     defaults:
       run:
@@ -46,6 +47,7 @@ jobs:
           path: /tmp/hostlet-responsive-qa-${{ github.run_id }}-${{ github.job }}
 
   full-self-hosted-deploy:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +63,7 @@ jobs:
       - run: scripts/ci-self-hosted-deploy-e2e.sh
 
   full-compose-and-release:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, hostlet-core]
     env:
       # Cap cargo parallelism (release build is the most expensive cargo
@@ -77,6 +80,10 @@ jobs:
       LOCAL_AGENT_TOKEN: ci-only-not-a-secret-agent-token-01
       GITHUB_WEBHOOK_SECRET: ci-only-not-a-secret-webhook-secret-01
       HOSTLET_IMAGE_TAG: v0.5.0
+      HOSTLET_API_IMAGE: ghcr.io/shanekanterman04/hostlet-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      HOSTLET_WEB_IMAGE: ghcr.io/shanekanterman04/hostlet-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      HOSTLET_AGENT_IMAGE: ghcr.io/shanekanterman04/hostlet-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      HOSTLET_SCREENSHOTTER_IMAGE: ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@v4

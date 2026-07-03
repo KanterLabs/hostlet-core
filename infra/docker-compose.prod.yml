@@ -10,11 +10,11 @@ services:
       - hostlet-postgres:/var/lib/postgresql/data
 
   api:
-    image: ${HOSTLET_IMAGE_REGISTRY:-ghcr.io/shanekanterman04}/hostlet-api:${HOSTLET_IMAGE_TAG:?Set HOSTLET_IMAGE_TAG to a Hostlet release tag}
+    image: ${HOSTLET_API_IMAGE:?Run hostlet init or hostlet update first}
     restart: unless-stopped
     environment:
-      HOSTLET_IMAGE_TAG: ${HOSTLET_IMAGE_TAG}
-      HOSTLET_IMAGE_REGISTRY: ${HOSTLET_IMAGE_REGISTRY:-ghcr.io/shanekanterman04}
+      HOSTLET_IMAGE_TAG: ${HOSTLET_IMAGE_TAG:-}
+      HOSTLET_SCREENSHOTTER_IMAGE: ${HOSTLET_SCREENSHOTTER_IMAGE:?Run hostlet init or hostlet update first}
       DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
       BIND_ADDR: 0.0.0.0:8080
       PUBLIC_API_URL: ${PUBLIC_API_URL:?Run hostlet init first}
@@ -53,7 +53,7 @@ services:
       - postgres
 
   local-agent:
-    image: ${HOSTLET_IMAGE_REGISTRY:-ghcr.io/shanekanterman04}/hostlet-agent:${HOSTLET_IMAGE_TAG:?Set HOSTLET_IMAGE_TAG to a Hostlet release tag}
+    image: ${HOSTLET_AGENT_IMAGE:?Run hostlet init or hostlet update first}
     restart: unless-stopped
     network_mode: host
     group_add:
@@ -77,6 +77,7 @@ services:
       HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS: ${HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS:-}
       HOSTLET_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS: ${HOSTLET_RAILPACK_BUILDKIT_READY_TIMEOUT_SECS:-}
       HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB: ${HOSTLET_RAILPACK_BUILDKIT_MEMORY_LIMIT_MB:-}
+      HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED: ${HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED:-false}
       HOSTLET_HEALTH_CHECK_ATTEMPTS: ${HOSTLET_HEALTH_CHECK_ATTEMPTS:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -110,7 +111,7 @@ services:
       - caddy
 
   web:
-    image: ${HOSTLET_IMAGE_REGISTRY:-ghcr.io/shanekanterman04}/hostlet-web:${HOSTLET_IMAGE_TAG:?Set HOSTLET_IMAGE_TAG to a Hostlet release tag}
+    image: ${HOSTLET_WEB_IMAGE:?Run hostlet init or hostlet update first}
     restart: unless-stopped
     environment:
       PUBLIC_API_URL: ${PUBLIC_API_URL:?Run hostlet init first}

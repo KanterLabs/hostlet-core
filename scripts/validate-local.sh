@@ -39,5 +39,24 @@ step "web build"
 pnpm --dir apps/web build
 
 step "compose config"
-docker compose -f infra/docker-compose.yml config >/dev/null
-HOSTLET_IMAGE_TAG="${HOSTLET_IMAGE_TAG:-v0.0.0}" docker compose -f infra/docker-compose.prod.yml config >/dev/null
+compose_config() {
+  POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-ci-only-not-a-secret-postgres}" \
+  PUBLIC_API_URL="${PUBLIC_API_URL:-http://localhost:8080}" \
+  PUBLIC_WEB_URL="${PUBLIC_WEB_URL:-http://localhost:3000}" \
+  HOSTLET_SETUP_TOKEN="${HOSTLET_SETUP_TOKEN:-ci-only-not-a-secret-setup-token-01}" \
+  HOSTLET_ALLOWED_GITHUB_LOGINS="${HOSTLET_ALLOWED_GITHUB_LOGINS:-ci-user}" \
+  ENCRYPTION_KEY="${ENCRYPTION_KEY:-YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=}" \
+  JOB_SIGNING_SECRET="${JOB_SIGNING_SECRET:-ci-only-not-a-secret-job-signing-01}" \
+  SESSION_SECRET="${SESSION_SECRET:-ci-only-not-a-secret-session-secret-01}" \
+  LOCAL_AGENT_TOKEN="${LOCAL_AGENT_TOKEN:-ci-only-not-a-secret-agent-token-01}" \
+  GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-ci-only-not-a-secret-webhook-secret-01}" \
+  DOCKER_GID="${DOCKER_GID:-998}" \
+  HOSTLET_IMAGE_TAG="${HOSTLET_IMAGE_TAG:-v0.0.0}" \
+  HOSTLET_API_IMAGE="${HOSTLET_API_IMAGE:-ghcr.io/shanekanterman04/hostlet-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+  HOSTLET_WEB_IMAGE="${HOSTLET_WEB_IMAGE:-ghcr.io/shanekanterman04/hostlet-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+  HOSTLET_AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-ghcr.io/shanekanterman04/hostlet-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+  HOSTLET_SCREENSHOTTER_IMAGE="${HOSTLET_SCREENSHOTTER_IMAGE:-ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+  docker compose -f "$1" config >/dev/null
+}
+compose_config infra/docker-compose.yml
+compose_config infra/docker-compose.prod.yml

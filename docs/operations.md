@@ -25,10 +25,13 @@ hostlet down
 
 Hostlet checks GitHub Releases for stable updates. When `hostlet-release.json` is present, Hostlet uses it for release version, minimum supported direct-upgrade version, checksums, image metadata, and migration flags.
 
-Production deploys should use tagged release images:
+Production deploys should use immutable release image refs from `.env`:
 
 ```text
-HOSTLET_IMAGE_TAG=vX.Y.Z
+HOSTLET_API_IMAGE=ghcr.io/shanekanterman04/hostlet-api@sha256:...
+HOSTLET_WEB_IMAGE=ghcr.io/shanekanterman04/hostlet-web@sha256:...
+HOSTLET_AGENT_IMAGE=ghcr.io/shanekanterman04/hostlet-agent@sha256:...
+HOSTLET_SCREENSHOTTER_IMAGE=ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:...
 ```
 
 Then pull and restart with `--no-build`.
@@ -41,6 +44,15 @@ environment variables. Backups intentionally do not copy `.env`, `.env.prod`,
 raw secret values, private keys, or plaintext app environment files.
 
 Restores require the original `ENCRYPTION_KEY`. Without it, encrypted GitHub tokens and app environment variables cannot be decrypted.
+
+`scripts/backup.sh` can also push the snapshot off-host: set `HOSTLET_BACKUP_BUCKET`
+(a `gs://` path) to sync via `gsutil`, or `HOSTLET_BACKUP_S3_BUCKET` (an `s3://` path,
+optionally with `HOSTLET_BACKUP_S3_ENDPOINT` for a non-AWS S3-compatible endpoint such as
+Cloudflare R2 or MinIO) to sync via the `aws` CLI. Both are no-ops when unset; set at most
+one. S3-compatible credentials/region come from the standard `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` environment variables — `hostlet backup`
+inherits your shell's environment, so exporting these before running it (or in a cron/
+systemd unit's environment) is enough; nothing needs to be set in `.env`.
 
 ## Troubleshooting
 
