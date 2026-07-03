@@ -540,7 +540,7 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     // output_dir is unconditionally removed on every exit path, mirroring
     // run_screenshotter_container's own cleanup pattern.
     let result: anyhow::Result<()> = async {
-        let output_file = output_dir.join("screenshot.jpg");
+        let output_file = output_dir.join("screenshot.webp");
         let size_env = format!("HOSTLET_SCREENSHOT_SIZE={width}x{height}");
         log(
             cfg,
@@ -604,7 +604,8 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
     Ok(())
 }
 
-const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/app/hostlet-screenshot.jpg";
+const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/app/hostlet-screenshot.webp";
+const SCREENSHOT_CONTENT_TYPE: &str = "image/webp";
 
 async fn run_screenshotter_container(
     job_id: Uuid,
@@ -732,7 +733,7 @@ async fn upload_screenshot(cfg: &Config, upload: ScreenshotUpload) -> anyhow::Re
     cfg.http
         .post(format!("{}/api/agent/screenshots", cfg.api_url))
         .headers(agent_auth_headers(cfg)?)
-        .header(reqwest::header::CONTENT_TYPE, "image/jpeg")
+        .header(reqwest::header::CONTENT_TYPE, SCREENSHOT_CONTENT_TYPE)
         .query(&[
             ("app_id", upload.app_id.to_string()),
             ("deployment_id", upload.deployment_id.to_string()),

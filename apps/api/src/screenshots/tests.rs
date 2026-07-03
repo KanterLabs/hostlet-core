@@ -31,6 +31,16 @@ fn screenshot_content_type_accepts_jpeg_with_parameters() {
 }
 
 #[test]
+fn screenshot_content_type_accepts_webp_with_parameters() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/webp; charset=binary"),
+    );
+    assert_eq!(screenshot_content_type(&headers), Some("image/webp"));
+}
+
+#[test]
 fn screenshot_content_type_rejects_png() {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
