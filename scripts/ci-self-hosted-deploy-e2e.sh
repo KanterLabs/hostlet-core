@@ -343,6 +343,9 @@ export HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR="${TMP_DIR}/caddy"
 export HOSTLET_LOCAL_ROUTER_RELOAD=true
 export HOSTLET_RUNTIME_HEALTH_INTERVAL_SECONDS=2
 export HOSTLET_RAILPACK_BUILDKIT_CONTAINER="${RAILPACK_BUILDKIT_CONTAINER}"
+# The self-hosted GitHub runners need privileged BuildKit for Railpack snapshot
+# mounts; keep local E2E runs non-privileged unless explicitly requested.
+export HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED="${HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED:-${GITHUB_ACTIONS:-false}}"
 export GIT_CONFIG_GLOBAL
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMP_DIR}/target}"
 

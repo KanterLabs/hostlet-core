@@ -1,6 +1,6 @@
 [package]
 name = "hostlet-agent"
-version = "0.2.20"
+version = "0.2.21"
 edition.workspace = true
 
 [dependencies]
