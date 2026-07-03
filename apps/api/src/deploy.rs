@@ -577,6 +577,11 @@ async fn record_audit_event(
     .await;
 }
 
+/// The stored priority is `priority` plus the app's `queue_priority_offset`
+/// (0 for NULL/unknown apps). The offset is capped at 4 by a table CHECK and
+/// must stay below the smallest gap between base priorities passed by callers
+/// (currently 5: delete=5, deploy=10, interactive/screenshot=20, cleanup=50),
+/// so it can only reorder jobs within the same job-type band.
 pub async fn enqueue_agent_job(
     state: &AppState,
     server_id: Uuid,
@@ -589,7 +594,8 @@ pub async fn enqueue_agent_job(
     let id = sqlx::query(
         "INSERT INTO agent_jobs
            (server_id,app_id,deployment_id,job_type,status,payload_json,priority)
-         VALUES ($1,$2,$3,$4,'queued',$5,$6)
+         VALUES ($1,$2,$3,$4,'queued',$5,
+                 $6 + COALESCE((SELECT queue_priority_offset FROM apps WHERE id = $2), 0))
          RETURNING id",
     )
     .bind(server_id)

@@ -6,6 +6,7 @@ use crate::deployment_policy::{
 
 mod health;
 mod lifecycle;
+mod priority;
 mod resource;
 mod storage;
 
