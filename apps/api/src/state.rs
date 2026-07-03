@@ -322,22 +322,30 @@ pub async fn db_test_state_from_env() -> Option<AppState> {
     set_test_env_default("PUBLIC_WEBHOOK_URL", "http://127.0.0.1:18080");
     set_test_env_default("HOSTLET_ALLOWED_WEB_ORIGINS", "http://127.0.0.1:3000");
     set_test_env_default("HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS", "false");
-    set_test_env_default("HOSTLET_SETUP_TOKEN", "7b3f9c4a0e21d58f93a64b7c2d10e8f5");
+    set_test_env_default("HOSTLET_SETUP_TOKEN", &ci_test_secret_value("setup-token"));
     set_test_env_default("HOSTLET_ALLOWED_GITHUB_LOGINS", "ci-user");
     set_test_env_default(
         "ENCRYPTION_KEY",
         "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
     );
-    set_test_env_default("JOB_SIGNING_SECRET", "9f6b2c8d4a1e73f05c92d6b4180aef35");
-    set_test_env_default("SESSION_SECRET", "2d7a91c0f4b63e8d5a20c7f149b6e3d8");
-    set_test_env_default("LOCAL_AGENT_TOKEN", "4d89f4e18a7bb4a01b51c83924492f46");
+    set_test_env_default("JOB_SIGNING_SECRET", &ci_test_secret_value("job-signing"));
+    set_test_env_default("SESSION_SECRET", &ci_test_secret_value("session-secret"));
+    set_test_env_default(
+        "LOCAL_AGENT_TOKEN",
+        &ci_test_secret_value("local-agent-token"),
+    );
     set_test_env_default(
         "GITHUB_WEBHOOK_SECRET",
-        "8c2f0b95d7a14e63b491f0d6a2c85e17",
+        &ci_test_secret_value("webhook-secret"),
     );
     set_test_env_default("HOSTLET_BASE_DOMAIN", "example.test");
     set_test_env_default("HOSTLET_UPDATE_CHECKS", "false");
     AppState::from_env().await.ok()
+}
+
+#[cfg(test)]
+fn ci_test_secret_value(label: &str) -> String {
+    format!("ci-test-{label}-value-000001")
 }
 
 #[cfg(test)]

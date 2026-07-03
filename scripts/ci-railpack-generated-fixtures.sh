@@ -26,7 +26,9 @@ if ! command -v "${RAILPACK_BIN}" >/dev/null 2>&1; then
 fi
 
 BUILDKIT_RUN_ARGS=(run -d --name "${BUILDKIT_CONTAINER}")
-case "${HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED:-false}" in
+# The self-hosted GitHub runners need privileged BuildKit for Railpack snapshot
+# mounts; keep local runs non-privileged unless explicitly requested.
+case "${HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED:-${GITHUB_ACTIONS:-false}}" in
   1|true|TRUE|yes|YES) BUILDKIT_RUN_ARGS+=(--privileged) ;;
 esac
 BUILDKIT_RUN_ARGS+=("${BUILDKIT_IMAGE}")

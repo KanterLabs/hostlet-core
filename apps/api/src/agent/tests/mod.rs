@@ -412,7 +412,7 @@ fn agent_headers(_state: &AppState, server_id: Uuid) -> HeaderMap {
     headers.insert(
         "x-hostlet-agent-token",
         std::env::var("LOCAL_AGENT_TOKEN")
-            .unwrap_or_else(|_| "4d89f4e18a7bb4a01b51c83924492f46".into())
+            .unwrap_or_else(|_| "ci-test-local-agent-token-value-000001".into())
             .parse()
             .unwrap(),
     );
