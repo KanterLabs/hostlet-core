@@ -41,7 +41,13 @@ jobs:
       - name: Use runner's cached rustup
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        with:
+          # rustup minimal profile (dtolnay default) drops these when it
+          # refreshes stable; pin them so cargo fmt/clippy stay available.
+          components: rustfmt, clippy
+      # Compilation is cached locally by sccache (RUSTC_WRAPPER set in the
+      # self-hosted runner .env), so target/ is no longer round-tripped to the
+      # GitHub Actions cache backend over the network. Replaces Swatinem/rust-cache@v2.
       - run: scripts/check-line-cap.sh
       - run: scripts/check-line-cap-selftest.sh
       - run: scripts/check-migration-versions.sh
