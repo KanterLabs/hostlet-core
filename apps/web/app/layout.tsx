@@ -2,6 +2,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 import { AuthGate } from "@/components/AuthGate";
 import { ConfirmProvider, ToastProvider } from "@/components/ui";
+import { CoreTour } from "./tour";
 
 export const metadata: Metadata = { title: "Hostlet", description: "Self-hosted deployments" };
 
@@ -19,7 +20,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <ToastProvider>
           <ConfirmProvider>
-            <AuthGate>{children}</AuthGate>
+            <AuthGate>
+              <CoreTour>{children}</CoreTour>
+            </AuthGate>
           </ConfirmProvider>
         </ToastProvider>
       </body>

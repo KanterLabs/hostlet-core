@@ -6,13 +6,16 @@ import type { App, DashboardMetrics, VersionPayload } from "./dashboard-data";
 
 export function OverviewMetrics({ metrics }: { metrics: DashboardMetrics }) {
   return (
-    <MetricsGrid columns="lg:grid-cols-3 xl:grid-cols-5">
-      <Metric label="Apps" value={String(metrics.appCount)} detail={`${metrics.healthyApps} healthy`} icon={Box} />
-      <Metric label="Active deploys" value={String(metrics.activeDeploys)} detail="builds, checks, routing" icon={Rocket} />
-      <Metric label="Unhealthy apps" value={String(metrics.unhealthyApps)} detail="runtime monitor" icon={ShieldAlert} />
-      <Metric label="Public apps" value={String(metrics.publicApps)} detail="Cloudflare DNS open" icon={Globe2} />
-      <Metric label="Machines online" value={`${metrics.onlineServers}/${metrics.serverCount || 1}`} detail="agent heartbeat" icon={HardDrive} />
-    </MetricsGrid>
+    // Product-tour anchor; MetricsGrid doesn't forward data attributes.
+    <div data-tour="overview-metrics">
+      <MetricsGrid columns="lg:grid-cols-3 xl:grid-cols-5">
+        <Metric label="Apps" value={String(metrics.appCount)} detail={`${metrics.healthyApps} healthy`} icon={Box} />
+        <Metric label="Active deploys" value={String(metrics.activeDeploys)} detail="builds, checks, routing" icon={Rocket} />
+        <Metric label="Unhealthy apps" value={String(metrics.unhealthyApps)} detail="runtime monitor" icon={ShieldAlert} />
+        <Metric label="Public apps" value={String(metrics.publicApps)} detail="Cloudflare DNS open" icon={Globe2} />
+        <Metric label="Machines online" value={`${metrics.onlineServers}/${metrics.serverCount || 1}`} detail="agent heartbeat" icon={HardDrive} />
+      </MetricsGrid>
+    </div>
   );
 }
 

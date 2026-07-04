@@ -7,14 +7,16 @@ import { api } from "@/lib/api";
 import { cx } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
-type NavItem = { href: string; label: string; icon: LucideIcon };
+// `tour` is the product-tour anchor rendered as data-tour on both the desktop
+// rail and mobile bar links; the tour engine picks the visible one.
+type NavItem = { href: string; label: string; icon: LucideIcon; tour: string };
 
 const NAV_ITEMS: NavItem[] = [
-  { href: "/", label: "Overview", icon: Home },
-  { href: "/apps", label: "Apps", icon: Box },
-  { href: "/servers", label: "Machines", icon: HardDrive },
-  { href: "/logs", label: "Logs", icon: ScrollText },
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/", label: "Overview", icon: Home, tour: "nav-overview" },
+  { href: "/apps", label: "Apps", icon: Box, tour: "nav-apps" },
+  { href: "/servers", label: "Machines", icon: HardDrive, tour: "nav-servers" },
+  { href: "/logs", label: "Logs", icon: ScrollText, tour: "nav-logs" },
+  { href: "/settings", label: "Settings", icon: Settings, tour: "nav-settings" },
 ];
 
 function isActive(pathname: string, href: string) {
@@ -32,7 +34,7 @@ function NavLink({
 }) {
   const Icon = item.icon;
   return (
-    <Link href={item.href} className={className}>
+    <Link href={item.href} className={className} data-tour={item.tour}>
       <Icon size={iconSize} />
       {item.label}
     </Link>

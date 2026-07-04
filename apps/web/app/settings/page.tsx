@@ -8,6 +8,7 @@ import {
   AccessSummarySection,
   ConnectionsSection,
   OperationsSection,
+  ProductTourSection,
   UpdatesSection,
 } from "./settings-sections";
 
@@ -63,6 +64,8 @@ export default function Settings() {
         onRetryJob={retryJob}
         onCancelJob={cancelJob}
       />
+
+      <ProductTourSection />
     </AppShell>
   );
 }

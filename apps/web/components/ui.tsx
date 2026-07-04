@@ -12,6 +12,7 @@ export { ServiceCard, ServiceStack, type ServiceSummary } from "@/components/ui/
 export { StorageMeter } from "@/components/ui/storage-meter";
 export { UsageBar } from "@/components/ui/usage-bar";
 export { ToastProvider, useToast } from "@/components/ui/toast";
+export { TourProvider, useTour, tourSeen, markTourSeen, type TourStep } from "@/components/ui/tour";
 
 // shadcn-style primitives (token-driven, brand-matched). New surfaces should
 // build on these; existing primitives above are migrating onto them.

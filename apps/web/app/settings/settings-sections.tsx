@@ -1,8 +1,8 @@
 "use client";
 
 import type { LucideIcon } from "lucide-react";
-import { Cloud, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
-import { DataList, DataRow, IconFrame, Notice, Panel, StatusPill } from "@/components/ui";
+import { Cloud, Compass, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { DataList, DataRow, IconFrame, Notice, Panel, StatusPill, useTour } from "@/components/ui";
 import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
 import { formatTimestamp } from "@/lib/time";
 import type {
@@ -116,6 +116,25 @@ export function UpdatesSection({
       {message.text && <Notice tone={message.tone} className="mt-3" description={message.text} />}
       {version?.update?.unsupportedDirectUpdate && <Notice tone="danger" className="mt-3" description="This release does not support a direct update from the installed version. Read the release notes before upgrading." />}
       {version?.updateChecksEnabled === false && <Notice tone="neutral" className="mt-3" description="Update checks are disabled by HOSTLET_UPDATE_CHECKS=false." />}
+    </Panel>
+  );
+}
+
+// Step 1 of the tour routes to "/", so replaying from here hops home first.
+export function ProductTourSection() {
+  const { start } = useTour();
+  return (
+    <Panel className="mt-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <IconFrame icon={Compass} />
+          <div>
+            <h2 className="font-semibold">Product tour</h2>
+            <p className="muted mt-1">Replay the guided walkthrough of the dashboard.</p>
+          </div>
+        </div>
+        <button className="button-secondary compact" onClick={() => start({ force: true })}>Replay tour</button>
+      </div>
     </Panel>
   );
 }
