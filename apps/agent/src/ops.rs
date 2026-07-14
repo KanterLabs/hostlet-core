@@ -1,5 +1,7 @@
 use super::*;
+use std::sync::OnceLock;
 
+mod activation;
 mod capture_url;
 mod health;
 mod reconcile;
@@ -10,6 +12,13 @@ mod screenshot_tests;
 mod status_tests;
 mod storage_stats;
 
+static ROUTE_WRITE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+pub(crate) fn route_write_lock() -> &'static tokio::sync::Mutex<()> {
+    ROUTE_WRITE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+pub(crate) use activation::*;
 use capture_url::validate_capture_url;
 pub(crate) use health::CONTAINER_STATE_INSPECT_FORMAT;
 use health::{
@@ -154,6 +163,7 @@ pub(crate) async fn status(cfg: &Config, id: Uuid, status: &str, failure: Option
 #[derive(Default)]
 pub(crate) struct StatusDetails<'a> {
     pub(crate) failure: Option<&'a str>,
+    pub(crate) failure_code: Option<&'a str>,
     pub(crate) image: Option<&'a str>,
     pub(crate) container: Option<&'a str>,
     pub(crate) local_url: Option<&'a str>,
@@ -166,6 +176,9 @@ pub(crate) struct StatusDetails<'a> {
 }
 
 pub(crate) async fn status_extra(cfg: &Config, id: Uuid, status: &str, details: StatusDetails<'_>) {
+    if let Err(err) = record_deployment_phase(cfg, id, status).await {
+        tracing::warn!(deployment_id = %id, error = %err, "failed to persist deployment phase");
+    }
     post_reliable(cfg, deployment_status_event(id, status, details)).await;
 }
 
@@ -175,6 +188,7 @@ fn deployment_status_event(id: Uuid, status: &str, details: StatusDetails<'_>) -
         "deployment_id": id,
         "status": status,
         "failure": details.failure,
+        "failure_code": details.failure_code,
         "image_tag": details.image,
         "container_name": details.container,
         "local_url": details.local_url,
@@ -823,7 +837,7 @@ pub(crate) async fn hostlet_images() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-pub(crate) async fn docker_compose_managed_container(container: &str) -> anyhow::Result<bool> {
+pub(crate) async fn docker_compose_project(container: &str) -> anyhow::Result<Option<String>> {
     if !valid_container_name(container) {
         bail!("refusing to inspect invalid managed container name");
     }
@@ -841,11 +855,12 @@ pub(crate) async fn docker_compose_managed_container(container: &str) -> anyhow:
     if !output.status.success() {
         let combined = command_combined_output(&output);
         if combined.contains("No such object") {
-            return Ok(true);
+            return Ok(Some("removed".into()));
         }
         bail!("docker exited with {}: {}", output.status, combined.trim());
     }
-    Ok(!String::from_utf8(output.stdout)?.trim().is_empty())
+    let project = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok((!project.is_empty()).then_some(project))
 }
 
 pub(crate) fn string_set_from_array(value: Option<&Value>) -> HashSet<String> {

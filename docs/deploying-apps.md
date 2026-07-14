@@ -87,8 +87,16 @@ to retained logs and shows the stream state.
 
 ## Rollbacks And State
 
-Single-service rollback updates routing to a previous successful deployment. It does not delete containers or images.
+Rollback health-checks a previous successful release before atomically updating
+routing. The current release remains available until that switch commits.
 
 Single-service apps receive a stable Docker volume mounted at `/data`. Redeploys and rollbacks reuse that volume.
 
-Compose rollback is disabled for the current release. Compose apps keep their declared named volumes, and Hostlet does not inject `/data` into arbitrary Compose services.
+Compose apps keep backing services, their stable internal network, and declared
+named volumes under a per-app project. Each web release runs in a separate
+release project, so a failed deploy or rollback cannot tear down databases or
+caches. Changes to the backing-service specification require explicit approval
+from the failed deployment page before Hostlet mutates that stable layer.
+
+For the crash and retry guarantees behind activation, see
+[Deployment Reliability](reliability.md).

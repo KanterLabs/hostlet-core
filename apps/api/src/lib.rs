@@ -4,6 +4,7 @@ pub mod auth;
 pub mod cleanup;
 pub mod crypto;
 pub mod deploy;
+pub mod deployment_execution;
 pub mod deployment_policy;
 pub mod device_flow;
 pub mod env;
@@ -151,6 +152,18 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
         )
         .route("/api/agent/jobs/claim", post(agent::claim_job))
         .route("/api/agent/jobs/:id/complete", post(agent::complete_job))
+        .route(
+            "/api/agent/jobs/:id/heartbeat",
+            post(deployment_execution::heartbeat),
+        )
+        .route(
+            "/api/agent/deployments/:id/prepare-activation",
+            post(deployment_execution::prepare_activation),
+        )
+        .route(
+            "/api/agent/deployments/:id/commit-activation",
+            post(deployment_execution::commit_activation),
+        )
         .route("/api/apps", get(web::list_apps).post(web::create_app))
         .route(
             "/api/apps/:id",

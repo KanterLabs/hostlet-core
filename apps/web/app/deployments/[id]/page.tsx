@@ -1,11 +1,13 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
 import { AppShell, DataList, LogViewer, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
 import { useDeploymentLogs } from "@/lib/useDeploymentLogs";
 import { shortSha } from "@/lib/app-status";
+import { api } from "@/lib/api";
 import {
   formatBytes,
   formatDuration,
@@ -37,6 +39,7 @@ type RuntimeMetadata = {
   healthCheckDurationMs?: number | null;
   bootDurationMs?: number | null;
   routingDurationMs?: number | null;
+  backingSpecHash?: string | null;
 };
 
 type Deployment = {
@@ -45,6 +48,7 @@ type Deployment = {
   status: string;
   commitSha?: string | null;
   failure?: string | null;
+  failureCode?: string | null;
   runtimeMetadata?: RuntimeMetadata | null;
   queue?: DeploymentQueue | null;
 };
@@ -66,6 +70,8 @@ function queueMessage(queue?: DeploymentQueue | null) {
 
 export default function DeploymentDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
+  const [approvingBacking, setApprovingBacking] = useState(false);
   const { deployment, logs, socketState, socketMessage } = useDeploymentLogs<Deployment>(id);
 
   const status = deployment?.status || "loading";
@@ -76,6 +82,22 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
   const packaging = isCompose ? "Docker Compose" : metadata?.packagingStrategy || "auto";
   const framework = isCompose ? metadata?.webService ? `service ${metadata.webService}` : "Compose service" : metadata?.detectedFramework || "Repository Dockerfile";
   const queueText = queueMessage(deployment?.queue);
+  const approveBackingChange = async () => {
+    if (!deployment?.appId || !deployment.commitSha || !metadata?.backingSpecHash) return;
+    setApprovingBacking(true);
+    try {
+      const next = await api<{ deploymentId: string }>(`/api/apps/${deployment.appId}/deploy`, {
+        method: "POST",
+        body: JSON.stringify({
+          commitSha: deployment.commitSha,
+          approvedBackingSpecHash: metadata.backingSpecHash,
+        }),
+      });
+      router.push(`/deployments/${next.deploymentId}`);
+    } finally {
+      setApprovingBacking(false);
+    }
+  };
 
   return (
     <AppShell>
@@ -118,7 +140,17 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                   action={deployment?.appId && <Link className="button-secondary" href={`/apps/${deployment.appId}`}>Open app detail</Link>}
                 />
               )}
-              {deployment?.failure && <Notice tone="danger" description={deployment.failure} />}
+              {deployment?.failure && (
+                <Notice
+                  tone="danger"
+                  description={deployment.failure}
+                  action={deployment.failureCode === "compose_backing_change_requires_approval" ? (
+                    <button className="button-secondary" disabled={approvingBacking} onClick={approveBackingChange}>
+                      {approvingBacking ? "Approving..." : "Approve maintenance update"}
+                    </button>
+                  ) : undefined}
+                />
+              )}
               {metadata && Object.keys(metadata).length > 0 && (
                 <Panel>
                   <SectionHeader title="Deployment metrics" />

@@ -554,12 +554,41 @@ pub(crate) async fn apply_caddy_route(
     domain: &str,
     port: u16,
 ) -> anyhow::Result<()> {
+    apply_caddy_route_inner(cfg, deployment_id, app, domain, port, None).await
+}
+
+pub(crate) async fn apply_caddy_route_versioned(
+    cfg: &Config,
+    deployment_id: Uuid,
+    app: &str,
+    domain: &str,
+    port: u16,
+    generation: i64,
+) -> anyhow::Result<()> {
+    apply_caddy_route_inner(cfg, deployment_id, app, domain, port, Some(generation)).await
+}
+
+async fn apply_caddy_route_inner(
+    cfg: &Config,
+    deployment_id: Uuid,
+    app: &str,
+    domain: &str,
+    port: u16,
+    generation: Option<i64>,
+) -> anyhow::Result<()> {
+    let _route_guard = route_write_lock().lock().await;
     let dir = PathBuf::from("/etc/caddy/hostlet");
     tokio::fs::create_dir_all(&dir).await?;
     let target = dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&dir, &target, domain).await?;
     let previous = tokio::fs::read(&target).await.ok();
-    write_route_file(&target, &render_caddy_route(app, domain, port)).await?;
+    let mut rendered = render_caddy_route(app, domain, port);
+    if let Some(generation) = generation {
+        rendered = format!(
+            "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{rendered}"
+        );
+    }
+    write_route_file(&target, &rendered).await?;
     let reload = run_log(
         cfg,
         deployment_id,
@@ -598,11 +627,53 @@ pub(crate) async fn apply_local_caddy_route(
     domain: &str,
     port: u16,
 ) -> anyhow::Result<()> {
+    apply_local_caddy_route_inner(cfg, deployment_id, router, app, domain, port, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_local_caddy_route_versioned(
+    cfg: &Config,
+    deployment_id: Uuid,
+    router: &LocalRouter,
+    app: &str,
+    domain: &str,
+    port: u16,
+    generation: i64,
+) -> anyhow::Result<()> {
+    apply_local_caddy_route_inner(
+        cfg,
+        deployment_id,
+        router,
+        app,
+        domain,
+        port,
+        Some(generation),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_local_caddy_route_inner(
+    cfg: &Config,
+    deployment_id: Uuid,
+    router: &LocalRouter,
+    app: &str,
+    domain: &str,
+    port: u16,
+    generation: Option<i64>,
+) -> anyhow::Result<()> {
+    let _route_guard = route_write_lock().lock().await;
     tokio::fs::create_dir_all(&router.snippets_dir).await?;
     let target = router.snippets_dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&router.snippets_dir, &target, domain).await?;
     let previous = tokio::fs::read(&target).await.ok();
-    write_route_file(&target, &render_local_caddy_route(app, domain, port)).await?;
+    let mut rendered = render_local_caddy_route(app, domain, port);
+    if let Some(generation) = generation {
+        rendered = format!(
+            "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{rendered}"
+        );
+    }
+    write_route_file(&target, &rendered).await?;
     if let Err(err) = run_router_reload(cfg, deployment_id, router).await {
         restore_route_file(&target, previous).await?;
         let _ = run_router_reload_quiet(router).await;

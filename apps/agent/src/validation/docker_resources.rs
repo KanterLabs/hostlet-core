@@ -295,6 +295,60 @@ pub(crate) async fn remove_compose_project_resources(project: &str) -> anyhow::R
     Ok(())
 }
 
+pub(crate) async fn compose_projects_for_app(app_id: Uuid) -> anyhow::Result<HashSet<String>> {
+    let output = command_output(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("label=hostlet.app_id={app_id}"),
+            "--format",
+            "{{.Label \"com.docker.compose.project\"}}",
+        ],
+        Duration::from_secs(20),
+    )
+    .await?;
+    if !output.status.success() {
+        bail!("failed to enumerate app compose projects");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|project| valid_compose_project_name(project))
+        .map(str::to_string)
+        .collect())
+}
+
+pub(crate) async fn ensure_compose_network(network: &str, project: &str) -> anyhow::Result<()> {
+    if !valid_compose_project_name(project)
+        || !network.starts_with(project)
+        || !network.ends_with("_default")
+    {
+        bail!("refusing to create invalid managed compose network");
+    }
+    let inspected = command_output(
+        "docker",
+        &["network", "inspect", network],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if inspected.status.success() {
+        return Ok(());
+    }
+    let label = format!("com.docker.compose.project={project}");
+    let created = command_output(
+        "docker",
+        &["network", "create", "--label", &label, network],
+        Duration::from_secs(30),
+    )
+    .await?;
+    if !created.status.success() {
+        bail!("failed to create stable compose network");
+    }
+    Ok(())
+}
+
 /// The label filter scopes the listing, but only names under the validated
 /// project prefix may be removed (e.g. `<project>_default`).
 fn compose_network_belongs_to_project(network: &str, project: &str) -> bool {

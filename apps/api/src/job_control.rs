@@ -266,19 +266,31 @@ async fn retry_deployment_job(
 fn cancel_agent_job_update_sql() -> String {
     format!(
         r#"
-        UPDATE agent_jobs j
-        SET status='cancelled',
-            failure_summary='Cancelled by owner before the agent started work.',
-            last_error='Cancelled by owner before the agent started work.',
-            payload_json=j.payload_json - 'env' - 'github_token',
-            finished_at=now(),
-            updated_at=now()
-        FROM servers s
-        WHERE j.id=$1
-          AND s.id=j.server_id
-          {}
-          AND j.status='queued'
-        RETURNING j.app_id,j.deployment_id
+        WITH updated AS (
+          UPDATE agent_jobs j
+          SET status=CASE WHEN j.status='queued' THEN 'cancelled' ELSE j.status END,
+              cancel_requested_at=CASE WHEN j.status IN ('claimed','running') THEN now() ELSE j.cancel_requested_at END,
+              failure_summary=CASE WHEN j.status='queued' THEN 'Cancelled by owner before the agent started work.' ELSE j.failure_summary END,
+              last_error=CASE WHEN j.status='queued' THEN 'Cancelled by owner before the agent started work.' ELSE j.last_error END,
+              payload_json=CASE WHEN j.status='queued' THEN j.payload_json - 'env' - 'github_token' ELSE j.payload_json END,
+              finished_at=CASE WHEN j.status='queued' THEN now() ELSE j.finished_at END,
+              updated_at=now()
+          FROM servers s
+          WHERE j.id=$1
+            AND s.id=j.server_id
+            {}
+            AND j.status IN ('queued','claimed','running')
+          RETURNING j.app_id,j.deployment_id,j.status
+        ), cancelled_deployment AS (
+          UPDATE deployments d
+          SET status='canceled',failure_code='cancelled_by_owner',
+              failure_summary='Cancelled by owner before the agent started work.',finished_at=now()
+          FROM updated u
+          WHERE u.status='cancelled' AND d.id=u.deployment_id
+            AND d.status = ANY(ARRAY['queued','running','building','starting','health_checking','routing'])
+          RETURNING d.id
+        )
+        SELECT app_id,deployment_id FROM updated
         "#,
         agent_job_visibility_predicate(2, 3)
     )
@@ -361,6 +373,7 @@ mod tests {
     #[test]
     fn cancel_scrubs_secret_payload_fields() {
         let sql = cancel_agent_job_update_sql();
-        assert!(sql.contains("payload_json=j.payload_json - 'env' - 'github_token'"));
+        assert!(sql.contains("j.payload_json - 'env' - 'github_token'"));
+        assert!(sql.contains("cancel_requested_at"));
     }
 }

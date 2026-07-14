@@ -48,6 +48,32 @@ struct ReportedDeploymentFailure {
     message: String,
 }
 
+#[derive(Debug)]
+struct CancelledJob;
+
+impl std::fmt::Display for CancelledJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("deployment was cancelled before activation")
+    }
+}
+
+impl std::error::Error for CancelledJob {}
+
+#[derive(Debug)]
+pub(crate) struct UnacknowledgedActivation(String);
+
+impl std::fmt::Display for UnacknowledgedActivation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "activation acknowledgement is pending: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnacknowledgedActivation {}
+
+pub(crate) fn unacknowledged_activation(error: impl std::fmt::Display) -> anyhow::Error {
+    UnacknowledgedActivation(error.to_string()).into()
+}
+
 impl ReportedDeploymentFailure {
     fn new(message: String) -> Self {
         Self { message }
@@ -94,6 +120,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         local_router: local_router_config()?,
     };
     tokio::fs::create_dir_all(&cfg.workdir).await?;
+    log_recoverable_journals(&cfg).await?;
     log_docker_tooling().await;
     // The single-job slot outlives connect_loop so a spawned job keeps running
     // across a WS drop/reconnect: the reconnected loop cannot claim a second job
@@ -187,7 +214,10 @@ pub(crate) async fn claim_and_run_job(cfg: &Config) {
         .post(format!("{}/api/agent/jobs/claim", cfg.api_url))
         .header("x-hostlet-server-id", cfg.server_id.to_string())
         .header("x-hostlet-agent-token", &cfg.agent_token)
-        .json(&json!({"agent_id": cfg.server_id.to_string()}))
+        .json(&json!({
+            "agent_id": cfg.server_id.to_string(),
+            "protocol_version": hostlet_contracts::DEPLOYMENT_PROTOCOL_VERSION
+        }))
         .send()
         .await;
     let Ok(response) = response else {
@@ -222,14 +252,69 @@ pub(crate) async fn claim_and_run_job(cfg: &Config) {
     else {
         return;
     };
-    match run_claimed_job_with_lease(cfg.clone(), job_id, payload.clone()).await {
-        Ok(()) => complete_claimed_job(cfg, job_id, "success", None).await,
+    let Some(claim_token) = job
+        .get("claimToken")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+    else {
+        tracing::warn!(%job_id, "claimed job did not include a claim token");
+        return;
+    };
+    let deployment_id = payload
+        .get("deployment_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok());
+    if let Some(deployment_id) = deployment_id {
+        let app_id = payload
+            .get("app_id")
+            .and_then(|v| v.as_str())
+            .and_then(|v| Uuid::parse_str(v).ok());
+        if let Err(err) =
+            start_deployment_journal(cfg, deployment_id, job_id, claim_token, app_id).await
+        {
+            tracing::warn!(%deployment_id, error = %err, "could not persist deployment journal");
+            return;
+        }
+    }
+    match run_claimed_job_with_lease(cfg.clone(), job_id, claim_token, payload.clone()).await {
+        Ok(()) => {
+            if complete_claimed_job(cfg, job_id, claim_token, "success", None).await {
+                if let Some(deployment_id) = deployment_id {
+                    finish_deployment_journal(cfg, deployment_id).await;
+                }
+            }
+        }
         Err(err) => {
+            if err.downcast_ref::<UnacknowledgedActivation>().is_some() {
+                tracing::warn!(%job_id, error = %err, "leaving deployment claim recoverable until activation can be reconciled");
+                return;
+            }
             let message = deployment_failure_message(&err);
-            if !deployment_status_already_reported(&err) {
+            let cancelled = err.downcast_ref::<CancelledJob>().is_some();
+            if cancelled {
+                if let Some(deployment_id) = payload
+                    .get("deployment_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| Uuid::parse_str(v).ok())
+                {
+                    status(cfg, deployment_id, "canceled", Some(&message)).await;
+                }
+            } else if !deployment_status_already_reported(&err) {
                 report_deployment_failure(cfg, &payload, &message).await;
             }
-            complete_claimed_job(cfg, job_id, "failed", Some(&message)).await;
+            if complete_claimed_job(
+                cfg,
+                job_id,
+                claim_token,
+                if cancelled { "cancelled" } else { "failed" },
+                Some(&message),
+            )
+            .await
+            {
+                if let Some(deployment_id) = deployment_id {
+                    finish_deployment_journal(cfg, deployment_id).await;
+                }
+            }
             tracing::warn!("claimed job failed: {message}");
         }
     }
@@ -238,36 +323,93 @@ pub(crate) async fn claim_and_run_job(cfg: &Config) {
 pub(crate) async fn run_claimed_job_with_lease(
     cfg: Config,
     job_id: Uuid,
+    claim_token: Uuid,
     payload: Value,
 ) -> anyhow::Result<()> {
-    job_status(&cfg, job_id, "running", None).await;
+    heartbeat_job(&cfg, job_id, claim_token, "running").await?;
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
     let renew_cfg = cfg.clone();
     let renew = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut failures = 0u8;
         loop {
             interval.tick().await;
-            job_status(&renew_cfg, job_id, "running", None).await;
+            match heartbeat_job(&renew_cfg, job_id, claim_token, "running").await {
+                Ok(cancel_requested) => {
+                    failures = 0;
+                    if cancel_requested {
+                        let _ = cancel_tx.send(true);
+                        break;
+                    }
+                }
+                Err(err) => {
+                    failures = failures.saturating_add(1);
+                    tracing::warn!(%job_id, error = %err, failures, "deployment lease renewal failed");
+                    // Stop before the five-minute lease can be reassigned. The
+                    // next claim reconciles deterministic resources/journal.
+                    if failures >= 4 {
+                        let _ = cancel_tx.send(true);
+                        break;
+                    }
+                }
+            }
         }
     });
-    let result = handle_job(cfg, payload).await;
+    let result = tokio::select! {
+        result = handle_job(cfg, payload) => result,
+        _ = async {
+            while !*cancel_rx.borrow() {
+                if cancel_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        } => Err(CancelledJob.into()),
+    };
     renew.abort();
     result
+}
+
+async fn heartbeat_job(
+    cfg: &Config,
+    job_id: Uuid,
+    claim_token: Uuid,
+    phase: &str,
+) -> anyhow::Result<bool> {
+    let response = cfg
+        .http
+        .post(format!("{}/api/agent/jobs/{job_id}/heartbeat", cfg.api_url))
+        .header("x-hostlet-server-id", cfg.server_id.to_string())
+        .header("x-hostlet-agent-token", &cfg.agent_token)
+        .json(&json!({"claimToken": claim_token, "phase": phase}))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(response
+        .json::<Value>()
+        .await?
+        .get("cancelRequested")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
 }
 
 pub(crate) async fn complete_claimed_job(
     cfg: &Config,
     id: Uuid,
+    claim_token: Uuid,
     status: &str,
     failure: Option<&str>,
-) {
-    let _ = cfg
-        .http
+) -> bool {
+    cfg.http
         .post(format!("{}/api/agent/jobs/{id}/complete", cfg.api_url))
         .header("x-hostlet-server-id", cfg.server_id.to_string())
         .header("x-hostlet-agent-token", &cfg.agent_token)
-        .json(&json!({"status":status,"failure":failure}))
+        .json(&json!({"status":status,"failure":failure,"claimToken":claim_token}))
         .send()
-        .await;
+        .await
+        .is_ok_and(|response| {
+            response.status().is_success()
+                || (status == "success" && response.status() == reqwest::StatusCode::NOT_FOUND)
+        })
 }
 
 pub(crate) async fn handle_ws_text(cfg: &Config, job_slot: &Arc<AtomicBool>, text: &str) {

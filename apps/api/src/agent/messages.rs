@@ -162,6 +162,7 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
          container_name=COALESCE($3,container_name), \
          published_port=COALESCE($4,published_port), \
          failure_summary=$5, \
+         failure_code=COALESCE($11,failure_code), \
          compose_project=COALESCE($6,compose_project), \
          runtime_metadata=CASE WHEN $7::jsonb IS NULL THEN runtime_metadata ELSE $7::jsonb END, \
          finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END \
@@ -177,6 +178,7 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
     .bind(id)
     .bind(server_id)
     .bind(crate::deploy::ACTIVE_DEPLOYMENT_STATUSES)
+    .bind(msg.get("failure_code").and_then(|v| v.as_str()))
     .execute(&state.db)
     .await
     .map(|done| done.rows_affected())
@@ -647,12 +649,10 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
 /// Handle a `reconcile_request` event posted by the agent when it detects that
 /// a current deployment has lost its container.
 ///
-/// Agent-originated redeploy is intentionally disabled: the same long-lived
-/// agent token that authenticates health events also authenticates job claims,
-/// and redeploy jobs contain decrypted env vars plus transient GitHub token
-/// material. Runtime health events remain the API-side source of truth for
-/// operators and future server-side repair policy.
-async fn handle_reconcile_request(_state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+/// The API, not the agent, reconstructs the repair job from server-side app
+/// configuration. Requests are current-deployment scoped, deduplicated by the
+/// active-deploy lock, and rate-limited through the audit trail.
+async fn handle_reconcile_request(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
     let (Some(app_id), Some(deployment_id)) =
         (msg_uuid(msg, "app_id"), msg_uuid(msg, "deployment_id"))
     else {
@@ -665,13 +665,50 @@ async fn handle_reconcile_request(_state: &AppState, server_id: Uuid, msg: &serd
         return;
     }
 
-    tracing::warn!(
-        %server_id,
-        %app_id,
-        %deployment_id,
-        reason,
-        "ignored agent reconcile_request; agent-originated secret-bearing redeploy is disabled"
-    );
+    let app = sqlx::query(
+        "SELECT a.user_id,d.commit_sha
+         FROM apps a JOIN deployments d ON d.id=a.current_deployment_id
+         WHERE a.id=$1 AND a.server_id=$2 AND d.id=$3
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_events e
+             WHERE e.app_id=a.id AND e.event_type='runtime_repair_requested'
+               AND e.created_at > now() - interval '15 minutes'
+           )",
+    )
+    .bind(app_id)
+    .bind(server_id)
+    .bind(deployment_id)
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(Some(app)) = app else {
+        return;
+    };
+    let user_id = app.get::<Uuid, _>("user_id");
+    let commit_sha = app.get::<String, _>("commit_sha");
+    match crate::deploy::create_and_send_deploy(state, user_id, app_id, &commit_sha).await {
+        Ok(repair_deployment_id) => {
+            let _ = sqlx::query(
+                "INSERT INTO audit_events
+                   (actor_type,actor_id,event_type,app_id,deployment_id,metadata_json)
+                 VALUES ('agent',$1,'runtime_repair_requested',$2,$3,
+                         jsonb_build_object('replacesDeploymentId',$4,'reason',$5))",
+            )
+            .bind(server_id.to_string())
+            .bind(app_id)
+            .bind(repair_deployment_id)
+            .bind(deployment_id)
+            .bind(reason)
+            .execute(&state.db)
+            .await;
+        }
+        Err(err) => tracing::warn!(
+            %server_id,
+            %app_id,
+            %deployment_id,
+            error = %err,
+            "runtime repair request was not enqueued"
+        ),
+    }
 }
 
 pub(in crate::agent) async fn prune_health_events(state: &AppState, app_id: Uuid) {

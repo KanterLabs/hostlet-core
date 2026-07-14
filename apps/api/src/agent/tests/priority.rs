@@ -70,6 +70,7 @@ async fn claim_one(state: &AppState, headers: &HeaderMap) -> Uuid {
         headers.clone(),
         Json(ClaimJobRequest {
             agent_id: Some("ci-agent".into()),
+            protocol_version: 2,
         }),
     )
     .await

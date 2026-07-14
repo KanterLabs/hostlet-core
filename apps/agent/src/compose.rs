@@ -1,4 +1,6 @@
 use super::*;
+mod cleanup;
+pub(crate) use cleanup::*;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct HostletManifest {
@@ -171,6 +173,30 @@ pub(crate) async fn deploy_compose(
     let compose_text = remap_host_binds_to_named_volumes(&compose_text)?;
     tokio::fs::write(compose_file, &compose_text).await?;
     validate_compose_subset(&compose_text, web_service)?;
+    let backing_spec_hash = compose_backing_spec_hash(&cfg, &compose_text, web_service)?;
+    let expected_backing_spec_hash = p.get("expected_backing_spec_hash").and_then(Value::as_str);
+    let approved_backing_spec_hash = p.get("approved_backing_spec_hash").and_then(Value::as_str);
+    if expected_backing_spec_hash.is_some_and(|expected| expected != backing_spec_hash)
+        && approved_backing_spec_hash != Some(backing_spec_hash.as_str())
+    {
+        let failure = "Compose backing-service configuration changed. Review and approve the maintenance update before deploying.";
+        status_extra(
+            &cfg,
+            deployment_id,
+            "failed",
+            StatusDetails {
+                failure: Some(failure),
+                failure_code: Some("compose_backing_change_requires_approval"),
+                runtime_metadata: Some(json!({
+                    "runtime": "compose",
+                    "backingSpecHash": backing_spec_hash,
+                })),
+                ..StatusDetails::default()
+            },
+        )
+        .await;
+        return Err(reported_deployment_failure(failure.to_string()));
+    }
     let port = manifest.compose.port.unwrap_or(fallback_port as u16);
     validate_port(port as i64)?;
     let health_path = manifest
@@ -179,21 +205,23 @@ pub(crate) async fn deploy_compose(
         .as_deref()
         .unwrap_or(fallback_health_path);
     validate_health_path(health_path)?;
-    let project = compose_project_name(app_id);
+    let stable_project = compose_project_name(app_id);
+    let project = compose_release_project_name(deployment_id);
     let override_file = build_dir.join("compose.hostlet.yml");
+    let release_override_file = build_dir.join("compose.release.hostlet.yml");
     if let Some(parent) = override_file.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(
-        &override_file,
-        compose_override_yaml(&compose_text, web_service, port, app_id, deployment_id, &p),
-    )
-    .await?;
+    let base_override =
+        compose_override_yaml(&compose_text, web_service, port, app_id, deployment_id, &p);
+    tokio::fs::write(&override_file, &base_override).await?;
     log(
         &cfg,
         deployment_id,
         "stdout",
-        &format!("Detected Hostlet Compose app. Project {project}, web service {web_service}."),
+        &format!(
+            "Detected Hostlet Compose app. Stable backing project {stable_project}, release {project}, web service {web_service}."
+        ),
     )
     .await;
     // The compose process environment supplies `${VAR}` interpolation: the
@@ -221,13 +249,37 @@ pub(crate) async fn deploy_compose(
         &compose_env_refs,
         "docker",
         &compose_invocation(
-            &project,
+            &stable_project,
             compose_file,
             &override_file,
             &["config", "--quiet"],
         )?,
     )
     .await?;
+    let backing_services =
+        hostlet_contracts::compose::parse_compose_services(&compose_text, web_service)
+            .into_iter()
+            .filter(|service| service.role == "backing")
+            .map(|service| service.name)
+            .collect::<Vec<_>>();
+    if !backing_services.is_empty() {
+        let mut trailing = vec!["up", "-d", "--build"];
+        trailing.extend(backing_services.iter().map(String::as_str));
+        run_log_in_dir_env(
+            &cfg,
+            deployment_id,
+            project_dir,
+            &compose_env_refs,
+            "docker",
+            &compose_invocation(&stable_project, compose_file, &override_file, &trailing)?,
+        )
+        .await?;
+    } else {
+        ensure_compose_network(&format!("{stable_project}_default"), &stable_project).await?;
+    }
+    let release_override =
+        compose_release_override_yaml(&base_override, &compose_text, web_service, &stable_project)?;
+    tokio::fs::write(&release_override_file, release_override).await?;
     run_log_in_dir_env(
         &cfg,
         deployment_id,
@@ -237,8 +289,8 @@ pub(crate) async fn deploy_compose(
         &compose_invocation(
             &project,
             compose_file,
-            &override_file,
-            &["up", "-d", "--build", "--remove-orphans"],
+            &release_override_file,
+            &["up", "-d", "--build", "--no-deps", web_service],
         )?,
     )
     .await?;
@@ -247,7 +299,7 @@ pub(crate) async fn deploy_compose(
         project_dir,
         &project,
         compose_file,
-        &override_file,
+        &release_override_file,
         web_service,
         &compose_env_refs,
     )
@@ -263,6 +315,8 @@ pub(crate) async fn deploy_compose(
         "targetPort": port,
         "healthPath": health_path,
         "project": project,
+        "stableProject": stable_project,
+        "backingSpecHash": backing_spec_hash,
         "appName": app_name,
         "composeUpDurationMs": container_start_duration_ms,
         "gitSyncDurationMs": git_sync_duration_ms,
@@ -324,25 +378,62 @@ pub(crate) async fn deploy_compose(
         container_start_duration_ms,
         health_check_duration.as_millis(),
     );
-    status(&cfg, deployment_id, "routing", None).await;
+    // Capture service facts before activation so the API can durably prepare
+    // the complete candidate in the same transaction as the pending pointer.
+    let mut services = compose_all_services(
+        project_dir,
+        &project,
+        compose_file,
+        &release_override_file,
+        &compose_text,
+        web_service,
+        &compose_env_refs,
+    )
+    .await;
+    if let Some(web) = services.iter_mut().find(|svc| svc.name == *web_service) {
+        web.target_port = Some(port as i32);
+        web.published_port = Some(internal_port as i32);
+        web.health_status = Some("healthy".to_string());
+    }
+    let route_generation = prepare_candidate_activation(
+        &cfg,
+        &p,
+        deployment_id,
+        web_image,
+        &container,
+        internal_port,
+        Some(&project),
+        runtime_metadata.clone(),
+        services,
+    )
+    .await?;
     let mut local_url = None;
     let routing_started = Instant::now();
     let routing_result = if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            apply_local_caddy_route(
+            apply_local_caddy_route_versioned(
                 &cfg,
                 deployment_id,
                 router,
                 route_key,
                 domain,
                 internal_port,
+                route_generation,
             )
             .await
         } else {
             Ok(())
         }
     } else {
-        apply_caddy_route(&cfg, deployment_id, route_key, domain, internal_port).await
+        apply_caddy_route_versioned(
+            &cfg,
+            deployment_id,
+            route_key,
+            domain,
+            internal_port,
+            route_generation,
+        )
+        .await
     };
     let runtime_metadata =
         add_routing_runtime_metadata(runtime_metadata, routing_started.elapsed().as_millis());
@@ -371,42 +462,35 @@ pub(crate) async fn deploy_compose(
             format!("localhost:{internal_port}")
         });
     }
-    // Enumerate every service in the stack so the API can persist one
-    // `deployment_services` row per service and the UI can render a card each.
-    // The web service is the only one Hostlet health-checks and host-publishes,
-    // so its health/published port are overlaid here onto the best-effort facts.
-    let mut services = compose_all_services(
-        project_dir,
-        &project,
-        compose_file,
-        &override_file,
-        &compose_text,
-        web_service,
-        &compose_env_refs,
-    )
-    .await;
-    if let Some(web) = services.iter_mut().find(|svc| svc.name == *web_service) {
-        web.target_port = Some(port as i32);
-        web.published_port = Some(internal_port as i32);
-        web.health_status = Some("healthy".to_string());
-    }
-    let services_json = serde_json::to_value(&services).ok();
-    status_extra(
+    commit_candidate_activation(
         &cfg,
+        &p,
         deployment_id,
-        "success",
-        StatusDetails {
-            container: Some(&container),
-            local_url: local_url.as_deref(),
-            published_port: Some(internal_port),
-            compose_project: Some(&project),
-            runtime_metadata: Some(runtime_metadata),
-            services: services_json,
-            ..StatusDetails::default()
-        },
+        route_generation,
+        local_url.as_deref(),
+        false,
     )
-    .await;
+    .await?;
     Ok(())
+}
+
+fn compose_backing_spec_hash(
+    cfg: &Config,
+    compose_text: &str,
+    web_service: &str,
+) -> anyhow::Result<String> {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(compose_text)?;
+    if let Some(services) = value
+        .get_mut("services")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        services.remove(serde_yaml::Value::String(web_service.to_string()));
+    }
+    let canonical = serde_yaml::to_string(&value)?;
+    Ok(hostlet_contracts::crypto::sign(
+        &cfg.job_signing_secret,
+        canonical.as_bytes(),
+    ))
 }
 
 fn compose_interpolation_env(p: &Value) -> Vec<(String, String)> {
@@ -436,39 +520,68 @@ pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     validate_port(port_value)?;
     let port = port_value as u16;
     validate_domain(domain)?;
-    status(&cfg, deployment_id, "routing", None).await;
+    run_quiet("docker", &["start", container]).await?;
+    wait_health(
+        &cfg,
+        deployment_id,
+        container,
+        port,
+        p.get("health_path").and_then(Value::as_str).unwrap_or("/"),
+    )
+    .await?;
+    let mut runtime_metadata = p
+        .get("target_runtime_metadata")
+        .cloned()
+        .unwrap_or_else(|| json!({"rollback": true}));
+    if let (Some(metadata), Some(target)) = (
+        runtime_metadata.as_object_mut(),
+        p.get("target_deployment_id").and_then(Value::as_str),
+    ) {
+        metadata.insert("rollbackTargetDeploymentId".into(), json!(target));
+    }
+    let route_generation = prepare_candidate_activation(
+        &cfg,
+        &p,
+        deployment_id,
+        p.get("target_image").and_then(Value::as_str),
+        container,
+        port,
+        p.get("target_compose_project").and_then(Value::as_str),
+        runtime_metadata,
+        Vec::new(),
+    )
+    .await?;
     if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            apply_local_caddy_route(&cfg, deployment_id, router, &route_key, domain, port).await?;
-        }
-        let local_url = cfg.local_router.as_ref().map(|_| domain);
-        status_extra(
-            &cfg,
-            deployment_id,
-            "rolled_back",
-            StatusDetails {
-                container: Some(container),
-                local_url,
-                published_port: Some(port),
-                ..StatusDetails::default()
-            },
-        )
-        .await;
-        return Ok(());
-    }
-    match apply_caddy_route(&cfg, deployment_id, &route_key, domain, port).await {
-        Ok(_) => {
-            status_extra(
+            apply_local_caddy_route_versioned(
                 &cfg,
                 deployment_id,
-                "rolled_back",
-                StatusDetails {
-                    container: Some(container),
-                    published_port: Some(port),
-                    ..StatusDetails::default()
-                },
+                router,
+                &route_key,
+                domain,
+                port,
+                route_generation,
             )
-            .await
+            .await?;
+        }
+        let local_url = cfg.local_router.as_ref().map(|_| domain);
+        commit_candidate_activation(&cfg, &p, deployment_id, route_generation, local_url, true)
+            .await?;
+        return Ok(());
+    }
+    match apply_caddy_route_versioned(
+        &cfg,
+        deployment_id,
+        &route_key,
+        domain,
+        port,
+        route_generation,
+    )
+    .await
+    {
+        Ok(_) => {
+            commit_candidate_activation(&cfg, &p, deployment_id, route_generation, None, true)
+                .await?
         }
         Err(err) => {
             status(
@@ -483,131 +596,6 @@ pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-pub(crate) async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
-    let app_id = p
-        .get("app_id")
-        .and_then(|v| v.as_str())
-        .and_then(|v| Uuid::parse_str(v).ok());
-    let route_key = p
-        .get("route_key")
-        .and_then(|v| v.as_str())
-        .map(app_slug)
-        .unwrap_or_else(|| app_slug(p["app_id"].as_str().unwrap_or("app")));
-    if let Some(project) = p.get("compose_project").and_then(|v| v.as_str()) {
-        remove_compose_project_resources(project).await?;
-    }
-    let containers = p
-        .get("containers")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for container in containers.iter().filter_map(|v| v.as_str()) {
-        if !valid_container_name(container) {
-            bail!("refusing to remove invalid managed container name during teardown");
-        }
-        run_quiet_absent_ok("docker", &["rm", "-f", container], &["No such container"]).await?;
-    }
-    let images = p
-        .get("images")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for image in images.iter().filter_map(|v| v.as_str()) {
-        if !valid_hostlet_image(image) {
-            bail!("refusing to remove invalid managed image name during teardown");
-        }
-        run_quiet_absent_ok("docker", &["image", "rm", "-f", image], &["No such image"]).await?;
-    }
-    if cfg.local_mode {
-        if let Some(router) = &cfg.local_router {
-            remove_local_caddy_route(router, &route_key).await?;
-            run_router_reload_quiet(router).await?;
-        }
-        if let Some(app_id) = app_id {
-            remove_app_data_volume(app_id).await?;
-        }
-        return Ok(());
-    }
-    remove_caddy_route(&route_key).await?;
-    run_quiet("caddy", &["reload", "--config", "/etc/caddy/Caddyfile"]).await?;
-    if let Some(app_id) = app_id {
-        remove_app_data_volume(app_id).await?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn docker_cleanup_job(p: &Value) -> anyhow::Result<()> {
-    let dry_run = p.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
-    let keep_containers = string_set_from_array(p.get("keep_containers"));
-    let keep_images = string_set_from_array(p.get("keep_images"));
-
-    let containers = hostlet_containers_all().await?;
-    for container in containers {
-        let compose_managed = docker_compose_managed_container(&container).await?;
-        if cleanup_should_remove_container(&container, &keep_containers, compose_managed)?
-            && !dry_run
-        {
-            run_quiet_absent_ok("docker", &["rm", "-f", &container], &["No such container"])
-                .await?;
-        }
-    }
-
-    let images = hostlet_images().await?;
-    for image in images {
-        if !cleanup_should_remove_image(&image, &keep_images)? {
-            continue;
-        }
-        if !dry_run {
-            run_quiet_absent_ok("docker", &["image", "rm", "-f", &image], &["No such image"])
-                .await?;
-        }
-    }
-    Ok(())
-}
-
-/// Container name prefix that marks a deployment container — the ONLY kind of
-/// container cleanup may remove.  Other `hostlet-`-prefixed containers (the
-/// managed BuildKit daemon, `hostlet-ci-*` CI fixtures, the local caddy router)
-/// share the docker daemon, may belong to concurrent work, and must never be
-/// touched: cleanup runs automatically after every successful deploy, and on a
-/// shared host (e.g. a CI runner) reaping by the broad `hostlet-` prefix kills
-/// other jobs' BuildKit containers mid-build.
-const CLEANUP_CONTAINER_PREFIX: &str = "hostlet-app-";
-
-/// Image repository prefix that marks a deployment image — the only kind of
-/// image cleanup may remove.  Protects e.g. `hostlet/railpack-fixture-*`.
-const CLEANUP_IMAGE_PREFIX: &str = "hostlet/app-";
-
-fn cleanup_should_remove_container(
-    container: &str,
-    keep_containers: &HashSet<String>,
-    compose_managed: bool,
-) -> anyhow::Result<bool> {
-    if !container.starts_with(CLEANUP_CONTAINER_PREFIX) {
-        return Ok(false);
-    }
-    if keep_containers.contains(container) || compose_managed {
-        return Ok(false);
-    }
-    if !valid_container_name(container) {
-        bail!("refusing to clean invalid managed container name");
-    }
-    Ok(true)
-}
-
-fn cleanup_should_remove_image(image: &str, keep_images: &HashSet<String>) -> anyhow::Result<bool> {
-    if !image.starts_with(CLEANUP_IMAGE_PREFIX) {
-        return Ok(false);
-    }
-    if keep_images.contains(image) {
-        return Ok(false);
-    }
-    if !valid_hostlet_image(image) {
-        bail!("refusing to clean invalid managed image name");
-    }
-    Ok(true)
 }
 
 pub(crate) async fn run_log(
@@ -655,6 +643,7 @@ async fn run_log_streamed(
     )
     .await;
     let mut cmd = Command::new(bin);
+    cmd.kill_on_drop(true);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }

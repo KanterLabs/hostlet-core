@@ -11,6 +11,7 @@ Use this index for current Hostlet documentation. Historical plans, versioned va
 
 - [Deploying Apps](deploying-apps.md): Dockerfile apps, Railpack generated apps, Compose limits, state, and rollbacks.
 - [Operations](operations.md): updates, backups, restore, health checks, logs, and production deploys.
+- [Deployment Reliability](reliability.md): leases, fencing, crash recovery, atomic activation, and Compose isolation.
 
 ## Design And Safety
 

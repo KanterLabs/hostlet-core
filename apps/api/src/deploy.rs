@@ -1,4 +1,6 @@
 mod deploy_app;
+mod recovery;
+pub(crate) use recovery::*;
 
 use crate::{auth::request_context, state::AppState};
 use axum::{
@@ -50,6 +52,7 @@ pub async fn manual_deploy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(app_id): Path<Uuid>,
+    request: Option<Json<ManualDeployRequest>>,
 ) -> impl IntoResponse {
     let context = match request_context(&headers, &state).await {
         Ok(context) => context,
@@ -58,10 +61,26 @@ pub async fn manual_deploy(
         }
         Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
     };
-    match create_and_send_deploy(&state, context.user_id, app_id, "HEAD").await {
+    let request = request.map(|Json(value)| value).unwrap_or_default();
+    match create_and_send_deploy_with_approval(
+        &state,
+        context.user_id,
+        app_id,
+        request.commit_sha.as_deref().unwrap_or("HEAD"),
+        request.approved_backing_spec_hash.as_deref(),
+    )
+    .await
+    {
         Ok(id) => Json(json!({"deploymentId": id})).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualDeployRequest {
+    commit_sha: Option<String>,
+    approved_backing_spec_hash: Option<String>,
 }
 
 pub async fn get_deployment(
@@ -91,6 +110,7 @@ pub async fn get_deployment(
                 "status": status,
                 "commitSha": r.get::<String,_>("commit_sha"),
                 "failure": r.get::<Option<String>,_>("failure_summary"),
+                "failureCode": r.try_get::<Option<String>,_>("failure_code").ok().flatten(),
                 "runtimeMetadata": r.try_get::<serde_json::Value,_>("runtime_metadata").unwrap_or_else(|_| json!({})),
                 "queue": queue
             })).into_response()
@@ -276,6 +296,16 @@ pub async fn create_and_send_deploy(
     app_id: Uuid,
     commit_sha: &str,
 ) -> anyhow::Result<Uuid> {
+    create_and_send_deploy_with_approval(state, user_id, app_id, commit_sha, None).await
+}
+
+pub async fn create_and_send_deploy_with_approval(
+    state: &AppState,
+    user_id: Uuid,
+    app_id: Uuid,
+    commit_sha: &str,
+    approved_backing_spec_hash: Option<&str>,
+) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
     let app_row = sqlx::query(&format!(
         "SELECT {DEPLOY_APP_COLUMNS} FROM apps WHERE id=$1 AND user_id=$2"
@@ -341,13 +371,29 @@ pub async fn create_and_send_deploy(
     // This closes the create-many-then-deploy gap; see `ensure_server_has_capacity`
     // for the residual truly-concurrent-deploy race and why it is bounded/low-risk.
     crate::server_capacity::ensure_server_has_capacity(state, server_id, app_id).await?;
+    // Resolve mutable branch/HEAD requests before creating any durable work.
+    // Every queued deployment and retry is therefore pinned to immutable source.
+    let github_token = state
+        .repo_access_provider
+        .token_for_deploy(state, user_id, &app.repo_full_name)
+        .await?;
+    let commit_sha = resolve_commit_sha(
+        state,
+        &app.repo_full_name,
+        &app.branch,
+        commit_sha,
+        github_token.as_deref(),
+    )
+    .await?;
     let insert_deployment = sqlx::query(
-        "INSERT INTO deployments (app_id,server_id,status,commit_sha,started_at,runtime_kind) \
-         VALUES ($1,$2,'queued',$3,now(),$4) RETURNING id",
+        "INSERT INTO deployments
+           (app_id,server_id,status,commit_sha,started_at,runtime_kind,expected_current_deployment_id) \
+         VALUES ($1,$2,'queued',$3,now(),$4,
+                 (SELECT current_deployment_id FROM apps WHERE id=$1)) RETURNING id",
     )
     .bind(app_id)
     .bind(server_id)
-    .bind(commit_sha)
+    .bind(&commit_sha)
     .bind(&app.runtime_kind)
     .fetch_one(&state.db)
     .await;
@@ -380,18 +426,28 @@ pub async fn create_and_send_deploy(
         // installation token scoped to this repo. A provider error (e.g. cloud
         // App not installed for the repo) fails the deploy with an actionable
         // message rather than silently cloning unauthenticated.
-        let github_token = state
-            .repo_access_provider
-            .token_for_deploy(state, user_id, &app.repo_full_name)
-            .await?;
-        let payload = app.deploy_payload(
+        let mut payload = app.deploy_payload(
             deployment_id,
             app_id,
             route_key(app_id),
-            commit_sha,
+            &commit_sha,
             env,
             github_token,
         );
+        if let Some(object) = payload.as_object_mut() {
+            let expected_hash: Option<String> = sqlx::query_scalar(
+                "SELECT backing_spec_hash FROM app_compose_runtime WHERE app_id=$1",
+            )
+            .bind(app_id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
+            object.insert("expected_backing_spec_hash".into(), json!(expected_hash));
+            object.insert(
+                "approved_backing_spec_hash".into(),
+                json!(approved_backing_spec_hash),
+            );
+        }
         send_job(state, server_id, deployment_id, payload).await?;
         Ok(())
     }
@@ -417,6 +473,35 @@ pub async fn create_and_send_deploy(
     Ok(deployment_id)
 }
 
+async fn resolve_commit_sha(
+    state: &AppState,
+    repo: &str,
+    branch: &str,
+    requested: &str,
+    token: Option<&str>,
+) -> anyhow::Result<String> {
+    if requested != "HEAD" {
+        if requested.len() == 40 && requested.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(requested.to_ascii_lowercase());
+        }
+        anyhow::bail!("commit sha must be HEAD or a 40-character hex SHA");
+    }
+    let mut request = state.http.get(format!(
+        "https://api.github.com/repos/{repo}/commits/{branch}"
+    ));
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?.error_for_status()?;
+    let value = response.json::<serde_json::Value>().await?;
+    let sha = value
+        .get("sha")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow::anyhow!("GitHub did not return an immutable commit SHA"))?;
+    Ok(sha.to_ascii_lowercase())
+}
+
 pub(crate) async fn create_and_send_rollback(
     state: &AppState,
     user_id: Uuid,
@@ -424,7 +509,7 @@ pub(crate) async fn create_and_send_rollback(
 ) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
     let app = sqlx::query(
-        "SELECT server_id,current_deployment_id,domain,container_port,runtime_kind \
+        "SELECT server_id,current_deployment_id,domain,container_port,health_path,runtime_kind \
          FROM apps WHERE id=$1 AND user_id=$2",
     )
     .bind(app_id)
@@ -432,10 +517,10 @@ pub(crate) async fn create_and_send_rollback(
     .fetch_one(&state.db)
     .await?;
     if !rollback_supported_for_runtime(&app.get::<String, _>("runtime_kind")) {
-        anyhow::bail!("Compose rollback is not supported in Hostlet 0.5.0; redeploy the target revision instead");
+        anyhow::bail!("rollback is not supported for this runtime");
     }
     let current: Option<Uuid> = app.get("current_deployment_id");
-    let prev = sqlx::query("SELECT id,image_tag,container_name,published_port FROM deployments WHERE app_id=$1 AND status='success' AND ($2::uuid IS NULL OR id <> $2) ORDER BY finished_at DESC LIMIT 1")
+    let prev = sqlx::query("SELECT id,image_tag,container_name,published_port,compose_project,runtime_metadata FROM deployments WHERE app_id=$1 AND status='success' AND ($2::uuid IS NULL OR id <> $2) ORDER BY finished_at DESC LIMIT 1")
         .bind(app_id).bind(current).fetch_optional(&state.db).await?;
     let Some(prev) = prev else {
         anyhow::bail!("no previous successful deployment is available");
@@ -448,13 +533,17 @@ pub(crate) async fn create_and_send_rollback(
     let server_id: Uuid = app.get("server_id");
     let insert_rollback = sqlx::query(
         "INSERT INTO deployments \
-         (app_id,server_id,status,commit_sha,started_at,image_tag,container_name) \
-         VALUES ($1,$2,'queued','rollback',now(),$3,$4) RETURNING id",
+         (app_id,server_id,status,commit_sha,started_at,image_tag,container_name,
+          compose_project,runtime_kind,expected_current_deployment_id) \
+         VALUES ($1,$2,'queued','rollback',now(),$3,$4,$5,$6,$7) RETURNING id",
     )
     .bind(app_id)
     .bind(server_id)
     .bind(prev.get::<Option<String>, _>("image_tag"))
     .bind(prev.get::<Option<String>, _>("container_name"))
+    .bind(prev.get::<Option<String>, _>("compose_project"))
+    .bind(app.get::<String, _>("runtime_kind"))
+    .bind(current)
     .fetch_one(&state.db)
     .await;
     let rollback_id: Uuid = match insert_rollback {
@@ -485,7 +574,11 @@ pub(crate) async fn create_and_send_rollback(
             "target_container": prev.get::<Option<String>,_>("container_name"),
             "domain": app.get::<String,_>("domain"),
             "container_port": app.get::<i32,_>("container_port"),
+            "health_path": app.get::<String,_>("health_path"),
             "published_port": published_port,
+            "target_image": prev.get::<Option<String>,_>("image_tag"),
+            "target_compose_project": prev.get::<Option<String>,_>("compose_project"),
+            "target_runtime_metadata": prev.get::<serde_json::Value,_>("runtime_metadata"),
         });
         send_job(state, server_id, rollback_id, payload).await?;
         Ok(())
@@ -593,9 +686,9 @@ pub async fn enqueue_agent_job(
 ) -> anyhow::Result<Uuid> {
     let id = sqlx::query(
         "INSERT INTO agent_jobs
-           (server_id,app_id,deployment_id,job_type,status,payload_json,priority)
+           (server_id,app_id,deployment_id,job_type,status,payload_json,priority,protocol_version)
          VALUES ($1,$2,$3,$4,'queued',$5,
-                 $6 + COALESCE((SELECT queue_priority_offset FROM apps WHERE id = $2), 0))
+                 $6 + COALESCE((SELECT queue_priority_offset FROM apps WHERE id = $2), 0),$7)
          RETURNING id",
     )
     .bind(server_id)
@@ -604,6 +697,11 @@ pub async fn enqueue_agent_job(
     .bind(job_type)
     .bind(payload)
     .bind(priority)
+    .bind(if matches!(job_type, "deploy" | "rollback") {
+        hostlet_contracts::DEPLOYMENT_PROTOCOL_VERSION
+    } else {
+        1
+    })
     .fetch_one(&state.db)
     .await?
     .get::<Uuid, _>("id");
@@ -626,106 +724,6 @@ pub async fn job_signing_secret_for_server(
     }
 }
 
-/// Startup housekeeping: recover stale deployments, then run the best-effort
-/// automatic Docker cleanup sweep so superseded deployment containers are reaped.
-///
-/// Only the stale-deployment recovery can fail this call; a cleanup sweep
-/// failure is logged and swallowed so it never prevents startup.
-pub async fn recover_stale_deployments_and_cleanup(state: &AppState) -> anyhow::Result<u64> {
-    let recovered = recover_stale_deployments(state).await?;
-    crate::cleanup::auto_cleanup_sweep(state).await;
-    Ok(recovered)
-}
-
-pub async fn recover_stale_deployments(state: &AppState) -> anyhow::Result<u64> {
-    let result = sqlx::query(
-        "UPDATE deployments
-         SET status='failed',
-             failure_summary=COALESCE(failure_summary, 'Deployment was interrupted before completion. Start a new deployment to retry.'),
-             finished_at=now()
-         WHERE status = ANY($1)
-           AND COALESCE(started_at, created_at) < now() - interval '30 minutes'",
-    )
-    .bind(ACTIVE_DEPLOYMENT_STATUSES)
-    .execute(&state.db)
-    .await?;
-    Ok(result.rows_affected())
-}
-
-/// Marks a deployment row 'failed' when startup fails after the INSERT.
-/// Prevents the row from sitting in 'queued'/'running' and blocking future deploys
-/// for the 30-minute stale-recovery window.  DB errors are swallowed with a warning
-/// because this is best-effort cleanup on an already-erroring path.
-pub(crate) async fn fail_deployment_row(state: &AppState, deployment_id: Uuid, summary: &str) {
-    if let Err(err) = sqlx::query(
-        "UPDATE deployments \
-         SET status='failed', failure_summary=$2, finished_at=now() \
-         WHERE id=$1 AND status = ANY($3)",
-    )
-    .bind(deployment_id)
-    .bind(summary)
-    .bind(ACTIVE_DEPLOYMENT_STATUSES)
-    .execute(&state.db)
-    .await
-    {
-        tracing::warn!(
-            error = %err,
-            %deployment_id,
-            "failed to mark deployment row as failed during cleanup"
-        );
-    }
-}
-
-/// Advances a deployment from 'queued' to 'running' (best-effort, idempotent).
-/// Uses a status guard so the agent's own first report cannot be backtracked.
-/// Any DB error is logged and swallowed; `send_job` must not fail after the job
-/// is already enqueued.
-pub(crate) async fn mark_deployment_running(state: &AppState, deployment_id: Uuid) {
-    if let Err(err) =
-        sqlx::query("UPDATE deployments SET status='running' WHERE id=$1 AND status='queued'")
-            .bind(deployment_id)
-            .execute(&state.db)
-            .await
-    {
-        tracing::warn!(
-            error = %err,
-            %deployment_id,
-            "failed to mark deployment running after enqueue"
-        );
-    }
-}
-
-pub(crate) async fn ensure_no_active_deployment(
-    state: &AppState,
-    app_id: Uuid,
-) -> anyhow::Result<()> {
-    let active = sqlx::query(
-        "SELECT id,status FROM deployments WHERE app_id=$1 AND status = ANY($2) LIMIT 1",
-    )
-    .bind(app_id)
-    .bind(ACTIVE_DEPLOYMENT_STATUSES)
-    .fetch_optional(&state.db)
-    .await?;
-    if let Some(row) = active {
-        anyhow::bail!(
-            "deployment {} is already {} for this app",
-            row.get::<Uuid, _>("id"),
-            row.get::<String, _>("status")
-        );
-    }
-    Ok(())
-}
-
-fn is_active_deploy_unique_violation(err: &sqlx::Error) -> bool {
-    let Some(db_err) = err.as_database_error() else {
-        return false;
-    };
-    db_err.code().as_deref() == Some("23505")
-        && db_err
-            .message()
-            .contains("idx_deployments_one_active_per_app")
-}
-
 #[cfg(test)]
 fn is_active_deployment_status(status: &str) -> bool {
     ACTIVE_DEPLOYMENT_STATUSES.contains(&status)
@@ -736,7 +734,7 @@ fn route_key(app_id: Uuid) -> String {
 }
 
 fn rollback_supported_for_runtime(runtime_kind: &str) -> bool {
-    runtime_kind != "compose"
+    matches!(runtime_kind, "single" | "compose")
 }
 
 /// Which storage quota scope was exceeded, determining the user-facing message.
@@ -814,9 +812,10 @@ mod tests {
     }
 
     #[test]
-    fn compose_rollback_is_disabled_for_release() {
+    fn blue_green_runtimes_support_rollback() {
         assert!(rollback_supported_for_runtime("single"));
-        assert!(!rollback_supported_for_runtime("compose"));
+        assert!(rollback_supported_for_runtime("compose"));
+        assert!(!rollback_supported_for_runtime("unknown"));
     }
 
     #[test]

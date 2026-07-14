@@ -194,25 +194,45 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         container_start_duration_ms,
         health_check_duration.as_millis(),
     );
-    status(&cfg, deployment_id, "routing", None).await;
+    let route_generation = prepare_candidate_activation(
+        &cfg,
+        &p,
+        deployment_id,
+        Some(&image),
+        &container,
+        internal_port,
+        None,
+        runtime_metadata.clone(),
+        Vec::new(),
+    )
+    .await?;
     let mut local_url = None;
     let routing_started = Instant::now();
     let routing_result = if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            apply_local_caddy_route(
+            apply_local_caddy_route_versioned(
                 &cfg,
                 deployment_id,
                 router,
                 &route_key,
                 domain,
                 internal_port,
+                route_generation,
             )
             .await
         } else {
             Ok(())
         }
     } else {
-        apply_caddy_route(&cfg, deployment_id, &route_key, domain, internal_port).await
+        apply_caddy_route_versioned(
+            &cfg,
+            deployment_id,
+            &route_key,
+            domain,
+            internal_port,
+            route_generation,
+        )
+        .await
     };
     let runtime_metadata =
         add_routing_runtime_metadata(runtime_metadata, routing_started.elapsed().as_millis());
@@ -249,20 +269,15 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         .await;
         local_url = Some(url);
     }
-    status_extra(
+    commit_candidate_activation(
         &cfg,
+        &p,
         deployment_id,
-        "success",
-        StatusDetails {
-            image: Some(&image),
-            container: Some(&container),
-            local_url: local_url.as_deref(),
-            published_port: Some(internal_port),
-            runtime_metadata: Some(runtime_metadata),
-            ..StatusDetails::default()
-        },
+        route_generation,
+        local_url.as_deref(),
+        false,
     )
-    .await;
+    .await?;
     Ok(())
 }
 
@@ -520,6 +535,43 @@ async fn run_app_container(
     hardening: ContainerHardening,
     p: &Value,
 ) -> anyhow::Result<u16> {
+    // At-least-once delivery may replay after Docker created the candidate but
+    // before Core acknowledged it. Reuse an exact deterministic candidate;
+    // replace only this deployment's conflicting name.
+    if let Ok(output) = command_output(
+        "docker",
+        &[
+            "inspect",
+            "-f",
+            "{{.Config.Image}}\t{{.State.Running}}",
+            container,
+        ],
+        Duration::from_secs(15),
+    )
+    .await
+    {
+        if output.status.success() {
+            let facts = String::from_utf8_lossy(&output.stdout);
+            let mut parts = facts.trim().split('\t');
+            let existing_image = parts.next().unwrap_or_default();
+            let running = parts.next() == Some("true");
+            if existing_image == image {
+                if !running {
+                    run_log(cfg, deployment_id, "docker", &["start", container]).await?;
+                }
+                let internal_port = docker_published_port(container, port as u16).await?;
+                log(
+                    cfg,
+                    deployment_id,
+                    "stdout",
+                    "Recovered the existing deployment candidate.",
+                )
+                .await;
+                return Ok(internal_port);
+            }
+            run_log(cfg, deployment_id, "docker", &["rm", "-f", container]).await?;
+        }
+    }
     let port_map = docker_port_map(port as u16);
     let data_volume = app_data_volume(app_id);
     ensure_app_data_volume(cfg, deployment_id, &data_volume).await?;
@@ -528,11 +580,19 @@ async fn run_app_container(
     // on Cloud still persist + report storage. Falls back to /data.
     let data_mount_target = data_mount_path(p);
     let data_mount = format!("type=volume,source={data_volume},target={data_mount_target}");
+    let app_label = format!("hostlet.app_id={app_id}");
+    let deployment_label = format!("hostlet.deployment_id={deployment_id}");
     let mut args = vec![
         "run",
         "-d",
         "--name",
         container,
+        "--label",
+        "hostlet.managed=true",
+        "--label",
+        &app_label,
+        "--label",
+        &deployment_label,
         "--restart",
         "unless-stopped",
         "--security-opt",

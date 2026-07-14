@@ -12,7 +12,6 @@ export { displayDomain, appVisitHref, appVisitLabel, privateAppHost } from "@/li
 export function rollbackDisabledReason(app: App | null, active: boolean) {
   if (!app) return "App details are still loading.";
   if (active) return "Wait for the active deployment to finish before rolling back.";
-  if (app.runtimeKind === "compose") return "Compose rollback is disabled for Hostlet 0.5.0. Redeploy the target revision instead.";
   if (!app.currentDeploymentId) return "Deploy this app once before rolling back.";
   return "";
 }

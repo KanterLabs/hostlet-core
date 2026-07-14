@@ -100,6 +100,7 @@ async fn claim_only_queued_job(state: &AppState) {
         agent_headers(state, TEST_SERVER_ID),
         Json(ClaimJobRequest {
             agent_id: Some("ci-agent".into()),
+            protocol_version: 2,
         }),
     )
     .await
@@ -150,6 +151,7 @@ async fn db_complete_job_scrubs_payload_secrets() {
             status: "success".into(),
             failure: None,
             result: None,
+            claim_token: None,
         },
     )
     .await;
@@ -236,6 +238,7 @@ async fn db_ws_job_status_cannot_resurrect_terminal_job() {
             status: "success".into(),
             failure: None,
             result: None,
+            claim_token: None,
         },
     )
     .await;

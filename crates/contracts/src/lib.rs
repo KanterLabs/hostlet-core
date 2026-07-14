@@ -2,12 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
-
 pub mod compose;
 pub mod crypto;
 mod inference;
+mod protocol;
 mod validation;
-
 pub use inference::{
     compose_inspection, detect_start_command, dockerfile_inspection, gitea_inspection,
     infer_addons_from_compose, infer_dockerfile, infer_package_json, infer_package_manager,
@@ -15,6 +14,7 @@ pub use inference::{
     railpack_inspection, unknown_inspection, with_command_suggestion, with_detected_services,
     CommandSuggestion, DetectedServices, DockerfileInference, PackageInference, RepoCommandFiles,
 };
+pub use protocol::*;
 pub use validation::{
     clean_hostlet_config_path, clean_runtime_config, dangerous_host_process_env_key, domain_host,
     valid_app_name, valid_cpu_limit, valid_host_process_env_key, valid_memory_limit,
@@ -22,7 +22,6 @@ pub use validation::{
 };
 
 /// Defines a `snake_case` status enum whose wire string is shared by serde, the
-/// database, and the `as_str`/`FromStr` round trip.
 ///
 /// Each variant lists its canonical string exactly once, so `as_str` and
 /// `from_str` can never drift apart (the previous hand-written impls duplicated

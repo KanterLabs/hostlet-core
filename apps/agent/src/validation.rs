@@ -45,6 +45,62 @@ pub(crate) fn compose_project_name(app_id: Uuid) -> String {
     format!("hostlet-app-{}", app_id.simple())
 }
 
+pub(crate) fn compose_release_project_name(deployment_id: Uuid) -> String {
+    format!("hostlet-release-{}", deployment_id.simple())
+}
+
+/// Derives the release-only override from the already-hardened base override.
+/// The web container joins the stable app network and every declared named
+/// volume resolves to the stable project's explicit volume name.
+pub(crate) fn compose_release_override_yaml(
+    base_override: &str,
+    compose_text: &str,
+    web_service: &str,
+    stable_project: &str,
+) -> anyhow::Result<String> {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(base_override)?;
+    let root = value
+        .as_mapping_mut()
+        .context("compose override must be a mapping")?;
+    let services = yaml_get_mut(root, "services")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .context("compose override must define services")?;
+    let web = services
+        .get_mut(serde_yaml::Value::String(web_service.to_string()))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .context("compose override is missing web service")?;
+    web.insert(
+        serde_yaml::Value::String("networks".into()),
+        serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("hostlet-stable".into())]),
+    );
+    let mut network = serde_yaml::Mapping::new();
+    network.insert(serde_yaml::Value::String("external".into()), true.into());
+    network.insert(
+        serde_yaml::Value::String("name".into()),
+        format!("{stable_project}_default").into(),
+    );
+    let mut networks = serde_yaml::Mapping::new();
+    networks.insert("hostlet-stable".into(), network.into());
+    root.insert("networks".into(), networks.into());
+
+    let source: serde_yaml::Value = serde_yaml::from_str(compose_text)?;
+    if let Some(source_volumes) = source
+        .get("volumes")
+        .and_then(serde_yaml::Value::as_mapping)
+    {
+        let mut volumes = serde_yaml::Mapping::new();
+        for name in source_volumes.keys().filter_map(serde_yaml::Value::as_str) {
+            validate_service_name(name)?;
+            let mut definition = serde_yaml::Mapping::new();
+            definition.insert("name".into(), format!("{stable_project}_{name}").into());
+            definition.insert("external".into(), true.into());
+            volumes.insert(name.into(), definition.into());
+        }
+        root.insert("volumes".into(), volumes.into());
+    }
+    serde_yaml::to_string(&value).context("failed to serialize release compose override")
+}
+
 /// Builds the `environment:` block body for the compose override: the
 /// Hostlet-injected variables followed by the validated env entries from the
 /// payload, each rendered as a YAML-escaped `- KEY=VALUE` list item.
@@ -450,8 +506,10 @@ fn valid_prefixed_name(
 }
 
 pub(crate) fn valid_compose_project_name(value: &str) -> bool {
-    valid_prefixed_name(value, "hostlet-app-", 64, |c| {
-        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+    ["hostlet-app-", "hostlet-release-"].iter().any(|prefix| {
+        valid_prefixed_name(value, prefix, 64, |c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+        })
     })
 }
 

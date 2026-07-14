@@ -10,6 +10,7 @@ pub(super) struct HealthTarget {
     health_path: String,
     domain: Option<String>,
     route_key: Option<String>,
+    route_generation: Option<i64>,
 }
 
 pub(super) fn health_status_event(
@@ -113,6 +114,10 @@ pub(super) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
         .or_else(|| value.get("route_key"))
         .and_then(|v| v.as_str())
         .and_then(clean_route_key);
+    let route_generation = value
+        .get("routeGeneration")
+        .or_else(|| value.get("route_generation"))
+        .and_then(Value::as_i64);
     Some(HealthTarget {
         app_id,
         deployment_id,
@@ -122,6 +127,7 @@ pub(super) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
         health_path: health_path.to_string(),
         domain,
         route_key,
+        route_generation,
     })
 }
 
@@ -244,19 +250,48 @@ async fn refresh_route(cfg: &Config, target: &HealthTarget, port: u16) -> anyhow
     };
     if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
-            return apply_local_caddy_route(
-                cfg,
-                target.deployment_id,
-                router,
-                route_key,
-                domain,
-                port,
-            )
-            .await;
+            return match target.route_generation {
+                Some(generation) => {
+                    apply_local_caddy_route_versioned(
+                        cfg,
+                        target.deployment_id,
+                        router,
+                        route_key,
+                        domain,
+                        port,
+                        generation,
+                    )
+                    .await
+                }
+                None => {
+                    apply_local_caddy_route(
+                        cfg,
+                        target.deployment_id,
+                        router,
+                        route_key,
+                        domain,
+                        port,
+                    )
+                    .await
+                }
+            };
         }
         return Ok(());
     }
-    apply_caddy_route(cfg, target.deployment_id, route_key, domain, port).await
+    match target.route_generation {
+        Some(generation) => {
+            apply_caddy_route_versioned(
+                cfg,
+                target.deployment_id,
+                route_key,
+                domain,
+                port,
+                generation,
+            )
+            .await
+        }
+        None => apply_caddy_route(cfg, target.deployment_id, route_key, domain, port).await,
+    }
 }
 
 pub(super) fn failed_health_probe(

@@ -90,6 +90,7 @@ async fn assert_claim_marks_job_claimed(state: &AppState, headers: &HeaderMap, j
         headers.clone(),
         Json(ClaimJobRequest {
             agent_id: Some("ci-agent".into()),
+            protocol_version: 2,
         }),
     )
     .await
@@ -111,6 +112,7 @@ async fn assert_complete_rejects_unknown_status(
             status: "bogus".into(),
             failure: None,
             result: None,
+            claim_token: None,
         },
     )
     .await;
@@ -130,6 +132,7 @@ async fn assert_complete_success_marks_job_succeeded(
             status: "success".into(),
             failure: None,
             result: Some(serde_json::json!({"ok": true})),
+            claim_token: None,
         },
     )
     .await;
@@ -277,6 +280,7 @@ async fn db_expired_agent_jobs_retry_then_fail_at_max_attempts() {
             headers,
             Json(ClaimJobRequest {
                 agent_id: Some("ci-agent".into()),
+                protocol_version: 2,
             }),
         )
         .await
