@@ -27,7 +27,8 @@ Install the self-hosted CLI:
 ```bash
 git clone https://github.com/ShaneKanterman04/hostlet-core.git
 cd hostlet-core
-curl -L https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/hostlet-linux-x64 -o hostlet
+ARCH="$(uname -m)"; case "$ARCH" in x86_64) ASSET=hostlet-linux-x64;; aarch64|arm64) ASSET=hostlet-linux-arm64;; *) echo "Unsupported architecture: $ARCH" >&2; exit 1;; esac
+curl -L "https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/$ASSET" -o hostlet
 chmod +x hostlet
 sudo mv hostlet /usr/local/bin/hostlet
 ```
@@ -39,6 +40,7 @@ updater reads.
 Initialize and start:
 
 ```bash
+hostlet preflight
 hostlet init
 hostlet up
 ```

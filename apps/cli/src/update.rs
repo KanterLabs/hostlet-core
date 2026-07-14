@@ -181,13 +181,14 @@ async fn download_verified_cli(
     release: &ReleaseInfo,
     tmp_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
+    let asset_name = linux_asset()?;
     let asset = release
-        .asset(LINUX_X64_ASSET)
-        .context("latest release does not include hostlet-linux-x64")?;
+        .asset(asset_name)
+        .with_context(|| format!("latest release does not include {asset_name}"))?;
     let checksum_asset = release
-        .asset(&format!("{LINUX_X64_ASSET}.sha256"))
-        .context("latest release does not include hostlet-linux-x64.sha256")?;
-    let tmp_binary = tmp_dir.join(LINUX_X64_ASSET);
+        .asset(&format!("{asset_name}.sha256"))
+        .with_context(|| format!("latest release does not include {asset_name}.sha256"))?;
+    let tmp_binary = tmp_dir.join(asset_name);
     download(client, &asset.download_url, &tmp_binary).await?;
     let expected = checksum_from_asset(client, checksum_asset).await?;
     let actual = sha256_file(&tmp_binary)?;
@@ -224,12 +225,12 @@ pub(crate) fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Re
     check(".env exists", root.join(".env").exists());
     check(
         "Hostlet release asset",
-        release.asset(LINUX_X64_ASSET).is_some(),
+        release.asset(linux_asset()?).is_some(),
     );
     check(
         "CLI checksum asset",
         release
-            .asset(&format!("{LINUX_X64_ASSET}.sha256"))
+            .asset(&format!("{}.sha256", linux_asset()?))
             .is_some(),
     );
     ensure_repo_root(root)?;
@@ -244,10 +245,9 @@ pub(crate) fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Re
             );
         }
     }
-    if release.asset(LINUX_X64_ASSET).is_none()
-        || release
-            .asset(&format!("{LINUX_X64_ASSET}.sha256"))
-            .is_none()
+    let asset_name = linux_asset()?;
+    if release.asset(asset_name).is_none()
+        || release.asset(&format!("{asset_name}.sha256")).is_none()
     {
         bail!("latest release is missing required update assets");
     }

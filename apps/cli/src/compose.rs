@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn compose_up(root: &Path, tunnel: bool, dev: bool) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let mut args = compose_args(root, dev);
+    let tunnel = tunnel || configured_access_mode(root) == AccessMode::CloudflareTunnel;
     if tunnel && !dev {
         args.extend(["--profile".into(), "tunnel".into()]);
     }

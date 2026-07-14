@@ -17,9 +17,10 @@ fn result_first_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
 struct CloudflareConfig {
     domain: String,
     hostlet_host: String,
-    app_prefix: String,
     token: String,
     zone_id: String,
+    account_id: String,
+    tunnel_id: String,
     tunnel_target: String,
     tunnel_token: String,
 }
@@ -36,9 +37,15 @@ impl CloudflareConfig {
         );
         env.insert("HOSTLET_ALLOWED_WEB_ORIGINS".into(), web_url);
         env.insert("HOSTLET_BASE_DOMAIN".into(), self.domain.clone());
-        env.insert("HOSTLET_DOMAIN_PREFIX".into(), self.app_prefix.clone());
+        env.insert(
+            "HOSTLET_ACCESS_MODE".into(),
+            AccessMode::CloudflareTunnel.as_env().into(),
+        );
+        env.insert("HOSTLET_CADDYFILE".into(), "./Caddyfile.tunnel".into());
         env.insert("CLOUDFLARE_API_TOKEN".into(), self.token.clone());
         env.insert("CLOUDFLARE_ZONE_ID".into(), self.zone_id.clone());
+        env.insert("CLOUDFLARE_ACCOUNT_ID".into(), self.account_id.clone());
+        env.insert("CLOUDFLARE_TUNNEL_ID".into(), self.tunnel_id.clone());
         env.insert(
             "CLOUDFLARE_TUNNEL_TARGET".into(),
             self.tunnel_target.clone(),
@@ -53,24 +60,27 @@ pub(crate) async fn configure_cloudflare(
 ) -> anyhow::Result<()> {
     let config = prompt_cloudflare_config(theme).await?;
     config.populate_env(env);
-    if Confirm::with_theme(theme)
-        .with_prompt(format!(
-            "Create/update DNS record for {}?",
-            config.hostlet_host
-        ))
-        .default(true)
-        .interact()?
-    {
-        upsert_cloudflare_cname(
-            &http_client()?,
-            &config.token,
-            &config.zone_id,
-            &config.hostlet_host,
-            &config.tunnel_target,
-        )
-        .await?;
-        println!("Cloudflare DNS ready for {}", config.hostlet_host);
-    }
+    let client = http_client()?;
+    upsert_cloudflare_cname(
+        &client,
+        &config.token,
+        &config.zone_id,
+        &config.hostlet_host,
+        &config.tunnel_target,
+    )
+    .await?;
+    upsert_cloudflare_cname(
+        &client,
+        &config.token,
+        &config.zone_id,
+        &format!("*.{}", config.domain),
+        &config.tunnel_target,
+    )
+    .await?;
+    println!(
+        "Cloudflare DNS ready for {} and *.{}",
+        config.hostlet_host, config.domain
+    );
     Ok(())
 }
 
@@ -83,58 +93,74 @@ async fn prompt_cloudflare_config(theme: &ColorfulTheme) -> anyhow::Result<Cloud
         .with_prompt("Hostlet UI/API hostname")
         .default(format!("hostlet.{domain}"))
         .interact_text()?;
-    let app_prefix: String = Input::with_theme(theme)
-        .with_prompt("Managed app hostname prefix")
-        .default("hostlet-".into())
-        .interact_text()?;
+    if !valid_hostname(&domain)
+        || !valid_hostname(&hostlet_host)
+        || !hostlet_host.ends_with(&format!(".{domain}"))
+    {
+        bail!("Cloudflare zone and Hostlet hostname must be valid DNS names in the same zone");
+    }
     let token = Password::with_theme(theme)
         .with_prompt("Cloudflare API token")
         .allow_empty_password(false)
         .interact()?;
     let client = http_client()?;
-    let detected_zone = lookup_cloudflare_zone(&client, &token, &domain)
-        .await
-        .ok()
-        .flatten();
-    let zone_id: String = Input::with_theme(theme)
-        .with_prompt("Cloudflare Zone ID")
-        .default(detected_zone.unwrap_or_default())
-        .allow_empty(false)
+    let zone = lookup_cloudflare_zone(&client, &token, &domain)
+        .await?
+        .context("Cloudflare token cannot access that zone")?;
+    let name: String = Input::with_theme(theme)
+        .with_prompt("Dedicated Hostlet tunnel name")
+        .default(format!("hostlet-{}", domain.replace('.', "-")))
         .interact_text()?;
-    let account_id: String = Input::with_theme(theme)
-        .with_prompt("Cloudflare Account ID, for automatic tunnel setup")
-        .allow_empty(true)
-        .interact_text()?;
-    let (tunnel_target, tunnel_token) = if account_id.trim().is_empty() {
-        let tunnel_target: String = Input::with_theme(theme)
-            .with_prompt("Cloudflare Tunnel target CNAME")
-            .with_initial_text("<tunnel-id>.cfargotunnel.com")
-            .interact_text()?;
-        let tunnel_token = Password::with_theme(theme)
-            .with_prompt("Cloudflare Tunnel token")
-            .allow_empty_password(false)
-            .interact()?;
-        (tunnel_target, tunnel_token)
-    } else {
-        select_or_create_tunnel(&client, theme, &token, account_id.trim(), &domain).await?
-    };
+    let tunnel_id = create_cloudflare_tunnel(&client, &token, &zone.account_id, &name).await?;
+    configure_cloudflare_tunnel(
+        &client,
+        &token,
+        &zone.account_id,
+        &tunnel_id,
+        &hostlet_host,
+        &domain,
+    )
+    .await?;
+    let tunnel_token =
+        cloudflare_tunnel_token(&client, &token, &zone.account_id, &tunnel_id).await?;
+    let tunnel_target = format!("{tunnel_id}.cfargotunnel.com");
 
     Ok(CloudflareConfig {
         domain,
         hostlet_host,
-        app_prefix,
         token,
-        zone_id,
+        zone_id: zone.id,
+        account_id: zone.account_id,
+        tunnel_id,
         tunnel_target,
         tunnel_token,
     })
+}
+
+fn valid_hostname(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+}
+
+pub(crate) struct CloudflareZone {
+    id: String,
+    account_id: String,
 }
 
 pub(crate) async fn lookup_cloudflare_zone(
     client: &reqwest::Client,
     token: &str,
     domain: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<CloudflareZone>> {
     let value: Value = client
         .get("https://api.cloudflare.com/client/v4/zones")
         .bearer_auth(token)
@@ -144,7 +170,16 @@ pub(crate) async fn lookup_cloudflare_zone(
         .error_for_status()?
         .json()
         .await?;
-    Ok(result_first_str(&value, "id").map(str::to_string))
+    Ok(value
+        .get("result")
+        .and_then(Value::as_array)
+        .and_then(|v| v.first())
+        .and_then(|zone| {
+            Some(CloudflareZone {
+                id: zone.get("id")?.as_str()?.to_string(),
+                account_id: zone.get("account")?.get("id")?.as_str()?.to_string(),
+            })
+        }))
 }
 
 pub(crate) async fn upsert_cloudflare_cname(
@@ -189,82 +224,26 @@ pub(crate) async fn upsert_cloudflare_cname(
     Ok(())
 }
 
-pub(crate) async fn select_or_create_tunnel(
+pub(crate) async fn configure_cloudflare_tunnel(
     client: &reqwest::Client,
-    theme: &ColorfulTheme,
     token: &str,
     account_id: &str,
+    tunnel_id: &str,
+    hostlet_host: &str,
     domain: &str,
-) -> anyhow::Result<(String, String)> {
-    let tunnels = list_cloudflare_tunnels(client, token, account_id)
-        .await
-        .unwrap_or_default();
-    let create_label = "Create new Hostlet tunnel".to_string();
-    let mut items = tunnels
-        .iter()
-        .map(|tunnel| format!("{} ({})", tunnel.name, tunnel.id))
-        .collect::<Vec<_>>();
-    items.push(create_label);
-    let selected = Select::with_theme(theme)
-        .with_prompt("Cloudflare Tunnel")
-        .items(&items)
-        .default(items.len().saturating_sub(1))
-        .interact()?;
-    let tunnel_id = if selected < tunnels.len() {
-        tunnels[selected].id.clone()
-    } else {
-        let name: String = Input::with_theme(theme)
-            .with_prompt("New tunnel name")
-            .default(format!("hostlet-{}", domain.replace('.', "-")))
-            .interact_text()?;
-        create_cloudflare_tunnel(client, token, account_id, &name).await?
-    };
-    let tunnel_token = cloudflare_tunnel_token(client, token, account_id, &tunnel_id).await?;
-    Ok((format!("{tunnel_id}.cfargotunnel.com"), tunnel_token))
-}
-
-#[derive(Clone)]
-pub(crate) struct CloudflareTunnel {
-    id: String,
-    name: String,
-}
-
-pub(crate) async fn list_cloudflare_tunnels(
-    client: &reqwest::Client,
-    token: &str,
-    account_id: &str,
-) -> anyhow::Result<Vec<CloudflareTunnel>> {
-    let value: Value = client
-        .get(format!(
-            "https://api.cloudflare.com/client/v4/accounts/{account_id}/cfd_tunnel"
-        ))
+) -> anyhow::Result<()> {
+    client
+        .put(format!("https://api.cloudflare.com/client/v4/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"))
         .bearer_auth(token)
+        .json(&serde_json::json!({"config": {"ingress": [
+            {"hostname": hostlet_host, "service": "http://127.0.0.1:18080"},
+            {"hostname": format!("*.{domain}"), "service": "http://127.0.0.1:18080"},
+            {"service": "http_status:404"}
+        ]}}))
         .send()
         .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    Ok(value
-        .get("result")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|tunnel| {
-            // A tunnel is live when it has no non-null `deleted_at` timestamp.
-            let deleted_at = tunnel.get("deleted_at");
-            deleted_at.is_none() || deleted_at.is_some_and(Value::is_null)
-        })
-        .filter_map(|tunnel| {
-            Some(CloudflareTunnel {
-                id: tunnel.get("id")?.as_str()?.to_string(),
-                name: tunnel
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unnamed")
-                    .to_string(),
-            })
-        })
-        .collect())
+        .error_for_status()?;
+    Ok(())
 }
 
 pub(crate) async fn create_cloudflare_tunnel(
@@ -327,9 +306,10 @@ mod tests {
         let config = CloudflareConfig {
             domain: "example.test".into(),
             hostlet_host: "hostlet.example.test".into(),
-            app_prefix: "app-".into(),
             token: "cf-token".into(),
             zone_id: "zone-1".into(),
+            account_id: "account-1".into(),
+            tunnel_id: "abc".into(),
             tunnel_target: "abc.cfargotunnel.com".into(),
             tunnel_token: "tunnel-token".into(),
         };
@@ -357,8 +337,16 @@ mod tests {
             Some("example.test")
         );
         assert_eq!(
-            env.get("HOSTLET_DOMAIN_PREFIX").map(String::as_str),
-            Some("app-")
+            env.get("HOSTLET_ACCESS_MODE").map(String::as_str),
+            Some("cloudflare_tunnel")
+        );
+        assert_eq!(
+            env.get("CLOUDFLARE_ACCOUNT_ID").map(String::as_str),
+            Some("account-1")
+        );
+        assert_eq!(
+            env.get("CLOUDFLARE_TUNNEL_ID").map(String::as_str),
+            Some("abc")
         );
         assert_eq!(
             env.get("CLOUDFLARE_API_TOKEN").map(String::as_str),

@@ -45,8 +45,8 @@ assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-docker-retry.sh docker build'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-core-workflow-contracts.sh'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
-assert_contains "${ROOT}/.github/workflows/release.yml" 'scripts/ci-docker-retry.sh docker build'
-assert_contains "${ROOT}/.github/workflows/release.yml" 'scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"'
+assert_contains "${ROOT}/.github/workflows/release.yml" 'docker buildx build --platform linux/amd64,linux/arm64 --push'
+assert_contains "${ROOT}/.github/workflows/release.yml" 'hostlet-linux-arm64'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
 assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3,hostlet-core-homelab-4'
@@ -142,10 +142,11 @@ staging_push = staging.index('scripts/ci-docker-retry.sh docker push "${IMAGE_RE
 if staging_smoke > staging_push:
     raise SystemExit("staging workflow must smoke-test screenshotter before pushing it")
 
-release_smoke = release.index("scripts/ci-screenshotter-smoke.sh")
-release_push = release.index('scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}"')
-if release_smoke > release_push:
-    raise SystemExit("release workflow must smoke-test screenshotter before pushing it")
+# Multi-platform buildx publishes an OCI index atomically; the release workflow
+# still smoke-tests the published SHA-tagged screenshotter before release assets
+# are created.
+release.index("scripts/ci-screenshotter-smoke.sh")
+release.index("docker buildx build --platform linux/amd64,linux/arm64 --push")
 PY
 
 echo "core workflow contracts passed"

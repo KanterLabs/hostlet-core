@@ -1,8 +1,47 @@
 use super::*;
 use std::process::Output;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccessMode {
+    Lan,
+    CloudflareTunnel,
+}
+
+impl AccessMode {
+    pub(crate) fn as_env(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::CloudflareTunnel => "cloudflare_tunnel",
+        }
+    }
+}
+
+pub(crate) fn access_mode(env: &BTreeMap<String, String>) -> AccessMode {
+    match env
+        .get("HOSTLET_ACCESS_MODE")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cloudflare_tunnel" | "cloudflare-tunnel" | "tunnel") => AccessMode::CloudflareTunnel,
+        Some("lan") => AccessMode::Lan,
+        _ if env
+            .get("CLOUDFLARE_TUNNEL_TOKEN")
+            .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            AccessMode::CloudflareTunnel
+        }
+        _ => AccessMode::Lan,
+    }
+}
+
+pub(crate) fn configured_access_mode(root: &Path) -> AccessMode {
+    read_env_file(&root.join(".env"))
+        .map(|env| access_mode(&env))
+        .unwrap_or(AccessMode::Lan)
+}
+
 pub(crate) fn compose_args(root: &Path, dev: bool) -> Vec<String> {
-    let mut args = vec!["compose".into()];
+    let mut args = vec!["compose".into(), "--project-name".into(), "infra".into()];
     // `hostlet init` writes the repo-root .env, but compose v2 only auto-loads
     // .env from the directory of the first -f file (infra/). Pass it explicitly;
     // skipped when missing so pre-init commands (doctor) still run.
@@ -71,6 +110,27 @@ fn compose_status(
 
 pub(crate) fn compose_config_ok(root: &Path, dev: bool) -> bool {
     compose_status(root, dev, &["config"], |output| output.status.success())
+}
+
+pub(crate) fn compose_config_with_env_ok(root: &Path, env_file: &Path, tunnel: bool) -> bool {
+    let mut args = vec![
+        "compose".to_string(),
+        "--project-name".into(),
+        "infra".into(),
+        "--env-file".into(),
+        env_file.display().to_string(),
+        "-f".into(),
+        "infra/docker-compose.prod.yml".into(),
+    ];
+    if tunnel {
+        args.extend(["--profile".into(), "tunnel".into()]);
+    }
+    args.extend(["config".into(), "--quiet".into()]);
+    Command::new("docker")
+        .current_dir(root)
+        .args(args)
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub(crate) fn compose_services_running(root: &Path, dev: bool) -> bool {
@@ -160,9 +220,13 @@ pub(crate) fn default_env() -> BTreeMap<String, String> {
         format!("v{}", env!("CARGO_PKG_VERSION")),
     );
     set("BIND_ADDR", "0.0.0.0:8080".into());
+    set("HOSTLET_ACCESS_MODE", AccessMode::Lan.as_env().into());
     set("HOSTLET_BASE_DOMAIN", String::new());
     set("HOSTLET_DOMAIN_PREFIX", "hostlet-".into());
     set("HOSTLET_CONTROL_PLANE_HOST", "localhost".into());
+    set("HOSTLET_CADDYFILE", "./Caddyfile.lan".into());
+    set("HOSTLET_LAN_BIND_ADDR", "127.0.0.1".into());
+    set("HOSTLET_LAN_PORT", "80".into());
     set("HOSTLET_ALLOW_INSECURE_DEV_DEFAULTS", "false".into());
     set(
         "LOCAL_SERVER_ID",
@@ -171,7 +235,9 @@ pub(crate) fn default_env() -> BTreeMap<String, String> {
 
     // Cloudflare integration (operator-supplied; left blank by default).
     set("CLOUDFLARE_API_TOKEN", String::new());
+    set("CLOUDFLARE_ACCOUNT_ID", String::new());
     set("CLOUDFLARE_ZONE_ID", String::new());
+    set("CLOUDFLARE_TUNNEL_ID", String::new());
     set("CLOUDFLARE_TUNNEL_TARGET", String::new());
     set("CLOUDFLARE_TUNNEL_TOKEN", String::new());
 

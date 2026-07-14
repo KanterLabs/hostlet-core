@@ -95,8 +95,10 @@ services:
     environment:
       HOSTLET_CONTROL_PLANE_HOST: ${HOSTLET_CONTROL_PLANE_HOST:-localhost}
       HOSTLET_APPS_HOST: ${HOSTLET_BASE_DOMAIN:-localhost}
+      HOSTLET_LAN_BIND_ADDR: ${HOSTLET_LAN_BIND_ADDR:-127.0.0.1}
+      HOSTLET_LAN_PORT: ${HOSTLET_LAN_PORT:-80}
     volumes:
-      - ${HOSTLET_CADDYFILE:-./Caddyfile.tunnel}:/etc/caddy/Caddyfile:ro
+      - ${HOSTLET_CADDYFILE:-./Caddyfile.lan}:/etc/caddy/Caddyfile:ro
       - hostlet-agent:/var/lib/hostlet
 
   cloudflared:
