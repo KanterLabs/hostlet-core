@@ -15,6 +15,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Verify that this host can run Hostlet without changing it.
+    Preflight,
+    /// Safely update an existing Hostlet installation.
+    Configure,
     Doctor,
     Up {
         #[arg(long)]
@@ -70,6 +74,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let root = cli.root.canonicalize().unwrap_or(cli.root);
     match cli.command {
         Commands::Init { force } => init(&root, force).await,
+        Commands::Preflight => preflight(&root),
+        Commands::Configure => configure(&root).await,
         Commands::Doctor => doctor(&root).await,
         Commands::Up { tunnel, dev } => compose_up(&root, tunnel, dev),
         Commands::Down { dev } => compose_down(&root, dev),
@@ -92,64 +98,77 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     }
 }
 
-/// How Hostlet's UI/API is reached, chosen interactively during `init`.
-/// Ordering matches the `Select` items below; `LanOnly` is the default.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AccessMode {
-    LanOnly,
-    CloudflareTunnel,
-}
-
-impl AccessMode {
-    fn from_index(index: usize) -> Self {
-        match index {
-            0 => Self::LanOnly,
-            _ => Self::CloudflareTunnel,
-        }
-    }
-}
-
-fn configure_lan_env(
+pub(crate) fn configure_lan_env(
     theme: &ColorfulTheme,
     env: &mut BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
     let host: String = Input::with_theme(theme)
-        .with_prompt("Hostlet LAN host/IP")
-        .default("localhost".into())
+        .with_prompt("Hostlet LAN IP address")
+        .default(
+            env.get("HOSTLET_LAN_BIND_ADDR")
+                .filter(|value| value.as_str() != "127.0.0.1")
+                .cloned()
+                .unwrap_or_else(|| "192.168.1.10".into()),
+        )
         .interact_text()?;
-    let public_web_url = format!("http://{host}:3000");
-    let public_api_url = format!("http://{host}:8080");
-    env.insert("PUBLIC_WEB_URL".into(), public_web_url.clone());
-    env.insert("PUBLIC_API_URL".into(), public_api_url);
-    env.insert("HOSTLET_CONTROL_PLANE_HOST".into(), host);
+    let _: std::net::Ipv4Addr = host
+        .parse()
+        .context("Hostlet LAN address must be an IPv4 address")?;
+    let port: u16 = Input::with_theme(theme)
+        .with_prompt("Hostlet LAN HTTP port")
+        .default(
+            env.get("HOSTLET_LAN_PORT")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(80),
+        )
+        .interact_text()?;
+    let url_host = host.clone();
+    let public_web_url = if port == 80 {
+        format!("http://{url_host}")
+    } else {
+        format!("http://{url_host}:{port}")
+    };
     env.insert(
-        "HOSTLET_ALLOWED_WEB_ORIGINS".into(),
-        format!("{public_web_url},http://localhost:3000,http://127.0.0.1:3000"),
+        "HOSTLET_ACCESS_MODE".into(),
+        AccessMode::Lan.as_env().into(),
     );
+    env.insert("HOSTLET_CADDYFILE".into(), "./Caddyfile.lan".into());
+    env.insert("HOSTLET_LAN_BIND_ADDR".into(), host.clone());
+    env.insert("HOSTLET_LAN_PORT".into(), port.to_string());
+    env.insert("PUBLIC_WEB_URL".into(), public_web_url.clone());
+    env.insert("PUBLIC_API_URL".into(), public_web_url.clone());
+    env.insert("PUBLIC_WEBHOOK_URL".into(), String::new());
+    env.insert("HOSTLET_CONTROL_PLANE_HOST".into(), host);
+    env.insert("HOSTLET_ALLOWED_WEB_ORIGINS".into(), public_web_url);
     Ok(())
 }
 
 pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     require_interactive()?;
     ensure_repo_root(root)?;
+    preflight(root)?;
     let env_path = root.join(".env");
-    if env_path.exists() && !force {
-        bail!(".env already exists. Run hostlet init --force to replace it after reviewing your backup.");
+    if env_path.exists() {
+        let _ = force;
+        bail!(".env already exists. Run hostlet configure to preserve existing secrets and data.");
     }
 
     let theme = ColorfulTheme::default();
     println!("Hostlet init writes .env and generates local secrets.");
 
-    let access_mode = AccessMode::from_index(
-        Select::with_theme(&theme)
-            .with_prompt("Hostlet UI/API access mode")
-            .items(&["LAN only", "Cloudflare Tunnel for Hostlet UI/API"])
-            .default(0)
-            .interact()?,
-    );
+    let access_mode = match Select::with_theme(&theme)
+        .with_prompt("Hostlet UI/API access mode")
+        .items(&["LAN", "Cloudflare Tunnel for Hostlet UI/API"])
+        .default(0)
+        .interact()?
+    {
+        0 => AccessMode::Lan,
+        _ => AccessMode::CloudflareTunnel,
+    };
 
     let allowed_login: String = Input::with_theme(&theme)
         .with_prompt("Allowed GitHub username")
+        .allow_empty(false)
         .interact_text()?;
     let github_client_id: String = Input::with_theme(&theme)
         .with_prompt("GitHub OAuth App Client ID (Device Flow enabled)")
@@ -169,7 +188,7 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
     env.insert("GITHUB_CLIENT_ID".into(), github_client_id);
 
     match access_mode {
-        AccessMode::LanOnly => configure_lan_env(&theme, &mut env)?,
+        AccessMode::Lan => configure_lan_env(&theme, &mut env)?,
         AccessMode::CloudflareTunnel => configure_cloudflare(&theme, &mut env).await?,
     }
 
@@ -193,6 +212,86 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
             ""
         }
     );
+    Ok(())
+}
+
+pub(crate) fn preflight(root: &Path) -> anyhow::Result<()> {
+    ensure_repo_root(root)?;
+    let linux = cfg!(target_os = "linux");
+    let arch = matches!(std::env::consts::ARCH, "x86_64" | "aarch64");
+    let docker = command_ok("docker", &["--version"]);
+    let compose = command_ok("docker", &["compose", "version"]);
+    let disk = disk_space_ok(root);
+    check("Linux host", linux);
+    check("CPU architecture", arch);
+    check("Docker Engine", docker);
+    check("Docker Compose v2", compose);
+    check("Free disk space (>1 GiB)", disk);
+    if !(linux && arch && docker && compose && disk) {
+        bail!("preflight failed; install Docker Engine with Compose v2 and ensure at least 1 GiB is free, then rerun `hostlet preflight`");
+    }
+    Ok(())
+}
+
+pub(crate) async fn configure(root: &Path) -> anyhow::Result<()> {
+    require_interactive()?;
+    ensure_repo_root(root)?;
+    preflight(root)?;
+    let env_path = root.join(".env");
+    let mut env =
+        read_env_file(&env_path).context("Hostlet is not initialized; run hostlet init")?;
+    let theme = ColorfulTheme::default();
+    let current = access_mode(&env);
+    let default_mode = usize::from(current == AccessMode::CloudflareTunnel);
+    let selected = Select::with_theme(&theme)
+        .with_prompt("Hostlet UI/API access mode")
+        .items(&["LAN", "Cloudflare Tunnel"])
+        .default(default_mode)
+        .interact()?;
+    let login: String = Input::with_theme(&theme)
+        .with_prompt("Allowed GitHub username")
+        .default(
+            env.get("HOSTLET_ALLOWED_GITHUB_LOGINS")
+                .cloned()
+                .unwrap_or_default(),
+        )
+        .allow_empty(false)
+        .interact_text()?;
+    let client_id: String = Input::with_theme(&theme)
+        .with_prompt("GitHub OAuth App Client ID (Device Flow enabled)")
+        .default(env.get("GITHUB_CLIENT_ID").cloned().unwrap_or_default())
+        .allow_empty(false)
+        .interact_text()?;
+    env.insert("HOSTLET_ALLOWED_GITHUB_LOGINS".into(), login);
+    env.insert("GITHUB_CLIENT_ID".into(), client_id);
+    let mode = if selected == 0 {
+        AccessMode::Lan
+    } else {
+        AccessMode::CloudflareTunnel
+    };
+    match mode {
+        AccessMode::Lan => configure_lan_env(&theme, &mut env)?,
+        AccessMode::CloudflareTunnel => configure_cloudflare(&theme, &mut env).await?,
+    }
+    let candidate = root.join(".env.candidate");
+    write_env_file(&candidate, &env)?;
+    if !compose_config_with_env_ok(root, &candidate, mode == AccessMode::CloudflareTunnel) {
+        let _ = fs::remove_file(&candidate);
+        bail!("candidate configuration failed Docker Compose validation; existing .env was not changed");
+    }
+    let backup = root.join(format!(".env.backup.{}", timestamp_suffix()));
+    fs::copy(&env_path, &backup)?;
+    set_secret_file_permissions(&backup)?;
+    fs::rename(&candidate, &env_path)?;
+    set_secret_file_permissions(&env_path)?;
+    println!("Configuration applied; backup: {}", backup.display());
+    if Confirm::with_theme(&theme)
+        .with_prompt("Restart Hostlet now?")
+        .default(true)
+        .interact()?
+    {
+        compose_up(root, false, false)?;
+    }
     Ok(())
 }
 

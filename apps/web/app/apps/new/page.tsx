@@ -65,6 +65,7 @@ export default function CreateApp() {
   const [cloudflare, setCloudflare] = useState<CloudflareStatus | null>(null);
   const [message, setMessage] = useState("");
   const [creating, setCreating] = useState(false);
+  const [subdomain, setSubdomain] = useState("");
 
   useEffect(() => {
     api<ServerRow[]>("/api/servers")
@@ -161,6 +162,9 @@ export default function CreateApp() {
       const env = inspection ? (inspection.env || []).filter((item) => envValues[item.key]).map((item) => ({ key: item.key, value: envValues[item.key] })) : [];
       const payload: Record<string, unknown> = {
         ...form,
+        domain: cloudflare?.baseDomain
+          ? `${subdomain.trim() || slugAppName(form.name || form.repo_full_name.split("/")[1] || "app")}.${cloudflare.baseDomain}`
+          : form.domain,
         server_id: form.server_id || null,
         install_command: null,
         env,
@@ -184,10 +188,10 @@ export default function CreateApp() {
   const selectedServer = servers.find((server) => server.id === form.server_id);
   const generatedDomain = useMemo(() => {
     if (!cloudflare?.baseDomain) return "";
-    const source = form.name || form.repo_full_name.split("/")[1] || "app";
+    const source = subdomain || form.name || form.repo_full_name.split("/")[1] || "app";
     return `${slugAppName(source)}.${cloudflare.baseDomain}`;
-  }, [cloudflare?.baseDomain, form.name, form.repo_full_name]);
-  const routePreview = form.domain.trim() || generatedDomain || "Hostlet will generate one";
+  }, [cloudflare?.baseDomain, form.name, form.repo_full_name, subdomain]);
+  const routePreview = generatedDomain || form.domain.trim() || "Hostlet will generate one";
   const requiredEnvMissing = inspection?.env?.some((item) => item.required && !envValues[item.key]?.trim()) || false;
   // A non-null inspection whose key drifted from the current fields is stale.
   const inspectionStale = inspection !== null && inspectionKey !== inspectionKeyOf(form);
@@ -309,13 +313,22 @@ export default function CreateApp() {
                     {servers.length === 0 && <option value="">This machine</option>}
                   </SelectField>
                   <div>
-                    <Field
-                      label="Domain"
-                      value={form.domain}
-                      onChange={(value) => setField("domain", value)}
-                      placeholder={generatedDomain || cloudflare?.defaultDomainPattern || "optional for local deploys"}
-                    />
-                    {generatedDomain && <p className="muted mt-2 text-sm">Default route: {generatedDomain}</p>}
+                    {cloudflare?.baseDomain ? (
+                      <Field
+                        label={`App subdomain (under ${cloudflare.baseDomain})`}
+                        value={subdomain}
+                        onChange={(value) => setSubdomain(slugAppName(value))}
+                        placeholder={slugAppName(form.name || "my-app")}
+                      />
+                    ) : (
+                      <Field
+                        label="Domain"
+                        value={form.domain}
+                        onChange={(value) => setField("domain", value)}
+                        placeholder="optional for local deploys"
+                      />
+                    )}
+                    {generatedDomain && <p className="muted mt-2 text-sm">Public route: {generatedDomain}</p>}
                   </div>
                 </div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">

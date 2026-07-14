@@ -37,6 +37,7 @@ pub(crate) async fn doctor(root: &Path) -> anyhow::Result<()> {
     let env = read_env_file(&env_path).unwrap_or_default();
     let client = http_client()?;
     println!("Hostlet {}", env!("CARGO_PKG_VERSION"));
+    println!("Access mode                 {}", access_mode(&env).as_env());
     check_docker_runtime();
     check(
         "Compose config",
@@ -60,6 +61,18 @@ pub(crate) async fn doctor(root: &Path) -> anyhow::Result<()> {
     )
     .await;
     print_operator_status(&client, &env).await;
+    if access_mode(&env) == AccessMode::CloudflareTunnel {
+        for key in [
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_TUNNEL_ID",
+            "CLOUDFLARE_TUNNEL_TOKEN",
+        ] {
+            check(
+                &format!("{key} set"),
+                env.get(key).is_some_and(|value| !value.trim().is_empty()),
+            );
+        }
+    }
     if let (Some(token), Some(zone_id)) = (
         env.get("CLOUDFLARE_API_TOKEN"),
         env.get("CLOUDFLARE_ZONE_ID"),

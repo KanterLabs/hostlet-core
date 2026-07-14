@@ -17,7 +17,13 @@ use std::{
 };
 
 const HOSTLET_REPO: &str = "ShaneKanterman04/Hostlet";
-const LINUX_X64_ASSET: &str = "hostlet-linux-x64";
+fn linux_asset() -> anyhow::Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("hostlet-linux-x64"),
+        "aarch64" => Ok("hostlet-linux-arm64"),
+        arch => bail!("Hostlet releases do not support Linux architecture {arch}"),
+    }
+}
 
 mod backups;
 mod cloudflare;
