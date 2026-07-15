@@ -21,7 +21,7 @@ concurrency:
 jobs:
   full-web-visual:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     defaults:
       run:
         working-directory: apps/web
@@ -48,7 +48,7 @@ jobs:
 
   full-self-hosted-deploy:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,11 +64,11 @@ jobs:
 
   full-compose-and-release:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     env:
       # Cap cargo parallelism (release build is the most expensive cargo
       # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
       PUBLIC_WEB_URL: http://localhost:3000

@@ -49,22 +49,23 @@ assert_contains "${ROOT}/.github/workflows/release.yml" 'docker buildx build --p
 assert_contains "${ROOT}/.github/workflows/release.yml" 'hostlet-linux-arm64'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
-assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3'
-assert_contains "${CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3,hostlet-core-homelab-4'
+assert_contains "${CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
 assert_not_contains "${CI_WORKFLOW}" 'pull_request:'
 assert_contains "${PR_WORKFLOW}" 'pull_request_target:'
 assert_contains "${PR_WORKFLOW}" "homelab-ci-approved"
-assert_contains "${PR_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${PR_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
 assert_contains "${PR_WORKFLOW}" 'persist-credentials: false'
 assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner.sh'
 assert_contains "${CI_WORKFLOW}" 'node --version && pnpm --version'
-assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
-assert_contains "${ROOT}/.github/workflows/release.yml" 'CARGO_BUILD_JOBS: "2"'
-assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
-assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
-assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
-assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core]'
+assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
+assert_contains "${ROOT}/.github/workflows/release.yml" 'CARGO_BUILD_JOBS: "4"'
+assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
+assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
+assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
+assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
+assert_contains "${ROOT}/.github/actionlint.yaml" 'hostlet-core-v2'
 assert_contains "${FULL_CI_WORKFLOW}" "group: full-ci-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${STAGING_DEPLOYABILITY}" "group: deployability-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"'
@@ -119,7 +120,7 @@ import sys
 from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
-self_hosted_jobs = workflow.count("runs-on: [self-hosted, Linux, X64, hostlet-core]")
+self_hosted_jobs = workflow.count("runs-on: [self-hosted, Linux, X64, hostlet-core-v2]")
 approved_guards = workflow.count(
     "if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'"
 )

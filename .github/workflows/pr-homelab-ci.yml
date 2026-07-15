@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3
+  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3,hostlet-core-homelab-4
 
 concurrency:
   group: pr-homelab-ci-${{ github.event.pull_request.number }}
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   clear-approval:
     if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'homelab-ci-approved')
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     permissions:
       pull-requests: write
     steps:
@@ -38,7 +38,7 @@ jobs:
 
   secrets:
     if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -51,9 +51,9 @@ jobs:
 
   rust:
     if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -74,7 +74,7 @@ jobs:
 
   web:
     if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     defaults:
       run:
         working-directory: apps/web
@@ -97,7 +97,7 @@ jobs:
 
   compose:
     if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     env:
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
@@ -127,7 +127,7 @@ jobs:
 
   docker:
     if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

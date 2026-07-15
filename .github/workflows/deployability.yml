@@ -20,7 +20,7 @@ concurrency:
 jobs:
   generated-apps:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,7 +41,7 @@ jobs:
 
   self-hosted-api:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - uses: actions/checkout@v4
         with:
