@@ -167,6 +167,26 @@ fn railpack_build_args(
         format!("PORT={port}"),
         "--error-missing-start".to_string(),
     ];
+    if let Some(config_file) = p.get("_hostlet_railpack_config").and_then(Value::as_str) {
+        validate_relative_file_path(config_file)?;
+        args.push("--config-file".to_string());
+        args.push(config_file.to_string());
+    }
+    if let Some(env) = p.get("_hostlet_build_env").and_then(Value::as_object) {
+        for (key, value) in env {
+            if !hostlet_contracts::valid_env_key(key) {
+                bail!("generated build environment key is invalid");
+            }
+            let value = value
+                .as_str()
+                .context("generated build environment value must be a string")?;
+            if value.len() > 2_048 || value.chars().any(char::is_control) {
+                bail!("generated build environment value is invalid");
+            }
+            args.push("--env".to_string());
+            args.push(format!("{key}={value}"));
+        }
+    }
     if let Some(command) = payload_command(p, "build_command") {
         validate_dockerfile_command(&command)?;
         args.push("--build-cmd".to_string());

@@ -40,6 +40,31 @@ test("deployment detail shows startup and boot metrics", async ({ page }) => {
   await expect(page.getByText("2s", { exact: true })).toHaveCount(2);
 });
 
+test("deployment detail explains the generated topology receipt", async ({ page }) => {
+  await mockDeploymentApi(page, {
+    ...validRuntimeMetadata,
+    runtime: "generated_topology",
+    inferenceReceipt: {
+      schemaVersion: 1,
+      confidence: "high",
+      mode: "auto",
+      repositoryModified: false,
+      services: [
+        { name: "client", role: "frontend", root: "packages/client", provider: "node", buildCommand: "pnpm --filter client... run build" },
+        { name: "server", role: "backend", root: "packages/server", provider: "node", startCommand: "pnpm --filter server run start" },
+      ],
+      routing: { websocketsToBackend: true, backendPathPrefixes: ["/api", "/socket.io"] },
+      lockfile: { changedSpecifiers: 1, beforeSha256: "before", afterSha256: "after" },
+    },
+  });
+  await page.goto("/deployments/deploy-1");
+  await expect(page.getByRole("heading", { name: "What Hostlet inferred" })).toBeVisible();
+  await expect(page.getByText("client · frontend")).toBeVisible();
+  await expect(page.getByText("server · backend")).toBeVisible();
+  await expect(page.getByText("/api, /socket.io")).toBeVisible();
+  await expect(page.getByText("1 specifier(s)")).toBeVisible();
+});
+
 test("deployment detail tolerates malformed runtime metrics", async ({ page }) => {
   await mockDeploymentApi(page, {
     ...validRuntimeMetadata,

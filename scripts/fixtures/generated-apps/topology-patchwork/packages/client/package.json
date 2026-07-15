@@ -1,0 +1,10 @@
+{
+  "name": "@hostlet-topology/client",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "vite": "workspace:*"
+  }
+}

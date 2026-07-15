@@ -45,16 +45,22 @@ pub async fn health_targets(
                a.container_port,
                a.domain,
                d.id AS deployment_id,
-               d.container_name,
-               d.published_port
+               COALESCE(ds.container_name, d.container_name) AS container_name,
+               COALESCE(ds.published_port, d.published_port) AS published_port,
+               COALESCE(ds.target_port, a.container_port) AS target_port,
+               ds.service_name
+               ,d.runtime_metadata
                ,a.route_generation
         FROM apps a
         JOIN deployments d ON d.id = a.current_deployment_id
+        LEFT JOIN deployment_services ds
+          ON ds.deployment_id = d.id
+         AND ds.role = 'web'
         WHERE a.server_id=$1
           AND d.server_id=$1
           AND d.status IN ('success','rolled_back')
-          AND d.container_name IS NOT NULL
-          AND d.published_port IS NOT NULL
+          AND COALESCE(ds.container_name, d.container_name) IS NOT NULL
+          AND COALESCE(ds.published_port, d.published_port) IS NOT NULL
           AND a.suspended_at IS NULL
           AND a.pending_deployment_id IS NULL
         ORDER BY a.created_at ASC
@@ -67,13 +73,37 @@ pub async fn health_targets(
         Ok(rows) => Json(
             rows.into_iter()
                 .map(|row| {
+                    let service_name = row.get::<Option<String>, _>("service_name");
+                    let metadata = row.get::<serde_json::Value, _>("runtime_metadata");
+                    let default_health_path = row.get::<String, _>("health_path");
+                    let inferred_probe = service_name.as_deref().and_then(|name| {
+                        metadata
+                            .pointer("/inferenceReceipt/services")?
+                            .as_array()?
+                            .iter()
+                            .find(|service| {
+                                service.get("name").and_then(serde_json::Value::as_str)
+                                    == Some(name)
+                            })
+                            .and_then(|service| service.get("healthProbe"))
+                    });
+                    let probe_kind = inferred_probe
+                        .and_then(|probe| probe.get("kind"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("http");
+                    let health_path = inferred_probe
+                        .and_then(|probe| probe.get("path"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&default_health_path);
                     serde_json::json!({
                         "appId": row.get::<Uuid, _>("app_id"),
                         "deploymentId": row.get::<Uuid, _>("deployment_id"),
                         "containerName": row.get::<String, _>("container_name"),
-                        "containerPort": row.get::<i32, _>("container_port"),
+                        "containerPort": row.get::<i32, _>("target_port"),
                         "publishedPort": row.get::<i32, _>("published_port"),
-                        "healthPath": row.get::<String, _>("health_path"),
+                        "healthPath": health_path,
+                        "probeKind": probe_kind,
+                        "serviceName": service_name,
                         "domain": row.get::<String, _>("domain"),
                         "routeKey": format!("app-{}", row.get::<Uuid, _>("app_id")),
                         "routeGeneration": row.get::<i64, _>("route_generation"),
@@ -111,19 +141,21 @@ pub async fn claim_job(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("local-agent");
+    let protocol_version = request
+        .protocol_version
+        .clamp(1, hostlet_contracts::DEPLOYMENT_PROTOCOL_VERSION);
+    let _ =
+        sqlx::query("UPDATE servers SET agent_protocol_version=$1,last_seen_at=now() WHERE id=$2")
+            .bind(protocol_version)
+            .bind(server_id)
+            .execute(&state.db)
+            .await;
 
     // Free up any of this server's own jobs whose lease expired before we look
     // for new work, so a crashed-and-restarted agent can re-claim them.
     requeue_expired_jobs_for_server(&state, server_id).await;
 
-    match claim_next_queued_job(
-        &state,
-        server_id,
-        agent_id,
-        request.protocol_version.clamp(1, 2),
-    )
-    .await
-    {
+    match claim_next_queued_job(&state, server_id, agent_id, protocol_version).await {
         Ok(Some(row)) => claim_job_response(&state, server_id, row).await,
         Ok(None) => Json(serde_json::json!({"job": null})).into_response(),
         Err(err) => {

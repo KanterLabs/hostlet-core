@@ -40,6 +40,22 @@ type RuntimeMetadata = {
   bootDurationMs?: number | null;
   routingDurationMs?: number | null;
   backingSpecHash?: string | null;
+  inferenceReceipt?: {
+    schemaVersion?: number;
+    confidence?: string;
+    mode?: string;
+    repositoryModified?: boolean;
+    services?: Array<{
+      name?: string;
+      role?: string;
+      root?: string;
+      provider?: string;
+      buildCommand?: string;
+      startCommand?: string;
+    }>;
+    routing?: { websocketsToBackend?: boolean; backendPathPrefixes?: string[] };
+    lockfile?: { changedSpecifiers?: number; beforeSha256?: string; afterSha256?: string } | null;
+  } | null;
 };
 
 type Deployment = {
@@ -170,6 +186,27 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
                     <SummaryItem label="Boot time" value={formatDuration(metadata.bootDurationMs)} />
                     <SummaryItem label="Routing" value={formatDuration(metadata.routingDurationMs)} />
                   </DataList>
+                </Panel>
+              )}
+              {metadata?.inferenceReceipt && (
+                <Panel>
+                  <SectionHeader title="What Hostlet inferred" />
+                  <DataList className="mt-4 sm:grid-cols-2 xl:grid-cols-1">
+                    <SummaryItem label="Mode" value={metadata.inferenceReceipt.mode || "auto"} />
+                    <SummaryItem label="Confidence" value={metadata.inferenceReceipt.confidence || "n/a"} />
+                    <SummaryItem label="Repository changed" value={metadata.inferenceReceipt.repositoryModified ? "yes" : "no"} />
+                    <SummaryItem label="WebSocket routing" value={metadata.inferenceReceipt.routing?.websocketsToBackend ? "backend" : "primary service"} />
+                    <SummaryItem label="Backend paths" value={metadata.inferenceReceipt.routing?.backendPathPrefixes?.join(", ") || "n/a"} />
+                    <SummaryItem label="Lock metadata repaired" value={metadata.inferenceReceipt.lockfile ? `${metadata.inferenceReceipt.lockfile.changedSpecifiers || 0} specifier(s)` : "not needed"} />
+                  </DataList>
+                  <div className="mt-4 space-y-2">
+                    {metadata.inferenceReceipt.services?.map((service) => (
+                      <div className="rounded-md bg-surface-alt px-3 py-2 text-sm" key={`${service.role}-${service.root}-${service.name}`}>
+                        <div className="font-medium">{service.name || service.root || "service"} · {service.role || "web"}</div>
+                        <div className="muted mt-1">{service.provider || "auto"}{service.startCommand ? ` · ${service.startCommand}` : ""}</div>
+                      </div>
+                    ))}
+                  </div>
                 </Panel>
               )}
             </aside>

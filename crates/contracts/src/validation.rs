@@ -47,6 +47,12 @@ pub fn clean_runtime_config(value: &serde_json::Value) -> Result<(), &'static st
             return Err("runtime config dataMountPath is invalid");
         }
     }
+    if let Some(generated_topology) = value.get("generatedTopology") {
+        let config: crate::GeneratedTopologyConfig =
+            serde_json::from_value(generated_topology.clone())
+                .map_err(|_| "runtime config generatedTopology is invalid")?;
+        crate::validate_generated_topology_config(&config)?;
+    }
     Ok(())
 }
 

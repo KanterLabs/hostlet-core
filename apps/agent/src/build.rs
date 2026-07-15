@@ -610,6 +610,73 @@ pub(crate) fn render_caddy_route(app: &str, domain: &str, port: u16) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_caddy_split_route_versioned(
+    cfg: &Config,
+    deployment_id: Uuid,
+    app: &str,
+    domain: &str,
+    frontend_port: u16,
+    backend_port: u16,
+    backend_prefixes: &[String],
+    generation: i64,
+) -> anyhow::Result<()> {
+    let _route_guard = route_write_lock().lock().await;
+    let dir = PathBuf::from("/etc/caddy/hostlet");
+    tokio::fs::create_dir_all(&dir).await?;
+    let target = dir.join(format!("{app}.caddy"));
+    ensure_no_conflicting_route(&dir, &target, domain).await?;
+    let previous = tokio::fs::read(&target).await.ok();
+    let rendered = format!(
+        "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{}",
+        render_caddy_split_route(app, domain, frontend_port, backend_port, backend_prefixes)
+    );
+    write_route_file(&target, &rendered).await?;
+    if let Err(err) = run_log(
+        cfg,
+        deployment_id,
+        "caddy",
+        &["reload", "--config", "/etc/caddy/Caddyfile"],
+    )
+    .await
+    {
+        restore_route_file(&target, previous).await?;
+        let _ = run_quiet("caddy", &["reload", "--config", "/etc/caddy/Caddyfile"]).await;
+        bail!("Caddy reload failed and the previous route was restored: {err}");
+    }
+    Ok(())
+}
+
+pub(crate) fn render_caddy_split_route(
+    app: &str,
+    domain: &str,
+    frontend_port: u16,
+    backend_port: u16,
+    backend_prefixes: &[String],
+) -> String {
+    let paths = caddy_backend_paths(backend_prefixes);
+    let api_handle = if paths.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  @hostletBackend path {}\n  handle @hostletBackend {{\n    reverse_proxy 127.0.0.1:{backend_port}\n  }}\n",
+            paths.join(" ")
+        )
+    };
+    format!(
+        "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n{domain} {{\n  @hostletWebsocket header Connection *Upgrade*\n  handle @hostletWebsocket {{\n    reverse_proxy 127.0.0.1:{backend_port}\n  }}\n{api_handle}  handle {{\n    reverse_proxy 127.0.0.1:{frontend_port}\n  }}\n}}\n"
+    )
+}
+
+fn caddy_backend_paths(prefixes: &[String]) -> Vec<String> {
+    let mut paths = Vec::with_capacity(prefixes.len() * 2);
+    for prefix in prefixes {
+        paths.push(prefix.clone());
+        paths.push(format!("{prefix}/*"));
+    }
+    paths
+}
+
 pub(crate) async fn remove_caddy_route(app: &str) -> anyhow::Result<()> {
     let target = PathBuf::from("/etc/caddy/hostlet").join(format!("{app}.caddy"));
     match tokio::fs::remove_file(target).await {
@@ -688,180 +755,93 @@ pub(crate) fn render_local_caddy_route(app: &str, domain: &str, port: u16) -> St
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_local_caddy_split_route_versioned(
+    cfg: &Config,
+    deployment_id: Uuid,
+    router: &LocalRouter,
+    app: &str,
+    domain: &str,
+    frontend_port: u16,
+    backend_port: u16,
+    backend_prefixes: &[String],
+    generation: i64,
+) -> anyhow::Result<()> {
+    let _route_guard = route_write_lock().lock().await;
+    tokio::fs::create_dir_all(&router.snippets_dir).await?;
+    let target = router.snippets_dir.join(format!("{app}.caddy"));
+    ensure_no_conflicting_route(&router.snippets_dir, &target, domain).await?;
+    let previous = tokio::fs::read(&target).await.ok();
+    let rendered = format!(
+        "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{}",
+        render_local_caddy_split_route(app, domain, frontend_port, backend_port, backend_prefixes)
+    );
+    write_route_file(&target, &rendered).await?;
+    if let Err(err) = run_router_reload(cfg, deployment_id, router).await {
+        restore_route_file(&target, previous).await?;
+        let _ = run_router_reload_quiet(router).await;
+        bail!("Caddy reload failed and the previous route was restored: {err}");
+    }
+    Ok(())
+}
 
-    fn test_build_plan() -> BuildPlan {
-        BuildPlan {
-            context: PathBuf::from("/tmp/hostlet-test-app"),
-            dockerfile: PathBuf::from("/tmp/hostlet-test-app/Dockerfile"),
-            generated: false,
-            packaging_strategy: PackagingStrategy::Dockerfile,
+pub(crate) fn render_local_caddy_split_route(
+    app: &str,
+    domain: &str,
+    frontend_port: u16,
+    backend_port: u16,
+    backend_prefixes: &[String],
+) -> String {
+    let paths = caddy_backend_paths(backend_prefixes);
+    let api_route = if paths.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "@{app}Backend {{\n  host {domain}\n  path {}\n}}\nreverse_proxy @{app}Backend 127.0.0.1:{backend_port}\n",
+            paths.join(" ")
+        )
+    };
+    format!(
+        "# hostlet-route-key: {app}\n# hostlet-domain: {domain}\n@{app}Websocket {{\n  host {domain}\n  header Connection *Upgrade*\n}}\nreverse_proxy @{app}Websocket 127.0.0.1:{backend_port}\n{api_route}@{app}Frontend host {domain}\nreverse_proxy @{app}Frontend 127.0.0.1:{frontend_port}\n"
+    )
+}
+
+pub(crate) async fn wait_tcp_health(
+    cfg: &Config,
+    deployment_id: Uuid,
+    container: &str,
+    port: u16,
+) -> anyhow::Result<Duration> {
+    let started = Instant::now();
+    let address = format!("{}:{port}", cfg.health_host);
+    let max_attempts = health_check_attempts();
+    for attempt in 1..=max_attempts {
+        if let Some(fatal) = fatal_container_failure(container).await {
+            bail!("{fatal}");
         }
-    }
-
-    #[test]
-    fn build_runtime_metadata_records_build_time_and_image_size() {
-        let metadata = build_runtime_metadata(
-            &test_build_plan(),
-            "hostlet/example:deployment",
-            12_345,
-            Some(149_422_080),
-        );
-
-        assert_eq!(metadata["imageRef"], "hostlet/example:deployment");
-        assert_eq!(
-            metadata["buildArtifact"]["imageRef"],
-            "hostlet/example:deployment"
-        );
-        assert_eq!(metadata["packagingStrategy"], "dockerfile");
-        assert_eq!(metadata["generatedDockerfile"], false);
-        assert_eq!(metadata["buildDurationMs"], 12_345);
-        assert_eq!(metadata["imageSizeBytes"], 149_422_080);
-        assert_eq!(metadata["imageBudgetStatus"], "ok");
-        assert_eq!(metadata["imageBudgetWarnBytes"], IMAGE_BUDGET_WARN_BYTES);
-        assert_eq!(metadata["imageBudgetMaxBytes"], IMAGE_BUDGET_MAX_BYTES);
-    }
-
-    #[test]
-    fn build_runtime_metadata_records_unknown_image_size() {
-        let metadata =
-            build_runtime_metadata(&test_build_plan(), "hostlet/example:unknown", 3_000, None);
-
-        assert_eq!(metadata["imageRef"], "hostlet/example:unknown");
-        assert_eq!(
-            metadata["buildArtifact"]["imageRef"],
-            "hostlet/example:unknown"
-        );
-        assert_eq!(metadata["packagingStrategy"], "dockerfile");
-        assert_eq!(metadata["buildDurationMs"], 3_000);
-        assert!(metadata["imageSizeBytes"].is_null());
-        assert_eq!(metadata["imageBudgetStatus"], "unknown");
-    }
-
-    #[test]
-    fn image_budget_status_classifies_thresholds() {
-        assert_eq!(image_budget_status(None), "unknown");
-        assert_eq!(image_budget_status(Some(IMAGE_BUDGET_WARN_BYTES)), "ok");
-        assert_eq!(
-            image_budget_status(Some(IMAGE_BUDGET_WARN_BYTES + 1)),
-            "warning"
-        );
-        assert_eq!(image_budget_status(Some(IMAGE_BUDGET_MAX_BYTES)), "warning");
-        assert_eq!(
-            image_budget_status(Some(IMAGE_BUDGET_MAX_BYTES + 1)),
-            "over_budget"
-        );
-    }
-
-    #[test]
-    fn startup_runtime_metadata_preserves_build_metrics_and_records_boot_time() {
-        let metadata = build_runtime_metadata(
-            &test_build_plan(),
-            "hostlet/example:startup",
-            2_000,
-            Some(42_000),
-        );
-        let metadata = add_git_sync_runtime_metadata(metadata, 175);
-        let metadata = add_build_plan_runtime_metadata(metadata, 45);
-        let metadata = add_startup_runtime_metadata(metadata, 350, 1_250);
-        let metadata = add_routing_runtime_metadata(metadata, 90);
-
-        assert_eq!(metadata["gitSyncDurationMs"], 175);
-        assert_eq!(metadata["buildPlanDurationMs"], 45);
-        assert_eq!(metadata["buildDurationMs"], 2_000);
-        assert_eq!(metadata["imageSizeBytes"], 42_000);
-        assert_eq!(metadata["containerStartDurationMs"], 350);
-        assert_eq!(metadata["healthCheckDurationMs"], 1_250);
-        assert_eq!(metadata["bootDurationMs"], 1_600);
-        assert_eq!(metadata["routingDurationMs"], 90);
-    }
-
-    #[test]
-    fn build_prepare_failure_runtime_metadata_records_sync_and_planning_time() {
-        let metadata = build_prepare_failure_runtime_metadata(35, 175);
-
-        assert_eq!(metadata["buildPlanDurationMs"], 35);
-        assert_eq!(metadata["gitSyncDurationMs"], 175);
-        assert!(metadata.as_object().is_some_and(|object| object.len() == 2));
-    }
-
-    #[tokio::test]
-    async fn health_check_request_times_out_per_probe() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            if let Ok((_socket, _peer)) = listener.accept().await {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-        });
-
-        let started = Instant::now();
-        let err = health_check_request(
-            &reqwest::Client::new(),
-            &format!("http://{addr}/health"),
-            Duration::from_millis(25),
+        let connected = tokio::time::timeout(
+            HEALTH_CHECK_REQUEST_TIMEOUT,
+            tokio::net::TcpStream::connect(&address),
         )
         .await
-        .unwrap_err();
-
-        assert!(err.is_timeout());
-        assert!(started.elapsed() < Duration::from_secs(2));
+        .is_ok_and(|result| result.is_ok());
+        if connected {
+            log(
+                cfg,
+                deployment_id,
+                "stdout",
+                &format!("TCP readiness passed at {address}."),
+            )
+            .await;
+            return Ok(started.elapsed());
+        }
+        if should_wait_before_next_health_attempt(attempt, max_attempts) {
+            tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
+        }
     }
-
-    #[test]
-    fn health_check_retry_schedule_skips_delay_after_final_attempt() {
-        assert!(should_wait_before_next_health_attempt(29, 30));
-        assert!(!should_wait_before_next_health_attempt(30, 30));
-    }
-
-    #[test]
-    fn health_check_attempts_value_accepts_valid_range() {
-        assert_eq!(health_check_attempts_value("1"), Some(1));
-        assert_eq!(health_check_attempts_value("30"), Some(30));
-        assert_eq!(health_check_attempts_value("900"), Some(900));
-        assert_eq!(health_check_attempts_value(" 60 "), Some(60));
-    }
-
-    #[test]
-    fn health_check_attempts_value_rejects_out_of_range_and_invalid() {
-        assert_eq!(health_check_attempts_value("0"), None);
-        assert_eq!(health_check_attempts_value("901"), None);
-        assert_eq!(health_check_attempts_value(""), None);
-        assert_eq!(health_check_attempts_value("  "), None);
-        assert_eq!(health_check_attempts_value("fast"), None);
-    }
-
-    #[test]
-    fn container_fatal_state_running_container_is_not_fatal() {
-        assert_eq!(container_fatal_state("true false false 0"), None);
-    }
-
-    #[test]
-    fn container_fatal_state_restarting_container_keeps_probing() {
-        assert_eq!(container_fatal_state("false true false 1"), None);
-    }
-
-    #[test]
-    fn container_fatal_state_stopped_container_reports_exit_code() {
-        let msg = container_fatal_state("false false false 2").unwrap();
-        assert!(
-            msg.contains("2"),
-            "exit code should appear in message: {msg}"
-        );
-        assert!(msg.contains("exited"), "message should mention exit: {msg}");
-    }
-
-    #[test]
-    fn container_fatal_state_oom_killed_container_reports_memory() {
-        let msg = container_fatal_state("false false true 137").unwrap();
-        assert!(msg.contains("OOM"), "OOM message should contain OOM: {msg}");
-    }
-
-    #[test]
-    fn container_fatal_state_malformed_input_is_not_fatal() {
-        assert_eq!(container_fatal_state(""), None);
-        assert_eq!(container_fatal_state("true"), None);
-    }
+    bail!("no successful TCP connection to {address}")
 }
+
+#[cfg(test)]
+#[path = "build/tests.rs"]
+mod tests;

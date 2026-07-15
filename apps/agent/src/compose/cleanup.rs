@@ -21,6 +21,10 @@ pub(crate) async fn delete_app(cfg: Config, p: Value) -> anyhow::Result<()> {
             }
         }
         remove_compose_project_resources(&stable_project).await?;
+        // Generated topologies use directly managed containers rather than a
+        // Compose project. Remove every app-labelled container before deleting
+        // its shared data volume.
+        remove_containers_for_app(app_id).await?;
     } else if let Some(project) = p.get("compose_project").and_then(Value::as_str) {
         remove_compose_project_resources(project).await?;
     }

@@ -171,6 +171,49 @@ async fn insert_cleanup_deployment_ago(
 // DB-gated tests -------------------------------------------------------------
 
 #[tokio::test]
+async fn db_cleanup_plan_keeps_all_current_topology_service_containers() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_cleanup_db(&state).await;
+    let user_id = insert_cleanup_user(&state).await;
+    let app_id = insert_cleanup_app(&state, user_id).await;
+    let deployment_id = insert_cleanup_deployment(
+        &state,
+        app_id,
+        "success",
+        "hostlet/app-topology:current",
+        "hostlet-topology-frontend",
+    )
+    .await;
+    sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+        .bind(deployment_id)
+        .bind(app_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO deployment_services
+         (deployment_id,app_id,service_name,role,container_name,status,health_status)
+         VALUES ($1,$2,'frontend','web','hostlet-topology-frontend','running','healthy'),
+                ($1,$2,'backend','web','hostlet-topology-backend','running','healthy')",
+    )
+    .bind(deployment_id)
+    .bind(app_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let plan = cleanup_plan(&state).await.unwrap();
+    assert!(plan
+        .keep_containers
+        .contains(&"hostlet-topology-frontend".to_string()));
+    assert!(plan
+        .keep_containers
+        .contains(&"hostlet-topology-backend".to_string()));
+}
+
+#[tokio::test]
 async fn db_cleanup_plan_marks_failed_deployment_containers_stale() {
     let Some(state) = crate::state::db_test_state_from_env().await else {
         return;

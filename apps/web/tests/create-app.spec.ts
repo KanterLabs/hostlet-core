@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { jsonRoute, mockApi } from "./support/mockApi";
+import { jsonRoute, LOCAL_SERVER_ID, mockApi } from "./support/mockApi";
 
 // HCR-004 — create a self-hosted app from a GitHub repo. Browser-proves the
 // post-create navigation (router.push to the deployment logs, or the app page
@@ -109,4 +109,101 @@ test("create falls back to the app page when the response carries no deployment"
     cpu_limit: 1,
     deploy_after_create: true,
   });
+});
+
+const topologyCandidate = (name: string, role: "frontend" | "backend", rootDirectory: string) => ({
+  selector: `node:${rootDirectory}/package.json:${name}`,
+  name,
+  role,
+  rootDirectory,
+  provider: "node",
+  packageManager: "pnpm",
+  buildCommand: `pnpm --filter ${name}... run build`,
+  startCommand: role === "backend" ? `pnpm --filter ${name} run start` : null,
+  outputDirectory: role === "frontend" ? `${rootDirectory}/dist` : null,
+  containerPort: role === "frontend" ? 80 : 3000,
+  healthProbe: role === "frontend" ? { kind: "http", path: "/" } : { kind: "tcp" },
+  publicEnv: role === "frontend" ? ["VITE_WS_URL"] : [],
+  evidence: [role === "frontend" ? "dependency vite" : "dependency ws"],
+});
+
+test("ambiguous topology requires selection and submits the selected services", async ({ page }) => {
+  let payload: Record<string, unknown> | null = null;
+  const frontend = topologyCandidate("client", "frontend", "packages/client");
+  const backend = topologyCandidate("server", "backend", "packages/server");
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/servers") {
+      await jsonRoute(route, [{ id: LOCAL_SERVER_ID, name: "This machine", kind: "local", status: "online", agentProtocolVersion: 3 }]);
+      return true;
+    }
+    if (path === "/api/github/repo-inspect") {
+      await jsonRoute(route, {
+        ...INSPECTION,
+        deployable: false,
+        runtimeKind: "single",
+        summary: "Hostlet found multiple runnable service candidates.",
+        inferencePlan: {
+          schemaVersion: 1,
+          readiness: "needs_selection",
+          confidence: "medium",
+          services: [],
+          candidates: [frontend, backend],
+          routing: null,
+          warnings: ["Choose at most one frontend and one backend before deploying."],
+          summary: "Hostlet found multiple runnable service candidates.",
+        },
+      });
+      return true;
+    }
+    if (path === "/api/apps" && route.request().method() === "POST") {
+      payload = route.request().postDataJSON();
+      await jsonRoute(route, { id: "app-topology", deploymentId: "deploy-topology" });
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/new");
+  await page.getByLabel("GitHub repo link").fill("https://github.com/acme/patchwork");
+  await page.getByRole("button", { name: "Inspect repo" }).click();
+  await expect(page.getByRole("button", { name: "Create app" })).toBeDisabled();
+  await page.getByLabel("Frontend").selectOption(frontend.selector);
+  await page.getByLabel("Backend").selectOption(backend.selector);
+  await page.getByLabel("Backend path prefixes").fill("/api, /socket.io");
+  await page.getByRole("button", { name: "Use selected topology" }).click();
+  await page.getByRole("button", { name: "Create and deploy" }).click();
+  await page.waitForURL(/\/deployments\/deploy-topology/);
+  expect(payload).toMatchObject({
+    runtime_kind: "compose",
+    runtime_config: { generatedTopology: {
+      schemaVersion: 1,
+      mode: "selected",
+      frontendSelector: frontend.selector,
+      backendSelector: backend.selector,
+      backendPathPrefixes: ["/api", "/socket.io"],
+    } },
+  });
+});
+
+test("topology deployment is blocked until the agent supports protocol v3", async ({ page }) => {
+  const frontend = topologyCandidate("client", "frontend", "packages/client");
+  const backend = topologyCandidate("server", "backend", "packages/server");
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/servers") {
+      await jsonRoute(route, [{ id: LOCAL_SERVER_ID, name: "This machine", kind: "local", status: "online", agentProtocolVersion: 2 }]);
+      return true;
+    }
+    if (path === "/api/github/repo-inspect") {
+      await jsonRoute(route, { ...INSPECTION, runtimeKind: "compose", runtimeConfig: { generatedTopology: { schemaVersion: 1, mode: "auto" } }, inferencePlan: {
+        schemaVersion: 1, readiness: "ready", confidence: "high", services: [frontend, backend], candidates: [frontend, backend],
+        routing: { websocketsToBackend: true, backendPathPrefixes: ["/api"] }, warnings: [], summary: "Hostlet found frontend and backend.",
+      } });
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/new");
+  await page.getByLabel("GitHub repo link").fill("https://github.com/acme/patchwork");
+  await page.getByRole("button", { name: "Inspect repo" }).click();
+  await expect(page.getByText(/protocol v3/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create and deploy" })).toBeDisabled();
 });

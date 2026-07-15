@@ -59,6 +59,33 @@ export type InspectionService = {
   volumes?: string[];
 };
 
+export type TopologyServiceCandidate = {
+  selector: string;
+  name: string;
+  role: "frontend" | "backend" | "web";
+  rootDirectory: string;
+  provider: string;
+  packageManager?: string | null;
+  buildCommand?: string | null;
+  startCommand?: string | null;
+  outputDirectory?: string | null;
+  containerPort: number;
+  healthProbe: { kind: "http" | "tcp"; path?: string | null };
+  publicEnv?: string[];
+  evidence: string[];
+};
+
+export type InferencePlan = {
+  schemaVersion: number;
+  readiness: "ready" | "needs_selection" | "unsupported";
+  confidence: "high" | "medium" | "low";
+  services: TopologyServiceCandidate[];
+  candidates: TopologyServiceCandidate[];
+  routing?: { websocketsToBackend: boolean; backendPathPrefixes: string[] } | null;
+  warnings: string[];
+  summary: string;
+};
+
 export type RepoInspection = {
   repoFullName: string;
   defaultBranch: string;
@@ -78,6 +105,7 @@ export type RepoInspection = {
   packageManager?: string;
   webService?: string;
   services?: InspectionService[];
+  inferencePlan?: InferencePlan;
   env: InspectEnv[];
   warnings: string[];
   summary: string;
@@ -100,6 +128,29 @@ export function mergeInspectionIntoForm(current: CreateAppForm, result: RepoInsp
     hostlet_config_path: result.hostletConfigPath || current.hostlet_config_path,
     runtime_config: result.runtimeConfig || {},
     packaging_strategy: result.recommendedPackagingStrategy || result.packagingStrategy || current.packaging_strategy,
+  };
+}
+
+export function selectedTopologyRuntimeConfig({
+  current,
+  frontendSelector,
+  backendSelector,
+  backendPathPrefixes,
+}: {
+  current: Record<string, unknown>;
+  frontendSelector: string;
+  backendSelector: string;
+  backendPathPrefixes: string[];
+}): Record<string, unknown> {
+  return {
+    ...current,
+    generatedTopology: {
+      schemaVersion: 1,
+      mode: "selected",
+      ...(frontendSelector ? { frontendSelector } : {}),
+      ...(backendSelector ? { backendSelector } : {}),
+      backendPathPrefixes,
+    },
   };
 }
 
@@ -150,6 +201,7 @@ export function createAppDisabledReason({
   if (!form.branch.trim()) return "Enter a branch.";
   if (!form.server_id) return "Choose a local deploy target.";
   if (requiredEnvMissing) return "Fill required environment values from the repo inspection.";
+  if (inspection?.inferencePlan?.readiness === "needs_selection") return "Choose the services Hostlet should deploy.";
   if (inspection?.deployable === false) return "This repo is not deployable yet. Add a supported app manifest or start command, then inspect again.";
   return "";
 }

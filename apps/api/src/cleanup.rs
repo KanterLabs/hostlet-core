@@ -294,7 +294,7 @@ async fn docker_keep_lists(
     let protected_statuses = docker_cleanup_keep_statuses();
     let keep_rows = sqlx::query(&format!(
         r#"WITH candidates AS ({CANDIDATES_CTE_BODY})
-        SELECT container_name, image_tag, runtime_metadata
+        SELECT id, container_name, image_tag, runtime_metadata
         FROM candidates
         WHERE {KEEP_PREDICATE}"#
     ))
@@ -308,6 +308,39 @@ async fn docker_keep_lists(
         .iter()
         .filter_map(|row| row.get::<Option<String>, _>("container_name"))
         .collect::<Vec<_>>();
+    let protected_deployment_ids = keep_rows
+        .iter()
+        .map(|row| row.get::<Uuid, _>("id"))
+        .collect::<Vec<_>>();
+    if !protected_deployment_ids.is_empty() {
+        keep_containers.extend(
+            sqlx::query_scalar::<_, String>(
+                "SELECT container_name FROM deployment_services \
+                 WHERE deployment_id = ANY($1) AND container_name IS NOT NULL",
+            )
+            .bind(&protected_deployment_ids)
+            .fetch_all(&state.db)
+            .await?,
+        );
+        let candidates = sqlx::query_scalar::<_, Value>(
+            "SELECT result_json FROM agent_jobs \
+             WHERE deployment_id = ANY($1) AND result_json IS NOT NULL",
+        )
+        .bind(&protected_deployment_ids)
+        .fetch_all(&state.db)
+        .await?;
+        for candidate in candidates.into_iter().filter_map(|value| {
+            serde_json::from_value::<hostlet_contracts::CandidateRuntime>(value).ok()
+        }) {
+            keep_containers.push(candidate.container_name);
+            keep_containers.extend(
+                candidate
+                    .services
+                    .into_iter()
+                    .filter_map(|service| service.container_name),
+            );
+        }
+    }
     keep_containers.sort();
     keep_containers.dedup();
     let mut keep_images = keep_rows

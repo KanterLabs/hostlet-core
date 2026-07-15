@@ -8,6 +8,7 @@ pub(super) struct HealthTarget {
     container_port: u16,
     pub(crate) published_port: u16,
     health_path: String,
+    tcp_probe: bool,
     domain: Option<String>,
     route_key: Option<String>,
     route_generation: Option<i64>,
@@ -104,6 +105,11 @@ pub(super) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
     if validate_health_path(health_path).is_err() {
         return None;
     }
+    let tcp_probe = value
+        .get("probeKind")
+        .or_else(|| value.get("probe_kind"))
+        .and_then(Value::as_str)
+        == Some("tcp");
     let domain = value
         .get("domain")
         .and_then(|v| v.as_str())
@@ -125,6 +131,7 @@ pub(super) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
         container_port,
         published_port,
         health_path: health_path.to_string(),
+        tcp_probe,
         domain,
         route_key,
         route_generation,
@@ -188,6 +195,39 @@ pub(super) async fn probe_health_target(
         };
     }
     let url = health_url(cfg, target);
+    if target.tcp_probe {
+        return match tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(("127.0.0.1", target.published_port)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => HealthProbeResult {
+                healthy: true,
+                url,
+                http_status: None,
+                latency_ms: started.elapsed().as_millis(),
+                error: None,
+                container_state: Some(container_state),
+            },
+            Ok(Err(err)) => HealthProbeResult {
+                healthy: false,
+                url,
+                http_status: None,
+                latency_ms: started.elapsed().as_millis(),
+                error: Some(err.to_string()),
+                container_state: Some(container_state),
+            },
+            Err(_) => HealthProbeResult {
+                healthy: false,
+                url,
+                http_status: None,
+                latency_ms: started.elapsed().as_millis(),
+                error: Some("TCP health probe timed out".into()),
+                container_state: Some(container_state),
+            },
+        };
+    }
     match cfg
         .http
         .get(&url)
@@ -451,6 +491,22 @@ mod tests {
             target.route_key.as_deref(),
             Some("app-00000000-0000-0000-0000-000000000001")
         );
+        assert!(!target.tcp_probe);
+    }
+
+    #[test]
+    fn health_target_payload_preserves_tcp_probe_kind() {
+        let target = health_target_from_payload(&json!({
+            "appId": Uuid::from_u128(1),
+            "deploymentId": Uuid::from_u128(2),
+            "containerName": "hostlet-app-websocket",
+            "containerPort": 3000,
+            "publishedPort": 32001,
+            "healthPath": "/",
+            "probeKind": "tcp"
+        }))
+        .unwrap();
+        assert!(target.tcp_probe);
     }
 
     #[test]

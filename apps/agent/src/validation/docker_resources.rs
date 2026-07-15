@@ -320,6 +320,22 @@ pub(crate) async fn compose_projects_for_app(app_id: Uuid) -> anyhow::Result<Has
         .collect())
 }
 
+pub(crate) async fn remove_containers_for_app(app_id: Uuid) -> anyhow::Result<()> {
+    let containers = docker_names_by_label(
+        "ps",
+        &["-a", "--filter", &format!("label=hostlet.app_id={app_id}")],
+        "{{.Names}}",
+    )
+    .await?;
+    for container in containers {
+        if !valid_container_name(&container) {
+            bail!("refusing to remove invalid app-owned container name");
+        }
+        run_quiet_absent_ok("docker", &["rm", "-f", &container], &["No such container"]).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_compose_network(network: &str, project: &str) -> anyhow::Result<()> {
     if !valid_compose_project_name(project)
         || !network.starts_with(project)

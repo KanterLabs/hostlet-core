@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
 # shellcheck source=scripts/ci-metrics-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-metrics-lib.sh"
+# shellcheck source=scripts/ci-self-hosted-topology-e2e.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-topology-e2e.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"
 POSTGRES_CONTAINER="hostlet-ci-self-deploy-postgres-${RUN_ID}"
@@ -23,6 +25,8 @@ APP_REPO_NAME="node-hello"
 APP_REPO_FULL="hostlet-ci/${APP_REPO_NAME}"
 COMPOSE_REPO_NAME="compose-fullstack"
 COMPOSE_REPO_FULL="hostlet-ci/${COMPOSE_REPO_NAME}"
+TOPOLOGY_REPO_NAME="topology-patchwork"
+TOPOLOGY_REPO_FULL="hostlet-ci/${TOPOLOGY_REPO_NAME}"
 RAILPACK_FIXTURES=(
   "python:python-api:/health:hostlet-generated-python"
   "go:go-api:/health:hostlet-generated-go"
@@ -33,6 +37,7 @@ RAILPACK_FIXTURES=(
   "next-pnpm:next-pnpm-site:/:hostlet-generated-next-pnpm"
 )
 CREATED_APP_IDS=()
+declare -A FIXTURE_SHAS=()
 RAILPACK_BUILDKIT_PREEXISTED=0
 FAILED=0
 RAILPACK_BUILDKIT_CONTAINER="${HOSTLET_RAILPACK_BUILDKIT_CONTAINER:-hostlet-railpack-buildkit-${RUN_ID}}"
@@ -218,6 +223,7 @@ make_fixture_repo() {
   cp -R "${fixture}/." .
   git add .
   git commit -m "initial app" >/dev/null
+  FIXTURE_SHAS["${repo_name}"]="$(git rev-parse HEAD)"
   git clone --bare . "${TMP_DIR}/git/${repo_name}.git" >/dev/null 2>&1
   cd "${ROOT}"
   cat > "${GIT_CONFIG_GLOBAL}" <<EOF
@@ -318,6 +324,17 @@ POSTGRES_PORT="$(discover_postgres_port)"
 
 make_fixture_repo "${APP_REPO_NAME}" "${ROOT}/scripts/fixtures/generated-apps/node"
 make_fixture_repo "${COMPOSE_REPO_NAME}" "${ROOT}/scripts/fixtures/generated-apps/compose"
+topology_fixture="${ROOT}/scripts/fixtures/generated-apps/topology-patchwork"
+if [ -n "${HOSTLET_TOPOLOGY_CANARY_REPO:-}" ]; then
+  canary_sha="${HOSTLET_TOPOLOGY_CANARY_SHA:-}"
+  [[ "${canary_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "HOSTLET_TOPOLOGY_CANARY_SHA must be a full commit SHA" >&2; exit 1; }
+  topology_fixture="${TMP_DIR}/topology-canary"
+  git clone --filter=blob:none "https://github.com/${HOSTLET_TOPOLOGY_CANARY_REPO}.git" "${topology_fixture}"
+  git -C "${topology_fixture}" checkout --detach "${canary_sha}"
+  [ "$(git -C "${topology_fixture}" rev-parse HEAD)" = "${canary_sha}" ]
+  rm -rf "${topology_fixture}/.git"
+fi
+make_fixture_repo "${TOPOLOGY_REPO_NAME}" "${topology_fixture}"
 for fixture in "${RAILPACK_FIXTURES[@]}"; do
   IFS=: read -r fixture_name repo_name _health_path _expected <<<"${fixture}"
   make_fixture_repo "${repo_name}" "${ROOT}/scripts/fixtures/generated-apps/${fixture_name}"
@@ -435,7 +452,7 @@ JSON
   railpack_app_id="$(printf '%s' "${railpack_app_payload}" | json_get id)"
   CREATED_APP_IDS+=("${railpack_app_id}")
 
-  railpack_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${railpack_app_id}/deploy" --data '{}')"
+  railpack_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${railpack_app_id}/deploy" --data "{\"commitSha\":\"${FIXTURE_SHAS[${repo_name}]}\"}")"
   railpack_deployment_id="$(printf '%s' "${railpack_deploy_payload}" | json_get deploymentId)"
   wait_deployment_status "${railpack_deployment_id}"
 
@@ -524,7 +541,7 @@ JSON
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
   printf '%s' "${detail}" | json_get runtimeKind | grep -q '^compose$'
 
-  deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+  deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data "{\"commitSha\":\"${FIXTURE_SHAS[${APP_REPO_NAME}]}\"}")"
   deployment_id="$(printf '%s' "${deploy_payload}" | json_get deploymentId)"
   wait_deployment_status "${deployment_id}"
 
@@ -546,7 +563,7 @@ assert roles.get("postgres") == "backing", roles
     echo "managed add-on backing service published a host port" >&2
     exit 1
   fi
-  docker ps --filter "label=com.docker.compose.project=${project}" --filter "label=hostlet.role=web" --format '{{.Ports}}' | grep -q '127.0.0.1'
+  docker ps --filter "label=hostlet.app_id=${app_id}" --filter "label=hostlet.role=web" --format '{{.Ports}}' | grep -q '127.0.0.1'
 
   # The backing Postgres carries the per-service caps from runtime_config
   # (256 MB = 268435456 bytes; 0.25 CPU = 250000000 NanoCpus).
@@ -584,6 +601,7 @@ assert roles.get("postgres") == "backing", roles
   echo "managed add-ons (web + Postgres) E2E passed"
 }
 
+
 # ---------------------------------------------------------------------------
 # First-run setup + authenticate a CI user.
 # ---------------------------------------------------------------------------
@@ -605,7 +623,11 @@ AGENT_PID="$!"
 
 agent_ready=0
 for _ in $(seq 1 "${AGENT_STARTUP_ATTEMPTS}"); do
-  if curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/servers" | grep -q '"status":"online"'; then
+  if curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/servers" | python3 -c '
+import json, sys
+servers=json.load(sys.stdin)
+raise SystemExit(0 if any(s.get("status") == "online" and s.get("agentProtocolVersion", 1) >= 3 for s in servers) else 1)
+'; then
     agent_ready=1
     break
   fi
@@ -654,7 +676,13 @@ CREATED_APP_IDS+=("${app_id}")
 # Deploy v1: container comes up healthy, serves v1, logs redact the secret, and
 # the published port is bound to loopback only.
 # ---------------------------------------------------------------------------
-deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+deploy_response="$(curl -sS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data "{\"commitSha\":\"${FIXTURE_SHAS[${APP_REPO_NAME}]}\"}" -w $'\n%{http_code}')"
+deploy_status="${deploy_response##*$'\n'}"
+deploy_payload="${deploy_response%$'\n'*}"
+if [ "${deploy_status}" != "200" ]; then
+  echo "initial deploy request failed (${deploy_status}): ${deploy_payload}" >&2
+  exit 1
+fi
 deployment_id="$(printf '%s' "${deploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${deployment_id}"
 
@@ -766,7 +794,7 @@ printf '%s' "${port_repair_logs}" | grep -q "Detected Docker-published port drif
 # the original v1 marker).
 # ---------------------------------------------------------------------------
 expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PUT "${BASE_URL}/api/apps/${app_id}/env/APP_VERSION" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"value":"v2"}'
-redeploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+redeploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data "{\"commitSha\":\"${FIXTURE_SHAS[${APP_REPO_NAME}]}\"}")"
 redeploy_id="$(printf '%s' "${redeploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${redeploy_id}"
 published_app_serves 'hostlet-ci-v2-v1'
@@ -839,7 +867,7 @@ compose_app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}"
 compose_app_id="$(printf '%s' "${compose_app_payload}" | json_get id)"
 CREATED_APP_IDS+=("${compose_app_id}")
 
-compose_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${compose_app_id}/deploy" --data '{}')"
+compose_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${compose_app_id}/deploy" --data "{\"commitSha\":\"${FIXTURE_SHAS[${COMPOSE_REPO_NAME}]}\"}")"
 compose_deployment_id="$(printf '%s' "${compose_deploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${compose_deployment_id}"
 
@@ -863,14 +891,14 @@ if printf '%s' "${compose_logs}" | grep -q 'compose-secret-value-for-redaction';
   echo "compose deployment logs exposed a raw secret" >&2
   exit 1
 fi
-docker ps --filter "label=com.docker.compose.project=hostlet-app-${compose_app_id//-/}" --format '{{.Ports}}' | grep -q '127.0.0.1'
+docker ps --filter "label=hostlet.app_id=${compose_app_id}" --filter "label=hostlet.role=web" --format '{{.Ports}}' | grep -q '127.0.0.1'
 
 # The fixture's web service persists to a relative host bind (./data:/app/data).
 # The agent must auto-map that to a managed *named* volume — never a host bind —
 # so assert the running web container mounts a volume (not a bind) at /app/data
 # and that the app can actually read back what it wrote there.
 compose_web_container="$(docker ps \
-  --filter "label=com.docker.compose.project=hostlet-app-${compose_app_id//-/}" \
+  --filter "label=hostlet.app_id=${compose_app_id}" \
   --filter "label=com.docker.compose.service=web" --format '{{.ID}}' | head -1)"
 compose_web_mount_type="$(docker inspect -f \
   '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Type}}{{end}}{{end}}' \
@@ -920,5 +948,8 @@ fi
 
 # Managed add-ons (web app + Hostlet-managed Postgres) — the Phase 1b path.
 deploy_managed_addons_app
+
+# Generated frontend + WebSocket backend topology.
+deploy_generated_topology_app
 
 echo "self-hosted deploy E2E passed"

@@ -292,10 +292,17 @@ fn is_machine_agent_path(path: &str) -> bool {
             | "/api/agent/events"
             | "/api/agent/jobs/claim"
             | "/api/agent/screenshots"
-    ) || path
-        .strip_prefix("/api/agent/jobs/")
-        .and_then(|rest| rest.strip_suffix("/complete"))
-        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    ) || ["/complete", "/heartbeat"].iter().any(|suffix| {
+        path.strip_prefix("/api/agent/jobs/")
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    }) || ["/prepare-activation", "/commit-activation"]
+        .iter()
+        .any(|suffix| {
+            path.strip_prefix("/api/agent/deployments/")
+                .and_then(|rest| rest.strip_suffix(suffix))
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        })
 }
 
 fn request_origin(headers: &HeaderMap) -> Option<String> {
@@ -365,6 +372,14 @@ mod tests {
             &Method::POST,
             "/api/agent/register"
         ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/deployments/00000000-0000-0000-0000-000000000001/prepare-activation"
+        ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/deployments/00000000-0000-0000-0000-000000000001/commit-activation"
+        ));
         assert!(!requires_browser_origin(&Method::POST, "/api/agent/events"));
         assert!(!requires_browser_origin(
             &Method::POST,
@@ -373,6 +388,10 @@ mod tests {
         assert!(!requires_browser_origin(
             &Method::POST,
             "/api/agent/jobs/00000000-0000-0000-0000-000000000001/complete"
+        ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/jobs/00000000-0000-0000-0000-000000000001/heartbeat"
         ));
     }
 

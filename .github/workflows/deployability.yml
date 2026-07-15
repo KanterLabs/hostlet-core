@@ -51,3 +51,23 @@ jobs:
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - run: scripts/ci-self-hosted-api-smoke.sh
+
+  patchwork-canary:
+    if: github.event_name == 'schedule'
+    continue-on-error: true
+    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"
+      HOSTLET_TOPOLOGY_CANARY_REPO: ShaneKanterman04/patchwork-pirates
+      HOSTLET_TOPOLOGY_CANARY_SHA: fae18d0fab8bc5586a33af598fa4371a06f51576
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging
+      - run: scripts/ci-verify-runner.sh
+      - run: scripts/ci-install-railpack.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/ci-self-hosted-deploy-e2e.sh

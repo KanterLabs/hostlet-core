@@ -16,8 +16,9 @@ use axum::{
 };
 use hostlet_contracts::compose::{detect_data_mount_path, with_data_mount_path};
 use hostlet_contracts::{
-    detect_start_command, parse_github_repo, valid_commit_sha, with_command_suggestion,
-    RepoCommandFiles,
+    attach_topology_plan, detect_start_command, parse_github_repo, plan_repository_topology,
+    valid_commit_sha, with_command_suggestion, RepoCommandFiles, RepositoryFile,
+    RepositoryInventory, TopologyReadiness,
 };
 use inference::{
     compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
@@ -31,6 +32,9 @@ use sqlx::Row;
 use uuid::Uuid;
 
 const GITHUB_INSPECTION_FILE_MAX_BYTES: u64 = 128 * 1024;
+const GITHUB_INVENTORY_MAX_FILES: usize = 10_000;
+const GITHUB_INVENTORY_MAX_RELEVANT_FILES: usize = 256;
+const GITHUB_INVENTORY_MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct RepoInspectRequest {
@@ -342,6 +346,7 @@ async fn inspect_repo(
             .map(|(source_file, contents)| (*source_file, contents.as_str())),
         dockerfile: dockerfile.as_deref(),
     });
+    let railpack_config = github_file_text(state, repo, branch, "railpack.json", token).await?;
 
     // Auto-detected backing services come from two complementary signals: the
     // repo's dependency manifests (per language, below) and a bare compose file's
@@ -352,6 +357,53 @@ async fn inspect_repo(
     // generated multi-service stack.
     let (compose_addons, data_mount_path) =
         detect_compose_signals(state, repo, branch, token).await?;
+
+    // When the repository owner has not supplied a runnable root process or an
+    // explicit packaging file, inspect the whole bounded tree. This is the
+    // zero-config path for workspace coordinators such as a pnpm monorepo whose
+    // actual frontend/backend live below packages/. The same pure planner runs
+    // again against the immutable checkout in the agent.
+    if command_suggestion.is_none() && dockerfile.is_none() && railpack_config.is_none() {
+        let inventory = github_repository_inventory(state, repo, branch, token).await?;
+        let plan = plan_repository_topology(&inventory);
+        if plan.readiness != TopologyReadiness::Unsupported {
+            let base = if let Some(package_text) = package_json.as_deref() {
+                let inference = infer_package_json(
+                    package_text,
+                    inventory_has(&inventory, "bun.lock") || inventory_has(&inventory, "bun.lockb"),
+                    inventory_has(&inventory, "pnpm-lock.yaml"),
+                    inventory_has(&inventory, "yarn.lock"),
+                );
+                node_inspection(
+                    repo,
+                    branch,
+                    default_branch,
+                    inference,
+                    dockerfile.is_some(),
+                )
+            } else {
+                let language = plan
+                    .services
+                    .first()
+                    .map(|service| match service.provider.as_str() {
+                        "python" => "Python",
+                        "golang" => "Go",
+                        "rust" => "Rust",
+                        "staticfile" => "static",
+                        _ => "generated",
+                    })
+                    .unwrap_or("generated");
+                railpack_inspection(repo, branch, default_branch, language)
+            };
+            let mut detected = inventory_detected_services(&inventory);
+            detected.merge(&compose_addons);
+            let inspection = apply_data_mount_path(
+                with_detected_services(base, &detected),
+                data_mount_path.as_deref(),
+            );
+            return Ok(attach_topology_plan(inspection, &plan));
+        }
+    }
 
     if let Some(package_text) = package_json {
         let inference = infer_package_json(
@@ -506,6 +558,126 @@ async fn github_file_text(
             .text()
             .await?,
     ))
+}
+
+fn inventory_has(inventory: &RepositoryInventory, filename: &str) -> bool {
+    inventory
+        .files
+        .iter()
+        .any(|file| file.path == filename || file.path.ends_with(&format!("/{filename}")))
+}
+
+fn inventory_detected_services(inventory: &RepositoryInventory) -> DetectedServices {
+    let mut detected = DetectedServices::default();
+    for file in &inventory.files {
+        let Some(contents) = file.contents.as_deref() else {
+            continue;
+        };
+        let current = if file.path.ends_with("package.json") {
+            infer_service_addons(&package_json_dependencies(contents))
+        } else if matches!(
+            file.path.rsplit('/').next(),
+            Some("requirements.txt" | "pyproject.toml" | "go.mod" | "Cargo.toml")
+        ) {
+            infer_service_addons(&manifest_dependency_tokens(contents))
+        } else {
+            continue;
+        };
+        detected.merge(&current);
+    }
+    detected
+}
+
+/// Fetches the recursive tree once and downloads only small files that can
+/// affect topology inference. Lockfiles are represented by path only: manager
+/// detection needs their presence, while dependency resolution remains the
+/// agent's responsibility and large lock contents never enter API memory.
+async fn github_repository_inventory(
+    state: &AppState,
+    repo: &str,
+    branch: &str,
+    token: Option<&str>,
+) -> anyhow::Result<RepositoryInventory> {
+    let encoded_branch =
+        url::form_urlencoded::byte_serialize(branch.as_bytes()).collect::<String>();
+    let mut request = state
+        .http
+        .get(format!(
+            "https://api.github.com/repos/{repo}/git/trees/{encoded_branch}?recursive=1"
+        ))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "Hostlet");
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let tree: Value = request.send().await?.error_for_status()?.json().await?;
+    let entries = tree
+        .get("tree")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut relevant = entries
+        .into_iter()
+        .take(GITHUB_INVENTORY_MAX_FILES)
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("blob"))
+        .filter_map(|entry| {
+            let path = entry.get("path")?.as_str()?.to_string();
+            let size = entry
+                .get("size")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            topology_inventory_path(&path).then_some((path, size))
+        })
+        .take(GITHUB_INVENTORY_MAX_RELEVANT_FILES)
+        .collect::<Vec<_>>();
+    relevant.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut files = Vec::with_capacity(relevant.len());
+    let mut content_bytes = 0usize;
+    for (path, size) in relevant {
+        let filename = path.rsplit('/').next().unwrap_or(&path);
+        let is_lock = matches!(
+            filename,
+            "pnpm-lock.yaml" | "yarn.lock" | "package-lock.json" | "bun.lock" | "bun.lockb"
+        );
+        let contents = if is_lock
+            || size > GITHUB_INSPECTION_FILE_MAX_BYTES
+            || content_bytes + size as usize > GITHUB_INVENTORY_MAX_CONTENT_BYTES
+        {
+            None
+        } else {
+            let contents = github_file_text(state, repo, branch, &path, token).await?;
+            content_bytes += contents.as_ref().map(String::len).unwrap_or_default();
+            contents
+        };
+        files.push(RepositoryFile { path, contents });
+    }
+    Ok(RepositoryInventory { files })
+}
+
+fn topology_inventory_path(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        filename,
+        "package.json"
+            | "pnpm-workspace.yaml"
+            | "pnpm-lock.yaml"
+            | "package-lock.json"
+            | "yarn.lock"
+            | "bun.lock"
+            | "bun.lockb"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "go.mod"
+            | "go.work"
+            | "Cargo.toml"
+            | "index.html"
+            | "main.rs"
+    ) || path.ends_with(".go")
+        || matches!(
+            path.rsplit('.').next(),
+            Some("js" | "jsx" | "ts" | "tsx" | "vue" | "svelte")
+        )
 }
 
 pub async fn ensure_repo_webhook(
@@ -808,87 +980,5 @@ async fn insert_webhook_app_event(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{repo_inspect_failure, StatusCode};
-    use hostlet_contracts::{parse_github_repo, valid_commit_sha};
-
-    #[test]
-    fn rejects_branch_delete_zero_sha() {
-        assert!(!valid_commit_sha(
-            "0000000000000000000000000000000000000000"
-        ));
-    }
-
-    #[test]
-    fn accepts_normal_commit_sha() {
-        assert!(valid_commit_sha("0123456789abcdef0123456789abcdef01234567"));
-    }
-
-    #[test]
-    fn parses_github_repo_inputs() {
-        assert_eq!(
-            parse_github_repo("https://github.com/go-gitea/gitea"),
-            Some("go-gitea/gitea".into())
-        );
-        assert_eq!(
-            parse_github_repo("git@github.com:owner/repo.git"),
-            Some("owner/repo".into())
-        );
-        assert_eq!(parse_github_repo("owner/repo"), Some("owner/repo".into()));
-        assert_eq!(parse_github_repo("https://example.com/owner/repo"), None);
-    }
-
-    #[test]
-    fn repo_inspect_failure_404_gives_not_found_with_check_name_hint() {
-        let (status, body) = repo_inspect_failure(Some(404));
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(
-            body.contains("not found"),
-            "body should mention 'not found': {body}"
-        );
-        assert!(
-            body.contains("owner/repo") || body.contains("reconnect"),
-            "body should hint at fix: {body}"
-        );
-    }
-
-    #[test]
-    fn repo_inspect_failure_401_gives_bad_gateway_with_reconnect_hint() {
-        let (status, body) = repo_inspect_failure(Some(401));
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(body.contains("401"), "body should include status: {body}");
-        assert!(
-            body.contains("Reconnect"),
-            "body should suggest reconnect: {body}"
-        );
-    }
-
-    #[test]
-    fn repo_inspect_failure_403_gives_bad_gateway() {
-        let (status, body) = repo_inspect_failure(Some(403));
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(body.contains("403"), "body should include status: {body}");
-    }
-
-    #[test]
-    fn repo_inspect_failure_429_gives_rate_limit_message() {
-        let (status, body) = repo_inspect_failure(Some(429));
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(
-            body.contains("rate-limited"),
-            "body should mention rate limit: {body}"
-        );
-    }
-
-    #[test]
-    fn repo_inspect_failure_other_and_none_give_generic_bad_gateway() {
-        for input in [None, Some(500u16), Some(503)] {
-            let (status, body) = repo_inspect_failure(input);
-            assert_eq!(status, StatusCode::BAD_GATEWAY);
-            assert_eq!(
-                body, "GitHub repository could not be inspected",
-                "unexpected body for {input:?}"
-            );
-        }
-    }
-}
+#[path = "github/tests.rs"]
+mod tests;

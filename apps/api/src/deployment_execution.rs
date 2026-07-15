@@ -271,10 +271,12 @@ pub async fn commit_activation(
     .is_err()
         || sqlx::query(
             "UPDATE deployments SET status=$2,failure_summary=NULL,failure_code=NULL,
+                    runtime_metadata=COALESCE($3,runtime_metadata),
                     finished_at=now(),last_heartbeat_at=now() WHERE id=$1",
         )
         .bind(deployment_id)
         .bind(terminal_status)
+        .bind(&request.runtime_metadata)
         .execute(&mut *tx)
         .await
         .is_err()

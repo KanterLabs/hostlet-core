@@ -1,0 +1,16 @@
+lockfileVersion: '9.0'
+
+importers:
+  .: {}
+  packages/client:
+    devDependencies:
+      vite:
+        specifier: workspace:*
+        version: link:../../stubs/vite
+  packages/server:
+    dependencies:
+      ws:
+        specifier: workspace:*
+        version: link:../../stubs/ws
+  stubs/vite: {}
+  stubs/ws: {}

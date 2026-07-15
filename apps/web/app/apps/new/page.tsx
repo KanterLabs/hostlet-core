@@ -15,11 +15,12 @@ import {
   envValuesFromInspection,
   mergeInspectionIntoForm,
   parseGitHubRepo,
+  selectedTopologyRuntimeConfig,
   slugAppName,
 } from "./createAppForm";
 
 type Repo = { full_name: string; private: boolean; default_branch: string; updated_at?: string };
-type ServerRow = { id: string; name: string; kind: string; status: string };
+type ServerRow = { id: string; name: string; kind: string; status: string; agentProtocolVersion?: number };
 type CloudflareStatus = {
   baseDomain?: string | null;
   defaultDomainPattern?: string | null;
@@ -66,6 +67,9 @@ export default function CreateApp() {
   const [message, setMessage] = useState("");
   const [creating, setCreating] = useState(false);
   const [subdomain, setSubdomain] = useState("");
+  const [frontendSelector, setFrontendSelector] = useState("");
+  const [backendSelector, setBackendSelector] = useState("");
+  const [backendPrefixes, setBackendPrefixes] = useState("/api, /graphql, /socket.io, /trpc");
 
   useEffect(() => {
     api<ServerRow[]>("/api/servers")
@@ -136,6 +140,9 @@ export default function CreateApp() {
       // edits to those fields are detected as stale.
       const merged = mergeInspectionIntoForm(form, result);
       setInspection(result);
+      setFrontendSelector("");
+      setBackendSelector("");
+      setBackendPrefixes((result.inferencePlan?.routing?.backendPathPrefixes || ["/api", "/graphql", "/socket.io", "/trpc"]).join(", "));
       setEnvValues(envValuesFromInspection(result));
       setForm(merged);
       setInspectionKey(inspectionKeyOf(merged));
@@ -145,6 +152,39 @@ export default function CreateApp() {
     } finally {
       setInspecting(false);
     }
+  }
+
+  function applyTopologySelection() {
+    if (!inspection?.inferencePlan || (!frontendSelector && !backendSelector)) return;
+    const prefixes = backendPrefixes
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const selected = inspection.inferencePlan.candidates.filter(
+      (candidate) => candidate.selector === frontendSelector || candidate.selector === backendSelector,
+    );
+    setForm((current) => ({
+      ...current,
+      runtime_kind: selected.length > 1 ? "compose" : "single",
+      runtime_config: selectedTopologyRuntimeConfig({
+        current: current.runtime_config,
+        frontendSelector,
+        backendSelector,
+        backendPathPrefixes: prefixes,
+      }),
+    }));
+    setInspection((current) => current ? {
+      ...current,
+      deployable: true,
+      runtimeKind: selected.length > 1 ? "compose" : "single",
+      inferencePlan: current.inferencePlan ? {
+        ...current.inferencePlan,
+        readiness: "ready",
+        services: selected,
+        routing: backendSelector ? { websocketsToBackend: true, backendPathPrefixes: prefixes } : null,
+      } : undefined,
+    } : current);
+    setMessage("Topology selected. Hostlet will verify it again against the deployment commit.");
   }
 
   async function submit() {
@@ -195,8 +235,13 @@ export default function CreateApp() {
   const requiredEnvMissing = inspection?.env?.some((item) => item.required && !envValues[item.key]?.trim()) || false;
   // A non-null inspection whose key drifted from the current fields is stale.
   const inspectionStale = inspection !== null && inspectionKey !== inspectionKeyOf(form);
+  const agentUpgradeRequired = !!inspection?.inferencePlan
+    && inspection.inferencePlan.readiness !== "unsupported"
+    && (selectedServer?.agentProtocolVersion || 1) < 3;
   const createDisabledReason = inspectionStale
     ? "Re-inspect this repo and branch before deploying."
+    : agentUpgradeRequired
+      ? "Update the Hostlet agent to protocol v3 before deploying this inferred topology."
     : createAppDisabledReason({ form, requiredEnvMissing, inspection });
   const canCreate = !createDisabledReason;
 
@@ -263,6 +308,53 @@ export default function CreateApp() {
                       <div className="mt-3 grid gap-2 sm:grid-cols-2">
                         <SummaryItem label="Framework" value={inspection.detectedFramework || "Custom Dockerfile"} />
                         <SummaryItem label="Package manager" value={inspection.packageManager || "n/a"} />
+                      </div>
+                    )}
+                    {inspection.inferencePlan && (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="eyebrow">Hostlet inference plan</div>
+                          <Badge variant={inspection.inferencePlan.readiness === "ready" ? "success" : "warning"}>
+                            {inspection.inferencePlan.confidence} confidence
+                          </Badge>
+                        </div>
+                        {(inspection.inferencePlan.services.length > 0
+                          ? inspection.inferencePlan.services
+                          : inspection.inferencePlan.candidates
+                        ).map((service) => (
+                          <div key={service.selector} className="rounded-md border border-line bg-surface px-3 py-2 text-sm">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium">{service.name}</span>
+                              <Badge variant="outline">{service.role}</Badge>
+                            </div>
+                            <p className="muted mt-1 text-xs">{service.rootDirectory} · {service.provider} · {service.healthProbe.kind.toUpperCase()} health</p>
+                            {service.buildCommand && <p className="mt-1 break-all font-mono text-xs">{service.buildCommand}</p>}
+                            {service.startCommand && <p className="mt-1 break-all font-mono text-xs">{service.startCommand}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {inspection.inferencePlan?.readiness === "needs_selection" && (
+                      <div className="mt-4 space-y-3 rounded-md border border-amber-300 bg-amber-50 p-3">
+                        <div className="font-medium text-ink">Choose the runnable services</div>
+                        <SelectField label="Frontend" value={frontendSelector} onChange={setFrontendSelector}>
+                          <option value="">No frontend</option>
+                          {inspection.inferencePlan.candidates.filter((candidate) => candidate.role === "frontend").map((candidate) => (
+                            <option key={candidate.selector} value={candidate.selector}>{candidate.name} · {candidate.rootDirectory}</option>
+                          ))}
+                        </SelectField>
+                        <SelectField label="Backend" value={backendSelector} onChange={setBackendSelector}>
+                          <option value="">No backend</option>
+                          {inspection.inferencePlan.candidates.filter((candidate) => candidate.role === "backend").map((candidate) => (
+                            <option key={candidate.selector} value={candidate.selector}>{candidate.name} · {candidate.rootDirectory}</option>
+                          ))}
+                        </SelectField>
+                        {backendSelector && (
+                          <Field label="Backend path prefixes" value={backendPrefixes} onChange={setBackendPrefixes} placeholder="/api, /graphql" />
+                        )}
+                        <button className="button-secondary" type="button" disabled={!frontendSelector && !backendSelector} onClick={applyTopologySelection}>
+                          Use selected topology
+                        </button>
                       </div>
                     )}
                     {inspection.runtimeKind === "compose" && inspection.services && inspection.services.length > 0 && (

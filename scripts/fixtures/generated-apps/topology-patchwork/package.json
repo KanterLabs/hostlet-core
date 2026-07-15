@@ -1,0 +1,8 @@
+{
+  "name": "hostlet-topology-patchwork",
+  "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "build": "pnpm -r build"
+  }
+}

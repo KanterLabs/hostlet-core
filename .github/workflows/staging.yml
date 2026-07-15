@@ -65,9 +65,24 @@ jobs:
       - run: pnpm lint
       - run: pnpm build
 
+  topology-e2e:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/ci-verify-runner.sh
+      - run: scripts/ci-install-railpack.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/ci-self-hosted-deploy-e2e.sh
+
   images:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    needs: [secrets, rust, web]
+    needs: [secrets, rust, web, topology-e2e]
     runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - name: Isolate docker credentials for this run

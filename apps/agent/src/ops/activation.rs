@@ -70,6 +70,7 @@ pub(crate) async fn commit_candidate_activation(
     deployment_id: Uuid,
     route_generation: i64,
     local_url: Option<&str>,
+    runtime_metadata: Option<&Value>,
     rolled_back: bool,
 ) -> anyhow::Result<()> {
     let job_id = payload_uuid(payload, "job_id").context("deploy job missing job_id")?;
@@ -81,6 +82,7 @@ pub(crate) async fn commit_candidate_activation(
         claim_token,
         route_generation,
         local_url: local_url.map(str::to_string),
+        runtime_metadata: runtime_metadata.cloned(),
         rolled_back,
     };
     let response = cfg

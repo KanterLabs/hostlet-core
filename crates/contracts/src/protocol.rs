@@ -4,7 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// Current durable deployment-execution protocol spoken by Core API and agent.
-pub const DEPLOYMENT_PROTOCOL_VERSION: i32 = 2;
+pub const DEPLOYMENT_PROTOCOL_VERSION: i32 = 3;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +56,8 @@ pub struct CommitActivationRequest {
     pub claim_token: Uuid,
     pub route_generation: i64,
     pub local_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_metadata: Option<serde_json::Value>,
     #[serde(default)]
     pub rolled_back: bool,
 }

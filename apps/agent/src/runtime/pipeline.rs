@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) mod generated_topology;
+
 pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
     let app_id = Uuid::parse_str(p["app_id"].as_str().context("app_id")?)?;
@@ -75,6 +77,20 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     }
     let image = format!("hostlet/{app_name}:{deployment_id}");
     let project_dir = safe_project_dir(&checkout, root_directory).await?;
+    if p.pointer("/runtime_config/generatedTopology").is_some() {
+        return generated_topology::deploy_generated_topology(
+            &cfg,
+            &p,
+            deployment_id,
+            app_id,
+            &app_name,
+            &route_key,
+            &checkout,
+            domain,
+            git_sync_duration_ms,
+        )
+        .await;
+    }
     if p.get("runtime_kind").and_then(|v| v.as_str()) == Some("compose") {
         // Managed-add-ons stacks set the web service to `image:
         // ${HOSTLET_WEB_IMAGE}`, so the repo is built with the normal pipeline
@@ -275,6 +291,7 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         deployment_id,
         route_generation,
         local_url.as_deref(),
+        Some(&runtime_metadata),
         false,
     )
     .await?;

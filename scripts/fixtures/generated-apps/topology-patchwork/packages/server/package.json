@@ -1,0 +1,11 @@
+{
+  "name": "@hostlet-topology/server",
+  "private": true,
+  "scripts": {
+    "build": "node --check src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "ws": "workspace:*"
+  }
+}

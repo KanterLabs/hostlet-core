@@ -14,7 +14,7 @@ export const API_FIXTURES: Record<string, unknown> = {
   "/api/session": { authenticated: true, mode: "self_hosted", cloud: null, unlocked: true },
   "/api/setup/status": { authenticated: true, mode: "self_hosted", cloud: null, unlocked: true },
   "/api/apps": [],
-  "/api/servers": [{ id: LOCAL_SERVER_ID, name: "This machine", kind: "local", status: "online" }],
+  "/api/servers": [{ id: LOCAL_SERVER_ID, name: "This machine", kind: "local", status: "online", agentProtocolVersion: 3 }],
   "/api/github/status": { oauthConfigured: true, webhookConfigured: true, authenticated: true, tokenValid: true, login: "ci-user", message: "GitHub Device Flow is configured." },
   "/api/github/repos": [],
   "/api/cloudflare/status": { configured: true, tokenValid: true, baseDomain: "example.test", defaultDomainPattern: "*.example.test", domainPrefix: "hostlet-", tunnelTargetConfigured: true, message: "Cloudflare DNS is configured." },

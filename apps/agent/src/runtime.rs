@@ -4,6 +4,13 @@ use std::sync::Arc;
 
 mod pipeline;
 
+pub(crate) async fn rollback_generated_topology(
+    cfg: &Config,
+    payload: &Value,
+) -> anyhow::Result<()> {
+    pipeline::generated_topology::rollback_generated_topology(cfg, payload).await
+}
+
 use pipeline::deploy;
 
 /// Single-job concurrency slot. Acquired only via `try_acquire`'s
