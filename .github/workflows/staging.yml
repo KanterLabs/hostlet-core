@@ -22,7 +22,7 @@ concurrency:
 jobs:
   secrets:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,12 +32,12 @@ jobs:
 
   rust:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     env:
       # Cap cargo parallelism: several workflows from both repos land on one
-      # 4-vCPU/23Gi homelab VM; uncapped workspace builds stacking up OOM'd the
+      # 24-vCPU/48GiB CI VM; uncapped workspace builds stacking up OOM'd the
       # hypervisor and hard-reset the box (2026-06-10 crash-loop incident).
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
@@ -53,7 +53,7 @@ jobs:
 
   web:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     defaults:
       run:
         working-directory: apps/web
@@ -68,7 +68,7 @@ jobs:
   images:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [secrets, rust, web]
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - name: Isolate docker credentials for this run
         # Per-run DOCKER_CONFIG so a concurrent hostlet-cloud deploy on the same
@@ -109,7 +109,7 @@ jobs:
   notify-cloud:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [images]
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh

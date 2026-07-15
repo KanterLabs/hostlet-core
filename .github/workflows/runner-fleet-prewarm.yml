@@ -11,12 +11,12 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3
+  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3,hostlet-core-homelab-4
 
 jobs:
   prewarm:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
     steps:
       - name: Checkout Core runner maintenance scripts
         uses: actions/checkout@v4
