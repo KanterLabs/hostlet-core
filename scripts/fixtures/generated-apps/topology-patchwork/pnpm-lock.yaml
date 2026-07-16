@@ -3,14 +3,37 @@ lockfileVersion: '9.0'
 importers:
   .: {}
   packages/client:
+    dependencies:
+      '@hostlet-topology/content':
+        specifier: workspace:*
+        version: link:../content
+      '@hostlet-topology/protocol':
+        specifier: workspace:*
+        version: link:../protocol
     devDependencies:
       vite:
         specifier: workspace:*
         version: link:../../stubs/vite
+  packages/content:
+    dependencies:
+      '@hostlet-topology/sim':
+        specifier: workspace:*
+        version: link:../sim
+  packages/protocol: {}
   packages/server:
     dependencies:
+      '@hostlet-topology/content':
+        specifier: workspace:*
+        version: link:../content
+      '@hostlet-topology/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@hostlet-topology/sim':
+        specifier: workspace:*
+        version: link:../sim
       ws:
         specifier: workspace:*
         version: link:../../stubs/ws
+  packages/sim: {}
   stubs/vite: {}
   stubs/ws: {}

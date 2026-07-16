@@ -6,7 +6,6 @@ deploy_generated_topology_app() {
   if [ -n "${HOSTLET_TOPOLOGY_CANARY_REPO:-}" ]; then
     client_name="@patchwork/client"
     server_name="@patchwork/server"
-    topology_config='{"schemaVersion":1,"mode":"selected","frontendSelector":"node:packages/client/package.json:@patchwork/client","backendSelector":"node:packages/server/package.json:@patchwork/server","backendPathPrefixes":["/api","/socket.io"]}'
   fi
   create="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps" --data "$(cat <<JSON
 {"name":"ci-topology-patchwork","repo_full_name":"${TOPOLOGY_REPO_FULL}","branch":"main","server_id":null,"container_port":80,"health_path":"/","domain":"patchwork.localhost","runtime_kind":"compose","hostlet_config_path":"hostlet.yml","root_directory":".","runtime_config":{"generatedTopology":${topology_config}},"memory_limit_mb":512,"cpu_limit":0.5,"public_exposure":false,"auto_deploy":false,"deploy_after_create":false,"env":[{"key":"APP_VERSION","value":"v1"}]}

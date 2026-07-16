@@ -4,6 +4,10 @@
   "scripts": {
     "build": "node build.mjs"
   },
+  "dependencies": {
+    "@hostlet-topology/content": "workspace:*",
+    "@hostlet-topology/protocol": "workspace:*"
+  },
   "devDependencies": {
     "vite": "workspace:*"
   }

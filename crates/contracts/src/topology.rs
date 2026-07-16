@@ -460,9 +460,12 @@ fn node_candidate(
     if !has_build && start_script.is_none() {
         return None;
     }
-    // A workspace coordinator with only a recursive build is not itself a
-    // runnable candidate. Its children remain visible to this same scan.
-    if directory == "." && start_script.is_none() && frontend_framework.is_none() {
+    // A build-only package is a library/coordinator, not a runnable service.
+    // This applies inside workspaces too: packages such as shared simulation,
+    // protocol, and content libraries commonly expose `build` without a start
+    // command. Static frontends remain candidates through their recognized
+    // framework dependency.
+    if start_script.is_none() && frontend_framework.is_none() {
         return None;
     }
     let name = value
@@ -807,6 +810,10 @@ fn in_directory(directory: &str, command: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "topology_patchwork_tests.rs"]
+mod patchwork_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -820,40 +827,6 @@ mod tests {
                 })
                 .collect(),
         }
-    }
-
-    #[test]
-    fn patchwork_shape_is_frontend_backend_not_root_app() {
-        let plan = plan_repository_topology(&inventory(&[
-            (
-                "package.json",
-                r#"{"name":"patchwork","scripts":{"build":"pnpm -r build"}}"#,
-            ),
-            ("pnpm-workspace.yaml", "packages:\n  - packages/*\n"),
-            ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
-            (
-                "packages/client/package.json",
-                r#"{"name":"@patchwork/client","scripts":{"build":"vite build"},"devDependencies":{"vite":"^7"}}"#,
-            ),
-            (
-                "packages/server/package.json",
-                r#"{"name":"@patchwork/server","scripts":{"build":"tsc -b","start":"tsx src/index.ts"},"dependencies":{"ws":"^8"}}"#,
-            ),
-            (
-                "packages/client/src/main.ts",
-                "connect(import.meta.env.VITE_WS_URL);",
-            ),
-        ]));
-        assert_eq!(plan.readiness, TopologyReadiness::Ready);
-        assert_eq!(plan.services.len(), 2);
-        assert_eq!(plan.services[0].role, ServiceRole::Frontend);
-        assert_eq!(plan.services[0].public_env, vec!["VITE_WS_URL"]);
-        assert_eq!(
-            plan.services[0].build_command.as_deref(),
-            Some("pnpm --filter @patchwork/client... run build")
-        );
-        assert_eq!(plan.services[1].role, ServiceRole::Backend);
-        assert_eq!(plan.services[1].health_probe.kind, HealthProbeKind::Tcp);
     }
 
     #[test]

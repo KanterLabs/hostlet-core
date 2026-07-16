@@ -6,6 +6,9 @@
     "start": "node src/index.js"
   },
   "dependencies": {
+    "@hostlet-topology/content": "workspace:*",
+    "@hostlet-topology/protocol": "workspace:*",
+    "@hostlet-topology/sim": "workspace:*",
     "ws": "workspace:*"
   }
 }
