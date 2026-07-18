@@ -245,6 +245,26 @@ export function useAppActions({
     }
   }, [busyAction, id]);
 
+  const checkBrowserNow = useCallback(async () => {
+    if (busyAction) return;
+    setBusyAction("browser");
+    setHealthMessage("Opening the public app in a real browser...");
+    try {
+      const result = await api<{ jobId: string }>(`/api/apps/${id}/browser-check`, {
+        method: "POST",
+        body: "{}",
+      });
+      await waitForAgentJob(result.jobId, setHealthMessage, () => mountedRef.current);
+      if (!mountedRef.current) return;
+      await refreshApp();
+      setHealthMessage("Browser check completed.");
+    } catch (error) {
+      setHealthMessage(`Browser check failed. ${error instanceof Error ? error.message : ""}`);
+    } finally {
+      if (mountedRef.current) setBusyAction("");
+    }
+  }, [busyAction, id, refreshApp]);
+
   const restartContainer = useCallback(async () => {
     if (busyAction || !(await confirmAction({
       title: "Restart app?",
@@ -326,6 +346,7 @@ export function useAppActions({
     saveSettings,
     saveEnvVar,
     checkHealthNow,
+    checkBrowserNow,
     restartContainer,
     captureScreenshot,
     deleteEnvVar,

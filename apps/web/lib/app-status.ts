@@ -20,6 +20,7 @@ export type RuntimeHealthSummary = {
   lastError?: string | null;
   latencyMs?: number | null;
   lastCheckedAt?: string | null;
+  browser?: { failure?: string | null } | null;
 };
 
 export type RuntimeHealthEventSummary = {
@@ -53,6 +54,7 @@ export function shortSha(sha?: string | null) {
 
 export function healthMetricDetail(health?: RuntimeHealthSummary | null) {
   if (!health) return "waiting for agent";
+  if (health.browser?.failure) return health.browser.failure;
   if (health.lastError) return health.lastError;
   if (typeof health.latencyMs === "number") return `${health.latencyMs} ms`;
   return health.lastCheckedAt ? `checked ${formatTimestamp(health.lastCheckedAt, "time")}` : "not checked yet";

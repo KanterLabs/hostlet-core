@@ -82,6 +82,7 @@ PY
 )"
 
 docker run --rm \
+  -e HOSTLET_BROWSER_SMOKE=1 \
   -v "${TMP_DIR}:/out" \
   "${IMAGE}" \
   "${SMOKE_URL}" \
@@ -98,6 +99,52 @@ if len(data) < 128 or not (data.startswith(b"RIFF") and data[8:12] == b"WEBP"):
 PY
 
 echo "screenshotter smoke passed"
+
+BLANK_URL="$(python3 - <<'PY'
+from urllib.parse import quote
+html = """<!doctype html><style>html,body{margin:0;height:100%;background:#173746;color:#fff;font:16px Arial}.hud{padding:20px}</style><div class=hud>CONNECTING...</div>"""
+print("data:text/html," + quote(html))
+PY
+)"
+if docker run --rm -e HOSTLET_BROWSER_SMOKE=1 "${IMAGE}" "${BLANK_URL}" /tmp/blank.webp \
+  >"${TMP_DIR}/blank.log" 2>&1; then
+  echo "browser smoke accepted a blank loading shell"
+  exit 1
+fi
+grep -q "blank or near-blank" "${TMP_DIR}/blank.log"
+
+RUNTIME_ERROR_URL="$(python3 - <<'PY'
+from urllib.parse import quote
+html = """<!doctype html><style>body{background:linear-gradient(45deg,#123,#acf);min-height:720px}</style><script>setTimeout(()=>{throw new Error('startup exploded')},0)</script>"""
+print("data:text/html," + quote(html))
+PY
+)"
+if docker run --rm -e HOSTLET_BROWSER_SMOKE=1 "${IMAGE}" "${RUNTIME_ERROR_URL}" /tmp/error.webp \
+  >"${TMP_DIR}/runtime-error.log" 2>&1; then
+  echo "browser smoke accepted an uncaught page error"
+  exit 1
+fi
+grep -q "uncaught page error" "${TMP_DIR}/runtime-error.log"
+
+CAUGHT_EVAL_URL="$(python3 - <<'PY'
+from urllib.parse import quote
+html = """<!doctype html><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-hostlet'"><style>html,body{margin:0;background:#e0f2fe}canvas{width:100%;height:720px}</style><canvas width=1280 height=720></canvas><script nonce=hostlet>try{new Function('return 1')()}catch{}const c=document.querySelector('canvas'),x=c.getContext('2d');for(let y=0;y<720;y+=8){for(let i=0;i<1280;i+=8){x.fillStyle=`hsl(${(i*17+y*29)%360} 75% ${35+(i*y)%45}%)`;x.fillRect(i,y,8,8)}}</script>"""
+print("data:text/html," + quote(html))
+PY
+)"
+docker run --rm -e HOSTLET_BROWSER_SMOKE=1 "${IMAGE}" "${CAUGHT_EVAL_URL}" /tmp/caught-eval.webp \
+  >"${TMP_DIR}/caught-eval.log" 2>&1
+
+if ! docker run --rm -e HOSTLET_BROWSER_SMOKE=1 "${IMAGE}" \
+  "data:application/json,%7B%22ok%22%3Atrue%7D" /tmp/non-html.webp \
+  >"${TMP_DIR}/non-html.log" 2>&1; then
+  echo "browser smoke did not skip a non-HTML endpoint"
+  cat "${TMP_DIR}/non-html.log"
+  exit 1
+fi
+grep -q "HOSTLET_BROWSER_SMOKE_SKIPPED_NON_HTML" "${TMP_DIR}/non-html.log"
+
+echo "browser smoke readiness regressions passed"
 
 run_redirect_block_test() {
   local label="$1"

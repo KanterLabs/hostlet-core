@@ -47,6 +47,7 @@ fn screenshot_create_args_use_container_copy_path_without_host_bind() {
         "HOSTLET_SCREENSHOT_SIZE=1280x720",
         "local/hostlet-screenshotter:test",
         "https://demo.example.com/",
+        false,
     );
 
     assert_eq!(args.first().map(String::as_str), Some("create"));
@@ -60,6 +61,20 @@ fn screenshot_create_args_use_container_copy_path_without_host_bind() {
     assert!(SCREENSHOT_CONTAINER_OUTPUT_PATH.ends_with(".webp"));
     assert_eq!(SCREENSHOT_CONTENT_TYPE, "image/webp");
     assert!(!SCREENSHOT_CONTAINER_OUTPUT_PATH.starts_with("/tmp/"));
+}
+
+#[test]
+fn browser_smoke_create_args_enable_runtime_probe() {
+    let args = screenshot_create_args(
+        "hostlet-browser-job",
+        "HOSTLET_SCREENSHOT_SIZE=1280x720",
+        "local/hostlet-screenshotter:test",
+        "https://demo.example.com/",
+        true,
+    );
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["-e", "HOSTLET_BROWSER_SMOKE=1"]));
 }
 
 #[test]
@@ -97,6 +112,14 @@ fn screenshot_failure_reason_maps_known_categories() {
         (
             "screenshotter did not produce an image",
             SCREENSHOT_ERR_SERVICE,
+        ),
+        (
+            "browser smoke rejected: uncaught page error: startup exploded",
+            SCREENSHOT_ERR_RUNTIME,
+        ),
+        (
+            "browser smoke rejected: page remained blank or near-blank",
+            SCREENSHOT_ERR_BLANK,
         ),
     ];
     for (message, expected) in cases {

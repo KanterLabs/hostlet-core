@@ -23,6 +23,26 @@ if (!["jpeg", "webp"].includes(outputFormat)) {
   process.exit(2);
 }
 const screenshotQuality = Number(process.env.HOSTLET_SCREENSHOT_QUALITY) || 82;
+const browserSmoke = process.env.HOSTLET_BROWSER_SMOKE === "1";
+const BROWSER_SMOKE_SKIP = "HOSTLET_BROWSER_SMOKE_SKIPPED_NON_HTML";
+
+function navigationContentType(navigation, url) {
+  const responseContentType = navigation?.headers()["content-type"] || "";
+  if (responseContentType) return responseContentType;
+
+  // Playwright does not expose response headers for data: URLs. Derive the
+  // declared media type so the smoke fixtures—and any legitimate data URL
+  // invocation—still distinguish HTML from non-HTML content.
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "data:") {
+      return parsed.pathname.split(",", 1)[0].split(";", 1)[0];
+    }
+  } catch {
+    // page.goto will report an invalid target with the useful error later.
+  }
+  return "";
+}
 
 // Floor scales with deviceScaleFactor so a 2x capture (roughly 4x the pixels
 // of 1x) isn't held to the same byte count as a 1x one. The base is the 1x
@@ -231,7 +251,8 @@ async function captureWithSizeFloor(page, outputPath) {
   buffer = await captureScreenshot(page, outputPath);
   if (buffer.length < sizeFloorBytes) {
     throw new Error(
-      `capture rejected: screenshot buffer ${buffer.length} bytes is below the ` +
+      `${browserSmoke ? "browser smoke rejected: page remained blank or near-blank; " : "capture rejected: "}` +
+        `screenshot buffer ${buffer.length} bytes is below the ` +
         `${sizeFloorBytes} byte floor after retry`
     );
   }
@@ -251,6 +272,38 @@ async function main() {
       serviceWorkers: "block",
     });
     const page = await context.newPage();
+    const pageErrors = [];
+    const criticalRequestFailures = [];
+    const cspDiagnostics = [];
+    if (browserSmoke) {
+      page.on("pageerror", (error) => pageErrors.push(error.message || String(error)));
+      page.on("requestfailed", (request) => {
+        const resourceType = request.resourceType();
+        let sameOrigin = false;
+        try {
+          sameOrigin = new URL(request.url()).origin === allowedOrigin;
+        } catch {
+          sameOrigin = false;
+        }
+        if (sameOrigin && ["document", "script", "stylesheet"].includes(resourceType)) {
+          criticalRequestFailures.push(
+            `${resourceType} ${request.url()}: ${request.failure()?.errorText || "request failed"}`
+          );
+        }
+      });
+      await page.addInitScript(() => {
+        document.addEventListener("securitypolicyviolation", (event) => {
+          console.debug(
+            `HOSTLET_CSP_DIAGNOSTIC ${event.effectiveDirective} ${event.blockedURI || "unknown"}`
+          );
+        });
+      });
+      page.on("console", (message) => {
+        if (message.type() === "debug" && message.text().startsWith("HOSTLET_CSP_DIAGNOSTIC ")) {
+          cspDiagnostics.push(message.text());
+        }
+      });
+    }
 
     let allowedOrigin = null;
     try {
@@ -285,8 +338,27 @@ async function main() {
     if (allowedOrigin) {
       await rejectBlockedRedirects(targetUrl, allowedOrigin, lookupCache);
     }
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    const navigation = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    if (browserSmoke) {
+      const contentType = navigationContentType(navigation, targetUrl);
+      if (contentType && !contentType.toLowerCase().includes("text/html")) {
+        console.log(`${BROWSER_SMOKE_SKIP} ${contentType}`);
+        return;
+      }
+    }
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+
+    if (browserSmoke && pageErrors.length > 0) {
+      throw new Error(`browser smoke rejected: uncaught page error: ${pageErrors.slice(0, 3).join(" | ")}`);
+    }
+    if (browserSmoke && criticalRequestFailures.length > 0) {
+      throw new Error(
+        `browser smoke rejected: critical same-origin resource failed: ${criticalRequestFailures.slice(0, 3).join(" | ")}`
+      );
+    }
+    if (browserSmoke && cspDiagnostics.length > 0) {
+      console.error(cspDiagnostics.slice(0, 5).join("\n"));
+    }
 
     if (!(await ensureVisuallyReady(page))) {
       throw new Error(

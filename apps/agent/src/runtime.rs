@@ -552,6 +552,7 @@ pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()
             Ok(())
         }
         Some("capture_screenshot") => capture_screenshot_job(&cfg, &payload).await,
+        Some("browser_smoke") => capture_screenshot_job(&cfg, &payload).await,
         Some("restart_container") => {
             restart_container_job(&cfg, &payload).await?;
             Ok(())

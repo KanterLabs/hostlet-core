@@ -112,6 +112,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     saveSettings,
     saveEnvVar,
     checkHealthNow,
+    checkBrowserNow,
     restartContainer,
     captureScreenshot,
     deleteEnvVar,
@@ -243,6 +244,10 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                     <Activity size={16} />
                     {busyAction === "health" ? "Checking..." : "Check now"}
                   </button>
+                  <button className="button-secondary" disabled={!!busyAction || !app?.publicExposure || !app?.currentDeploymentId} onClick={checkBrowserNow}>
+                    <Globe2 size={16} />
+                    {busyAction === "browser" ? "Opening..." : "Check in browser"}
+                  </button>
                   <button className="button-secondary" disabled={!!busyAction || !app?.currentDeploymentId} onClick={restartContainer}>
                     <RotateCcw size={16} />
                     {busyAction === "restart" ? "Restarting..." : "Restart"}
@@ -313,6 +318,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   title="Runtime health"
                   description="Recurring checks against the current running container."
                 />
+                <Notice tone="neutral" description={healthMessage} className="mb-4" />
                 {health ? (
                   <>
                     <MetricsGrid columns="md:grid-cols-3" className="mb-0 gap-3">
@@ -320,6 +326,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       <Metric label="HTTP" value={health.httpStatus ? String(health.httpStatus) : "none"} detail={typeof health.latencyMs === "number" ? `${health.latencyMs} ms` : "no response"} />
                       <Metric label="Failures" value={String(health.failureCount)} detail={health.lastCheckedAt ? `checked ${formatTimestamp(health.lastCheckedAt, "time")}` : "not checked yet"} />
                       <Metric label="Last healthy" value={health.lastHealthyAt ? formatTimestamp(health.lastHealthyAt) : "unknown"} />
+                      <Metric label="Browser" value={health.browser?.status || "not checked"} detail={health.browser?.failure || (health.browser?.checkedAt ? `checked ${formatTimestamp(health.browser.checkedAt, "time")}` : "public HTML acceptance")} />
                       <Metric label="Container" value={health.containerName || "unknown"} />
                       <Metric label="Target" value={health.checkedUrl || "waiting"} />
                     </MetricsGrid>
@@ -336,9 +343,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                       </div>
                     )}
                   </>
-                ) : (
-                  <Notice tone="neutral" description={healthMessage} />
-                )}
+                ) : null}
               </section>
 
               <section>

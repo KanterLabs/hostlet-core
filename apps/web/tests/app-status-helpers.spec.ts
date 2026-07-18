@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { isActiveDeploy, shortSha } from "@/lib/app-status";
+import { healthMetricDetail, isActiveDeploy, shortSha } from "@/lib/app-status";
 
 // Pure-logic unit coverage for the consolidated status helpers. These do not
 // touch the network or the DOM, so they run without the dev server.
@@ -26,5 +26,13 @@ test.describe("app-status helpers", () => {
     expect(shortSha("HEAD")).toBe("HEAD");
     expect(shortSha(null)).toBe("No deploy yet");
     expect(shortSha(undefined)).toBe("No deploy yet");
+  });
+
+  test("browser startup failures take precedence over HTTP health detail", () => {
+    expect(healthMetricDetail({
+      browser: { failure: "browser smoke rejected: uncaught page error" },
+      lastError: "HTTP 503",
+      latencyMs: 42,
+    })).toBe("browser smoke rejected: uncaught page error");
   });
 });

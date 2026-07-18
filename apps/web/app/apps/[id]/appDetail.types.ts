@@ -35,6 +35,11 @@ export type RuntimeHealth = {
   lastCheckedAt?: string | null;
   lastHealthyAt?: string | null;
   updatedAt?: string | null;
+  browser?: {
+    status: "pending" | "ready" | "failed" | "skipped";
+    checkedAt?: string | null;
+    failure?: string | null;
+  } | null;
 };
 
 export type RuntimeHealthEvent = {
@@ -169,6 +174,7 @@ export type BusyAction =
   | "settings"
   | "env"
   | "health"
+  | "browser"
   | "restart"
   | "screenshot"
   | "";

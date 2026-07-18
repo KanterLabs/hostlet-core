@@ -362,6 +362,19 @@ pub async fn complete_job(
 
     match result {
         Ok(Some(row)) => {
+            if crate::browser_health::record_job_result(
+                &mut tx,
+                &row.get::<String, _>("job_type"),
+                row.get::<Option<Uuid>, _>("app_id"),
+                row.get::<Option<Uuid>, _>("deployment_id"),
+                &request.status,
+                request.failure.as_deref(),
+            )
+            .await
+            .is_err()
+            {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
             if let Some(deployment_id) = row.get::<Option<Uuid>, _>("deployment_id") {
                 if request.status != "success" {
                     let deployment_status = if request.status == "cancelled" {

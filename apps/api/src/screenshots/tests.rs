@@ -126,6 +126,35 @@ async fn db_auto_capture_respects_hook_denial() {
 }
 
 #[tokio::test]
+async fn db_auto_capture_enqueues_browser_smoke_and_marks_pending() {
+    let Some(state) = db_test_state().await else {
+        return;
+    };
+    reset_screenshot_db(&state).await;
+    let user_id = insert_user(&state, 5106, "browser-auto").await;
+    let app_id = insert_public_app(&state, user_id, "browser.example.test").await;
+    let deployment_id = insert_successful_deployment(&state, app_id).await;
+
+    let job_id = enqueue_auto_screenshot_for_deployment(&state, deployment_id)
+        .await
+        .unwrap()
+        .expect("browser smoke job");
+    let job_type: String = sqlx::query_scalar("SELECT job_type FROM agent_jobs WHERE id=$1")
+        .bind(job_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    let browser_status: String =
+        sqlx::query_scalar("SELECT status FROM app_browser_health WHERE app_id=$1")
+            .bind(app_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(job_type, "browser_smoke");
+    assert_eq!(browser_status, "pending");
+}
+
+#[tokio::test]
 async fn db_agent_upload_stores_serves_and_scopes_latest_screenshot() {
     let Some(state) = db_test_state().await else {
         return;
@@ -468,7 +497,7 @@ async fn db_recapture_sweep_enqueues_for_stale_screenshot_and_skips_fresh() {
     super::recapture::sweep_stale_screenshots_for_test(&state).await;
 
     let stale_jobs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM agent_jobs WHERE app_id=$1 AND job_type='capture_screenshot'",
+        "SELECT count(*) FROM agent_jobs WHERE app_id=$1 AND job_type='browser_smoke'",
     )
     .bind(stale_app_id)
     .fetch_one(&state.db)
@@ -477,7 +506,7 @@ async fn db_recapture_sweep_enqueues_for_stale_screenshot_and_skips_fresh() {
     assert_eq!(stale_jobs, 1, "stale app should get a recapture job");
 
     let fresh_jobs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM agent_jobs WHERE app_id=$1 AND job_type='capture_screenshot'",
+        "SELECT count(*) FROM agent_jobs WHERE app_id=$1 AND job_type='browser_smoke'",
     )
     .bind(fresh_app_id)
     .fetch_one(&state.db)

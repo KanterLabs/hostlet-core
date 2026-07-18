@@ -502,13 +502,19 @@ const SCREENSHOT_ERR_BLOCKED: &str = "Blocked a private or loopback address";
 const SCREENSHOT_ERR_SITE: &str = "The site returned an error";
 const SCREENSHOT_ERR_SERVICE: &str = "Screenshot service crashed";
 const SCREENSHOT_ERR_UPLOAD: &str = "Failed to upload the screenshot";
+const SCREENSHOT_ERR_RUNTIME: &str = "Browser check found a runtime error";
+const SCREENSHOT_ERR_BLANK: &str = "Browser check found a blank or incomplete page";
 
 /// Classifies a screenshot-pipeline error into one of the reasons above by
 /// matching stable Docker/Playwright/SSRF-guard phrases in the whole error
 /// chain; unrecognized output falls back to a generic service crash.
 fn screenshot_failure_reason(err: &anyhow::Error) -> &'static str {
     let detail = format!("{err:#}").to_ascii_lowercase();
-    if detail.contains("private or local address")
+    if detail.contains("uncaught page error") || detail.contains("critical same-origin resource") {
+        SCREENSHOT_ERR_RUNTIME
+    } else if detail.contains("blank or near-blank") {
+        SCREENSHOT_ERR_BLANK
+    } else if detail.contains("private or local address")
         || detail.contains("public hostname")
         || detail.contains("blocked request")
         || detail.contains("blocked redirect")
@@ -548,6 +554,7 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
         .and_then(|value| value.as_i64())
         .filter(|value| (1..=4096).contains(value))
         .unwrap_or(720);
+    let browser_smoke = payload.get("type").and_then(Value::as_str) == Some("browser_smoke");
     let output_dir = cfg.workdir.join("screenshots").join(job_id.to_string());
     tokio::fs::create_dir_all(&output_dir).await?;
     // All work after create_dir_all runs inside an async block so that
@@ -564,18 +571,23 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
         )
         .await;
         // Run + read under one categorized boundary so failures map to a reason.
-        let capture: anyhow::Result<Vec<u8>> = async {
-            run_screenshotter_container(
+        let capture: anyhow::Result<Option<Vec<u8>>> = async {
+            let outcome = run_screenshotter_container(
                 job_id,
                 screenshotter_image(payload),
                 capture_url,
                 &size_env,
+                browser_smoke,
                 &output_file,
             )
             .await?;
+            if outcome == ScreenshotRun::SkippedNonHtml {
+                return Ok(None);
+            }
             tokio::fs::read(&output_file)
                 .await
                 .context("screenshotter did not produce an image")
+                .map(Some)
         }
         .await;
         let bytes = match capture {
@@ -585,6 +597,16 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
                 tracing::warn!(error = %format!("{err:#}"), reason, "screenshot capture failed");
                 return Err(reported_deployment_failure(reason.to_string()));
             }
+        };
+        let Some(bytes) = bytes else {
+            log(
+                cfg,
+                deployment_id,
+                "stdout",
+                "Browser check skipped because the public endpoint is not HTML.",
+            )
+            .await;
+            return Ok(());
         };
         upload_screenshot(
             cfg,
@@ -620,17 +642,26 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
 
 const SCREENSHOT_CONTAINER_OUTPUT_PATH: &str = "/app/hostlet-screenshot.webp";
 const SCREENSHOT_CONTENT_TYPE: &str = "image/webp";
+const BROWSER_SMOKE_SKIP: &str = "HOSTLET_BROWSER_SMOKE_SKIPPED_NON_HTML";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScreenshotRun {
+    Captured,
+    SkippedNonHtml,
+}
 
 async fn run_screenshotter_container(
     job_id: Uuid,
     image: &str,
     capture_url: &str,
     size_env: &str,
+    browser_smoke: bool,
     output_file: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScreenshotRun> {
     let container_name = screenshot_container_name(job_id);
     remove_screenshot_container(&container_name).await;
-    let create_args = screenshot_create_args(&container_name, size_env, image, capture_url);
+    let create_args =
+        screenshot_create_args(&container_name, size_env, image, capture_url, browser_smoke);
     let create_refs = create_args.iter().map(String::as_str).collect::<Vec<_>>();
     let create_output = command_output("docker", &create_refs, Duration::from_secs(30)).await?;
     if !create_output.status.success() {
@@ -656,6 +687,10 @@ async fn run_screenshotter_container(
             );
         }
 
+        let combined = command_combined_output(&start_output);
+        if browser_smoke && combined.contains(BROWSER_SMOKE_SKIP) {
+            return Ok(ScreenshotRun::SkippedNonHtml);
+        }
         let copy_source = format!("{container_name}:{SCREENSHOT_CONTAINER_OUTPUT_PATH}");
         let output_path = output_file.to_string_lossy().to_string();
         let copy_output = command_output(
@@ -671,7 +706,7 @@ async fn run_screenshotter_container(
                 command_combined_output(&copy_output).trim()
             );
         }
-        Ok(())
+        Ok(ScreenshotRun::Captured)
     }
     .await;
 
@@ -684,8 +719,9 @@ fn screenshot_create_args(
     size_env: &str,
     image: &str,
     capture_url: &str,
+    browser_smoke: bool,
 ) -> Vec<String> {
-    [
+    let mut args = [
         "create",
         "--name",
         container_name,
@@ -703,13 +739,19 @@ fn screenshot_create_args(
         "/tmp:rw,nosuid,size=256m",
         "-e",
         size_env,
-        image,
-        capture_url,
-        SCREENSHOT_CONTAINER_OUTPUT_PATH,
     ]
     .into_iter()
     .map(str::to_string)
-    .collect()
+    .collect::<Vec<_>>();
+    if browser_smoke {
+        args.extend(["-e".to_string(), "HOSTLET_BROWSER_SMOKE=1".to_string()]);
+    }
+    args.extend([
+        image.to_string(),
+        capture_url.to_string(),
+        SCREENSHOT_CONTAINER_OUTPUT_PATH.to_string(),
+    ]);
+    args
 }
 
 fn screenshot_container_name(job_id: Uuid) -> String {

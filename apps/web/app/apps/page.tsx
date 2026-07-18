@@ -54,6 +54,11 @@ type RuntimeHealth = {
   lastError?: string | null;
   lastCheckedAt?: string | null;
   lastHealthyAt?: string | null;
+  browser?: {
+    status: "pending" | "ready" | "failed" | "skipped";
+    checkedAt?: string | null;
+    failure?: string | null;
+  } | null;
 };
 
 // Minimal shape of the per-app screenshot the list needs. The detail page owns
@@ -247,6 +252,7 @@ function AppThumbnail({ app, screenshot }: { app: App; screenshot?: AppScreensho
 function healthSummary(health?: RuntimeHealth | null) {
   if (!health) return "unknown";
   const bits = [health.status];
+  if (health.browser?.failure) bits.push(health.browser.failure);
   if (health.httpStatus) bits.push(`HTTP ${health.httpStatus}`);
   if (typeof health.latencyMs === "number") bits.push(`${health.latencyMs} ms`);
   if (health.lastCheckedAt) bits.push(`checked ${formatTimestamp(health.lastCheckedAt, "time")}`);

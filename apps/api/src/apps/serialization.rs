@@ -82,6 +82,9 @@ pub const APP_SELECT_BODY: &str = r#"
           hs.last_checked_at AS health_last_checked_at,
           hs.last_healthy_at AS health_last_healthy_at,
           hs.updated_at AS health_updated_at,
+          bh.status AS browser_health_status,
+          bh.failure AS browser_health_failure,
+          bh.checked_at AS browser_health_checked_at,
           COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
               'name', ds.service_name,
@@ -119,6 +122,8 @@ pub const APP_SELECT_BODY: &str = r#"
           LIMIT 1
         ) latest_webhook ON true
         LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        LEFT JOIN app_browser_health bh
+          ON bh.app_id = a.id AND bh.deployment_id = a.current_deployment_id
         LEFT JOIN app_storage_usage su ON su.app_id = a.id
 "#;
 
@@ -227,8 +232,11 @@ pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_js
             "deploymentId": or_default::<Option<Uuid>>(&r, "latest_webhook_deployment_id", None),
             "createdAt": or_default::<Option<chrono::DateTime<chrono::Utc>>>(&r, "latest_webhook_created_at", None)
         })),
-        "health": or_default::<Option<String>>(&r, "health_status", None).map(|status| serde_json::json!({
-            "status": status,
+        "health": or_default::<Option<String>>(&r, "health_status", None).map(|http_status| serde_json::json!({
+            "status": crate::browser_health::combined_status(
+                &http_status,
+                or_default::<Option<String>>(&r, "browser_health_status", None).as_deref(),
+            ),
             "httpStatus": or_default::<Option<i32>>(&r, "health_http_status", None),
             "latencyMs": or_default::<Option<i32>>(&r, "health_latency_ms", None),
             "failureCount": or_default::<Option<i32>>(&r, "health_failure_count", None).unwrap_or(0),
@@ -236,7 +244,12 @@ pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_js
             "lastError": or_default::<Option<String>>(&r, "health_last_error", None),
             "lastCheckedAt": or_default::<Option<chrono::DateTime<chrono::Utc>>>(&r, "health_last_checked_at", None),
             "lastHealthyAt": or_default::<Option<chrono::DateTime<chrono::Utc>>>(&r, "health_last_healthy_at", None),
-            "updatedAt": or_default::<Option<chrono::DateTime<chrono::Utc>>>(&r, "health_updated_at", None)
+            "updatedAt": or_default::<Option<chrono::DateTime<chrono::Utc>>>(&r, "health_updated_at", None),
+            "browser": crate::browser_health::browser_json(
+                or_default::<Option<String>>(&r, "browser_health_status", None),
+                or_default::<Option<chrono::DateTime<chrono::Utc>>>(&r, "browser_health_checked_at", None),
+                or_default::<Option<String>>(&r, "browser_health_failure", None),
+            )
         }))
     });
     apply_storage_footprint(

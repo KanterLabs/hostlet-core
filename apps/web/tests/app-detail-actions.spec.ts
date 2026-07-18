@@ -60,7 +60,7 @@ test("prompts a first deploy and explains rollback before any deployment", async
 });
 
 test("enables operate + destructive actions for a deployed app", async ({ page }) => {
-  await mockAppDetail(page, { ...baseApp, currentDeploymentId: "d0", latestDeployment: { id: "d1", status: "success" } });
+  await mockAppDetail(page, { ...baseApp, publicExposure: true, currentDeploymentId: "d0", latestDeployment: { id: "d1", status: "success" } });
   await page.goto("/apps/app-1");
   const actions = actionsPanel(page);
 
@@ -69,4 +69,40 @@ test("enables operate + destructive actions for a deployed app", async ({ page }
   const del = actions.getByRole("button", { name: "Delete" });
   await expect(del).toBeEnabled();
   await expect(del).toHaveClass(/button-danger/);
+});
+
+test("runs a browser check and refreshes the app health", async ({ page }) => {
+  let appLoads = 0;
+  const app = {
+    ...baseApp,
+    publicExposure: true,
+    currentDeploymentId: "d0",
+    latestDeployment: { id: "d1", status: "success" },
+    health: { status: "healthy", browser: { status: "ready", failure: null } },
+  };
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1") {
+      appLoads += 1;
+      await jsonRoute(route, app);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/apps/app-1/browser-check") {
+      await jsonRoute(route, { jobId: "job-browser" });
+      return true;
+    }
+    if (path === "/api/agent-jobs/job-browser") {
+      await jsonRoute(route, { id: "job-browser", status: "success" });
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+
+  await actionsPanel(page).getByRole("button", { name: "Check in browser" }).click();
+  await expect(page.getByText("Browser check completed.")).toBeVisible();
+  expect(appLoads).toBeGreaterThanOrEqual(2);
 });

@@ -4,11 +4,17 @@ use super::*;
 /// in to optionally scope the count to a single user; callers that splice a
 /// `WHERE` clause must also bind the matching parameters.
 const HEALTH_COUNTS_QUERY: &str = r#"
-        SELECT COALESCE(hs.status, 'unknown') AS status, count(*) AS count
+        SELECT CASE
+                 WHEN hs.status='healthy' AND bh.status IN ('pending','failed') THEN 'degraded'
+                 ELSE COALESCE(hs.status, 'unknown')
+               END AS status,
+               count(*) AS count
         FROM apps a
         LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        LEFT JOIN app_browser_health bh
+          ON bh.app_id=a.id AND bh.deployment_id=a.current_deployment_id
         {filter}
-        GROUP BY COALESCE(hs.status, 'unknown')
+        GROUP BY 1
         "#;
 
 pub async fn health_summary(
@@ -120,9 +126,14 @@ pub async fn app_health(
                hs.last_error,
                hs.last_checked_at,
                hs.last_healthy_at,
-               hs.updated_at
+               hs.updated_at,
+               bh.status AS browser_status,
+               bh.failure AS browser_failure,
+               bh.checked_at AS browser_checked_at
         FROM apps a
         LEFT JOIN app_health_snapshots hs ON hs.app_id = a.id
+        LEFT JOIN app_browser_health bh
+          ON bh.app_id=a.id AND bh.deployment_id=a.current_deployment_id
         WHERE a.id=$1 AND a.user_id=$2
         "#,
     )

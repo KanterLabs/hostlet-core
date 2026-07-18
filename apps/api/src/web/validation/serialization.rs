@@ -15,11 +15,13 @@ pub(in crate::web) fn app_json(r: sqlx::postgres::PgRow) -> serde_json::Value {
 }
 
 pub(in crate::web) fn health_json(row: sqlx::postgres::PgRow) -> serde_json::Value {
+    let http_status = req::<String>(&row, "status");
+    let browser_status = req::<Option<String>>(&row, "browser_status");
     serde_json::json!({
         "appId": req::<Uuid>(&row, "id"),
         "deploymentId": req::<Option<Uuid>>(&row, "deployment_id"),
         "containerName": req::<Option<String>>(&row, "container_name"),
-        "status": req::<String>(&row, "status"),
+        "status": crate::browser_health::combined_status(&http_status, browser_status.as_deref()),
         "checkedUrl": req::<Option<String>>(&row, "checked_url"),
         "httpStatus": req::<Option<i32>>(&row, "http_status"),
         "latencyMs": req::<Option<i32>>(&row, "latency_ms"),
@@ -29,5 +31,10 @@ pub(in crate::web) fn health_json(row: sqlx::postgres::PgRow) -> serde_json::Val
         "lastCheckedAt": req::<Option<chrono::DateTime<chrono::Utc>>>(&row, "last_checked_at"),
         "lastHealthyAt": req::<Option<chrono::DateTime<chrono::Utc>>>(&row, "last_healthy_at"),
         "updatedAt": req::<Option<chrono::DateTime<chrono::Utc>>>(&row, "updated_at"),
+        "browser": crate::browser_health::browser_json(
+            browser_status,
+            req::<Option<chrono::DateTime<chrono::Utc>>>(&row, "browser_checked_at"),
+            req::<Option<String>>(&row, "browser_failure"),
+        ),
     })
 }

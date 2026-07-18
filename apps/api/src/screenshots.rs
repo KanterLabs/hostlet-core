@@ -1,4 +1,6 @@
-use crate::{agent::authenticated_server_id, auth::request_context, deploy, state::AppState};
+use crate::{
+    agent::authenticated_server_id, auth::request_context, browser_health, deploy, state::AppState,
+};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
@@ -21,6 +23,7 @@ const MAX_SCREENSHOT_BYTES: usize = 4_000_000;
 const GENERATED_SOURCE: &str = "generated";
 const LIVE_DEPLOYMENT_STATUSES: &[&str] = &["success", "rolled_back"];
 const ACTIVE_JOB_STATUSES: &[&str] = &["queued", "claimed", "running"];
+const SCREENSHOT_JOB: &str = "capture_screenshot";
 
 #[derive(Clone, Debug)]
 pub struct ScreenshotAutoCaptureCandidate {
@@ -95,6 +98,31 @@ pub async fn capture_app_screenshot(
         }
         Err(ScreenshotQueueError::Internal(err)) => {
             tracing::warn!(error = %err, app_id = %app_id, "failed to queue screenshot job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn check_app_browser(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<Uuid>,
+) -> Response {
+    let context = match request_context(&headers, &state).await {
+        Ok(context) => context,
+        Err(err) if err.to_string() == "sign in required" => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(err) => return (StatusCode::PAYMENT_REQUIRED, err.to_string()).into_response(),
+    };
+    match enqueue_browser_smoke_for_owner(&state, context.user_id, app_id).await {
+        Ok(job_id) => (StatusCode::ACCEPTED, Json(json!({"jobId": job_id}))).into_response(),
+        Err(ScreenshotQueueError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(ScreenshotQueueError::NotReady(message)) => {
+            (StatusCode::BAD_REQUEST, message).into_response()
+        }
+        Err(ScreenshotQueueError::Internal(err)) => {
+            tracing::warn!(error = %err, app_id = %app_id, "failed to queue browser smoke job");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -268,12 +296,14 @@ pub async fn enqueue_auto_screenshot_for_deployment(
     {
         return Ok(None);
     }
+    browser_health::mark_pending(&state.db, candidate.app_id, deployment_id).await?;
     let job_id = enqueue_screenshot_job(
         state,
         candidate.server_id,
         candidate.app_id,
         deployment_id,
         &candidate.domain,
+        browser_health::BROWSER_SMOKE_JOB,
         30,
     )
     .await?;
@@ -325,6 +355,58 @@ async fn enqueue_screenshot_for_owner(
         app_id,
         deployment_id,
         &row.get::<String, _>("domain"),
+        SCREENSHOT_JOB,
+        20,
+    )
+    .await
+    .map_err(ScreenshotQueueError::Internal)
+}
+
+async fn enqueue_browser_smoke_for_owner(
+    state: &AppState,
+    user_id: Uuid,
+    app_id: Uuid,
+) -> Result<Uuid, ScreenshotQueueError> {
+    let row = sqlx::query(
+        "SELECT a.server_id,a.domain,a.public_exposure,d.id AS deployment_id,d.status
+         FROM apps a
+         LEFT JOIN deployments d ON d.id=a.current_deployment_id
+         WHERE a.id=$1 AND a.user_id=$2",
+    )
+    .bind(app_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|err| ScreenshotQueueError::Internal(err.into()))?;
+    let Some(row) = row else {
+        return Err(ScreenshotQueueError::NotFound);
+    };
+    let Some(deployment_id) = row.get::<Option<Uuid>, _>("deployment_id") else {
+        return Err(ScreenshotQueueError::NotReady(
+            "app does not have a current deployment".into(),
+        ));
+    };
+    if !row.get::<bool, _>("public_exposure") {
+        return Err(ScreenshotQueueError::NotReady(
+            "browser checks require a public app".into(),
+        ));
+    }
+    let status = row.get::<Option<String>, _>("status").unwrap_or_default();
+    if !LIVE_DEPLOYMENT_STATUSES.contains(&status.as_str()) {
+        return Err(ScreenshotQueueError::NotReady(
+            "app does not have a live deployment".into(),
+        ));
+    }
+    browser_health::mark_pending(&state.db, app_id, deployment_id)
+        .await
+        .map_err(ScreenshotQueueError::Internal)?;
+    enqueue_screenshot_job(
+        state,
+        row.get("server_id"),
+        app_id,
+        deployment_id,
+        &row.get::<String, _>("domain"),
+        browser_health::BROWSER_SMOKE_JOB,
         20,
     )
     .await
@@ -337,11 +419,12 @@ async fn enqueue_screenshot_job(
     app_id: Uuid,
     deployment_id: Uuid,
     domain: &str,
+    job_type: &str,
     priority: i32,
 ) -> anyhow::Result<Uuid> {
     let capture_url = capture_url_for_domain(domain);
     let payload = json!({
-        "type": "capture_screenshot",
+        "type": job_type,
         "app_id": app_id,
         "deployment_id": deployment_id,
         "capture_url": capture_url,
@@ -355,7 +438,7 @@ async fn enqueue_screenshot_job(
         server_id,
         Some(app_id),
         Some(deployment_id),
-        "capture_screenshot",
+        job_type,
         payload,
         priority,
     )
@@ -370,13 +453,14 @@ async fn screenshot_job_exists(
     Ok(sqlx::query_scalar(
         "SELECT EXISTS(
            SELECT 1 FROM agent_jobs
-           WHERE app_id=$1 AND deployment_id=$2 AND job_type='capture_screenshot'
+           WHERE app_id=$1 AND deployment_id=$2 AND job_type=$4
              AND status = ANY($3)
          )",
     )
     .bind(app_id)
     .bind(deployment_id)
     .bind(ACTIVE_JOB_STATUSES)
+    .bind(browser_health::BROWSER_SMOKE_JOB)
     .fetch_one(&state.db)
     .await?)
 }
@@ -414,7 +498,7 @@ async fn store_uploaded_screenshot(
            FROM agent_jobs j
            JOIN deployments d ON d.id=j.deployment_id
            WHERE j.id=$1 AND j.server_id=$2 AND j.app_id=$3 AND j.deployment_id=$4
-             AND j.job_type='capture_screenshot'
+             AND j.job_type IN ('capture_screenshot','browser_smoke')
              AND j.status IN ('claimed','running')
              AND d.server_id=$2
          )",

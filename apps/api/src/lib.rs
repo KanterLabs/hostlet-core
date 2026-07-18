@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod apps;
 pub mod auth;
+pub mod browser_health;
 pub mod cleanup;
 pub mod crypto;
 pub mod deploy;
@@ -186,6 +187,10 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/api/apps/:id/screenshots/latest",
             get(screenshots::latest_app_screenshot),
+        )
+        .route(
+            "/api/apps/:id/browser-check",
+            post(screenshots::check_app_browser),
         )
         .route("/api/health/summary", get(web::health_summary))
         .route("/api/apps/:id/env", get(web::app_env_vars))

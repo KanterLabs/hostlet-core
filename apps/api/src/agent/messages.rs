@@ -623,7 +623,10 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
     // 'running') guard means a terminal job can never be reopened by a late or
     // replayed event — the ws-push path may report 'running' for a job that was
     // never REST-claimed and is still 'queued', so the list stays positive.
-    let _ = sqlx::query(
+    let Ok(mut tx) = state.db.begin().await else {
+        return;
+    };
+    let row = sqlx::query(
         "UPDATE agent_jobs
                  SET status=$1,
                      failure_summary=$2,
@@ -636,14 +639,32 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
                      END,
                      finished_at=CASE WHEN $1 IN ('success','failed') THEN now() ELSE finished_at END
                  WHERE id=$3 AND server_id=$4
-                   AND status IN ('queued','claimed','running')",
+                   AND status IN ('queued','claimed','running')
+                 RETURNING job_type,app_id,deployment_id",
     )
     .bind(status)
     .bind(msg.get("failure").and_then(|v| v.as_str()))
     .bind(job_id)
     .bind(server_id)
-    .execute(&state.db)
+    .fetch_optional(&mut *tx)
     .await;
+    let Ok(Some(row)) = row else {
+        return;
+    };
+    if crate::browser_health::record_job_result(
+        &mut tx,
+        &row.get::<String, _>("job_type"),
+        row.get::<Option<Uuid>, _>("app_id"),
+        row.get::<Option<Uuid>, _>("deployment_id"),
+        status,
+        msg.get("failure").and_then(|value| value.as_str()),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    let _ = tx.commit().await;
 }
 
 /// Handle a `reconcile_request` event posted by the agent when it detects that
