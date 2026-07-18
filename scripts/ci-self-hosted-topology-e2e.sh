@@ -1,5 +1,5 @@
 deploy_generated_topology_app() {
-  local create app_id deploy deployment_id detail frontend_port backend_port route_file delete job client_name server_name topology_config inspection
+  local create app_id deploy deployment_id detail frontend_port backend_port route_file delete job client_name server_name topology_config inspection frontend_html
   client_name="@hostlet-topology/client"
   server_name="@hostlet-topology/server"
   topology_config='{"schemaVersion":1,"mode":"auto","backendPathPrefixes":["/api","/socket.io"]}'
@@ -43,7 +43,9 @@ print(services[client]["publishedPort"], services[server]["publishedPort"])
     curl -fsS "http://127.0.0.1:${frontend_port}/" >/dev/null
     timeout 5 bash -c "</dev/tcp/127.0.0.1/${backend_port}"
   else
-    curl --retry 10 --retry-delay 1 --retry-all-errors -fsS "http://127.0.0.1:${frontend_port}/" | grep -q 'patchwork-v1'
+    frontend_html="$(curl --retry 10 --retry-delay 1 --retry-all-errors -fsS "http://127.0.0.1:${frontend_port}/")"
+    printf '%s' "${frontend_html}" | grep -q 'patchwork-v1'
+    printf '%s' "${frontend_html}" | grep -q 'wss://patchwork.localhost'
     curl --retry 10 --retry-delay 1 --retry-all-errors -fsS "http://127.0.0.1:${backend_port}/api/version" | grep -q '^backend-v1$'
     websocket_ok=0
     for _ in $(seq 1 5); do

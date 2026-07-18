@@ -40,8 +40,49 @@ pub(crate) struct Config {
     pub(crate) job_signing_secret: String,
     pub(crate) workdir: PathBuf,
     pub(crate) local_mode: bool,
+    pub(crate) app_public_scheme: AppPublicScheme,
     pub(crate) health_host: String,
     pub(crate) local_router: Option<LocalRouter>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppPublicScheme {
+    Http,
+    Https,
+}
+
+impl AppPublicScheme {
+    fn parse(value: Option<&str>, local_mode: bool) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            Some("http") => Ok(Self::Http),
+            Some("https") => Ok(Self::Https),
+            Some(value) => bail!("HOSTLET_APP_PUBLIC_SCHEME must be http or https, got {value}"),
+            None if local_mode => Ok(Self::Http),
+            None => Ok(Self::Https),
+        }
+    }
+
+    pub(crate) fn origin(self, domain: &str) -> String {
+        format!("{}://{domain}", self.http_scheme())
+    }
+
+    pub(crate) fn websocket_origin(self, domain: &str) -> String {
+        format!("{}://{domain}", self.websocket_scheme())
+    }
+
+    fn http_scheme(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    fn websocket_scheme(self) -> &'static str {
+        match self {
+            Self::Http => "ws",
+            Self::Https => "wss",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -111,6 +152,13 @@ fn deployment_status_already_reported(err: &anyhow::Error) -> bool {
 
 pub(crate) async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
+    let local_mode = std::env::var("HOSTLET_LOCAL_MODE")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let app_public_scheme = AppPublicScheme::parse(
+        std::env::var("HOSTLET_APP_PUBLIC_SCHEME").ok().as_deref(),
+        local_mode,
+    )?;
     let cfg = Config {
         api_url: env("HOSTLET_API_URL")?,
         http: http_client()?,
@@ -120,9 +168,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         workdir: PathBuf::from(
             std::env::var("HOSTLET_WORKDIR").unwrap_or_else(|_| "/var/lib/hostlet".into()),
         ),
-        local_mode: std::env::var("HOSTLET_LOCAL_MODE")
-            .map(|v| v == "true")
-            .unwrap_or(false),
+        local_mode,
+        app_public_scheme,
         health_host: std::env::var("HOSTLET_HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
         local_router: local_router_config()?,
     };
@@ -532,6 +579,34 @@ mod tests {
         assert_eq!(runtime_health_interval_seconds("3601"), None);
         assert_eq!(runtime_health_interval_seconds(""), None);
         assert_eq!(runtime_health_interval_seconds("fast"), None);
+    }
+
+    #[test]
+    fn app_public_scheme_preserves_legacy_defaults() {
+        assert_eq!(
+            AppPublicScheme::parse(None, true).unwrap(),
+            AppPublicScheme::Http
+        );
+        assert_eq!(
+            AppPublicScheme::parse(None, false).unwrap(),
+            AppPublicScheme::Https
+        );
+    }
+
+    #[test]
+    fn app_public_scheme_separates_public_tls_from_local_routing() {
+        let scheme = AppPublicScheme::parse(Some("https"), true).unwrap();
+        assert_eq!(scheme.origin("game.example"), "https://game.example");
+        assert_eq!(
+            scheme.websocket_origin("game.example"),
+            "wss://game.example"
+        );
+    }
+
+    #[test]
+    fn app_public_scheme_rejects_unknown_values() {
+        let error = AppPublicScheme::parse(Some("ftp"), false).unwrap_err();
+        assert!(error.to_string().contains("must be http or https"));
     }
 
     #[test]

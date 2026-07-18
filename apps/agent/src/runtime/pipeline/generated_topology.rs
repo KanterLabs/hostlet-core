@@ -252,16 +252,8 @@ pub(super) async fn deploy_generated_topology(
     };
     log_inference_plan(cfg, deployment_id, &plan, &services, lock_receipt.as_ref()).await;
 
-    let public_origin = if cfg.local_mode {
-        format!("http://{domain}")
-    } else {
-        format!("https://{domain}")
-    };
-    let public_ws_origin = if cfg.local_mode {
-        format!("ws://{domain}")
-    } else {
-        format!("wss://{domain}")
-    };
+    let public_origin = cfg.app_public_scheme.origin(domain);
+    let public_ws_origin = cfg.app_public_scheme.websocket_origin(domain);
     let mut running: Vec<RunningService> = Vec::with_capacity(services.len());
     for service in &services {
         let service_slug = app_slug(&service.name);

@@ -21,6 +21,12 @@ If no Dockerfile exists, Hostlet can generate a Railpack deployment for common a
 
 Generated apps run as a non-root user and receive `/data` for persistent app data when applicable.
 
+Generated frontend/backend topologies derive public browser build variables from
+`HOSTLET_APP_PUBLIC_SCHEME`. Use `http` for direct local HTTP and `https` when a
+TLS proxy or tunnel exposes tenant apps publicly; Hostlet maps these to `ws` and
+`wss` for WebSocket variables. When unset, the agent preserves the historical
+defaults (`http` in local mode and `https` otherwise).
+
 Railpack builds use a BuildKit container. Set `HOSTLET_RAILPACK_BUILDKIT_KEEPALIVE=true`
 to keep it warm between builds; with keepalive enabled, Hostlet stops it after
 `HOSTLET_RAILPACK_BUILDKIT_IDLE_SECONDS` of no Railpack builds (default `1800`). Set

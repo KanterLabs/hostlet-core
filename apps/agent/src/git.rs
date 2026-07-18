@@ -257,6 +257,7 @@ mod tests {
             job_signing_secret: "s".into(),
             workdir,
             local_mode: true,
+            app_public_scheme: crate::runtime::AppPublicScheme::Http,
             health_host: "127.0.0.1".into(),
             local_router: None,
         }

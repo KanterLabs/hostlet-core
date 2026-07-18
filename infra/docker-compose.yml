@@ -68,6 +68,7 @@ services:
       HOSTLET_JOB_SIGNING_SECRET: ${JOB_SIGNING_SECRET:?Run hostlet init first}
       HOSTLET_WORKDIR: /var/lib/hostlet
       HOSTLET_LOCAL_MODE: "true"
+      HOSTLET_APP_PUBLIC_SCHEME: ${HOSTLET_APP_PUBLIC_SCHEME:-http}
       HOSTLET_HEALTH_HOST: 127.0.0.1
       HOSTLET_LOCAL_ROUTER: caddy
       HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR: /var/lib/hostlet/caddy
