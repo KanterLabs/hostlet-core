@@ -31,12 +31,9 @@ use reconcile::{
 pub(crate) use resource_stats::{parse_docker_bytes, publish_resource_stats};
 pub(crate) use storage_stats::publish_storage_stats;
 
-/// Build a unique temp path in the *same directory* as the final route file so
-/// the write + atomic rename never crosses a filesystem boundary. A per-process
-/// PID is not sufficient: a deploy and a runtime health-repair can rewrite the
-/// same app's `.caddy` file concurrently within a single agent process, so the
-/// random UUID suffix guarantees two writers never share a temp path and cannot
-/// clobber each other's in-flight write.
+/// Build a unique same-directory temp path so atomic rename never crosses a
+/// filesystem boundary. PID plus UUID prevents concurrent route writers from
+/// sharing and clobbering an in-flight file.
 fn route_temp_path(target: &Path) -> PathBuf {
     target.with_extension(format!(
         "caddy.tmp-{}-{}",
