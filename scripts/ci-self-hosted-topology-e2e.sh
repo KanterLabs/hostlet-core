@@ -1,11 +1,25 @@
 deploy_generated_topology_app() {
-  local create app_id deploy deployment_id detail frontend_port backend_port route_file delete job client_name server_name topology_config
+  local create app_id deploy deployment_id detail frontend_port backend_port route_file delete job client_name server_name topology_config inspection
   client_name="@hostlet-topology/client"
   server_name="@hostlet-topology/server"
   topology_config='{"schemaVersion":1,"mode":"auto","backendPathPrefixes":["/api","/socket.io"]}'
   if [ -n "${HOSTLET_TOPOLOGY_CANARY_REPO:-}" ]; then
     client_name="@patchwork/client"
     server_name="@patchwork/server"
+    inspection="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/github/repo-inspect" --data "{\"repo_full_name\":\"${HOSTLET_TOPOLOGY_CANARY_REPO}\",\"branch\":\"${HOSTLET_TOPOLOGY_CANARY_SHA}\"}")"
+    topology_config="$(printf '%s' "${inspection}" | python3 -c '
+import json, sys
+d=json.load(sys.stdin)
+assert d.get("deployable") is True, d
+assert d.get("runtimeKind") == "compose", d
+assert d.get("rootDirectory") == ".", d
+p=d.get("inferencePlan") or {}
+assert p.get("readiness") == "ready", p
+assert {s.get("name") for s in p.get("services", [])} == {"@patchwork/client", "@patchwork/server"}, p
+cfg=(d.get("runtimeConfig") or {}).get("generatedTopology")
+assert cfg and cfg.get("mode") == "auto", d
+print(json.dumps(cfg, separators=(",", ":")))
+')"
   fi
   create="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps" --data "$(cat <<JSON
 {"name":"ci-topology-patchwork","repo_full_name":"${TOPOLOGY_REPO_FULL}","branch":"main","server_id":null,"container_port":80,"health_path":"/","domain":"patchwork.localhost","runtime_kind":"compose","hostlet_config_path":"hostlet.yml","root_directory":".","runtime_config":{"generatedTopology":${topology_config}},"memory_limit_mb":512,"cpu_limit":0.5,"public_exposure":false,"auto_deploy":false,"deploy_after_create":false,"env":[{"key":"APP_VERSION","value":"v1"}]}
