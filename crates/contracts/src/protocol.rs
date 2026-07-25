@@ -56,6 +56,40 @@ pub struct CommitActivationRequest {
     pub claim_token: Uuid,
     pub route_generation: i64,
     pub local_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_metadata: Option<Value>,
     #[serde(default)]
     pub rolled_back: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commit_json() -> Value {
+        serde_json::json!({
+            "jobId": Uuid::nil(),
+            "claimToken": Uuid::nil(),
+            "routeGeneration": 7,
+            "localUrl": null,
+            "rolledBack": false
+        })
+    }
+
+    #[test]
+    fn commit_activation_accepts_recovery_requests_without_final_metadata() {
+        let request: CommitActivationRequest = serde_json::from_value(commit_json()).unwrap();
+        assert_eq!(request.runtime_metadata, None);
+    }
+
+    #[test]
+    fn commit_activation_carries_final_runtime_metadata() {
+        let mut value = commit_json();
+        value["runtimeMetadata"] = serde_json::json!({"routingDurationMs": 12});
+        let request: CommitActivationRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            request.runtime_metadata,
+            Some(serde_json::json!({"routingDurationMs": 12}))
+        );
+    }
 }

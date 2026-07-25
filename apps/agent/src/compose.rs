@@ -468,6 +468,7 @@ pub(crate) async fn deploy_compose(
         deployment_id,
         route_generation,
         local_url.as_deref(),
+        Some(runtime_metadata),
         false,
     )
     .await?;
@@ -565,8 +566,16 @@ pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
             .await?;
         }
         let local_url = cfg.local_router.as_ref().map(|_| domain);
-        commit_candidate_activation(&cfg, &p, deployment_id, route_generation, local_url, true)
-            .await?;
+        commit_candidate_activation(
+            &cfg,
+            &p,
+            deployment_id,
+            route_generation,
+            local_url,
+            None,
+            true,
+        )
+        .await?;
         return Ok(());
     }
     match apply_caddy_route_versioned(
@@ -580,7 +589,7 @@ pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
     .await
     {
         Ok(_) => {
-            commit_candidate_activation(&cfg, &p, deployment_id, route_generation, None, true)
+            commit_candidate_activation(&cfg, &p, deployment_id, route_generation, None, None, true)
                 .await?
         }
         Err(err) => {

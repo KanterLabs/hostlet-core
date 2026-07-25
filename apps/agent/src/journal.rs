@@ -147,6 +147,7 @@ pub(crate) async fn log_recoverable_journals(cfg: &Config) -> anyhow::Result<()>
                         claim_token: journal.claim_token,
                         route_generation,
                         local_url: None,
+                        runtime_metadata: None,
                         rolled_back: journal.rolled_back,
                     })
                     .send()
