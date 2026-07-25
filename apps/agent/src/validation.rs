@@ -49,6 +49,21 @@ pub(crate) fn compose_release_project_name(deployment_id: Uuid) -> String {
     format!("hostlet-release-{}", deployment_id.simple())
 }
 
+pub(crate) fn compose_named_volumes(compose_text: &str) -> anyhow::Result<Vec<String>> {
+    let source: serde_yaml::Value = serde_yaml::from_str(compose_text)?;
+    let mut volumes = Vec::new();
+    if let Some(source_volumes) = source
+        .get("volumes")
+        .and_then(serde_yaml::Value::as_mapping)
+    {
+        for name in source_volumes.keys().filter_map(serde_yaml::Value::as_str) {
+            validate_service_name(name)?;
+            volumes.push(name.to_string());
+        }
+    }
+    Ok(volumes)
+}
+
 /// Derives the release-only override from the already-hardened base override.
 /// The web container joins the stable app network and every declared named
 /// volume resolves to the stable project's explicit volume name.
@@ -83,14 +98,10 @@ pub(crate) fn compose_release_override_yaml(
     networks.insert("hostlet-stable".into(), network.into());
     root.insert("networks".into(), networks.into());
 
-    let source: serde_yaml::Value = serde_yaml::from_str(compose_text)?;
-    if let Some(source_volumes) = source
-        .get("volumes")
-        .and_then(serde_yaml::Value::as_mapping)
-    {
+    let volume_names = compose_named_volumes(compose_text)?;
+    if !volume_names.is_empty() {
         let mut volumes = serde_yaml::Mapping::new();
-        for name in source_volumes.keys().filter_map(serde_yaml::Value::as_str) {
-            validate_service_name(name)?;
+        for name in volume_names {
             let mut definition = serde_yaml::Mapping::new();
             definition.insert("name".into(), format!("{stable_project}_{name}").into());
             definition.insert("external".into(), true.into());
