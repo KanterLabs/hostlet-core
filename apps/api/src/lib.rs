@@ -292,10 +292,20 @@ fn is_machine_agent_path(path: &str) -> bool {
             | "/api/agent/events"
             | "/api/agent/jobs/claim"
             | "/api/agent/screenshots"
-    ) || path
-        .strip_prefix("/api/agent/jobs/")
-        .and_then(|rest| rest.strip_suffix("/complete"))
-        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    ) || machine_resource_action(path, "/api/agent/jobs/", &["complete", "heartbeat"])
+        || machine_resource_action(
+            path,
+            "/api/agent/deployments/",
+            &["prepare-activation", "commit-activation"],
+        )
+}
+
+fn machine_resource_action(path: &str, prefix: &str, allowed_actions: &[&str]) -> bool {
+    path.strip_prefix(prefix)
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(id, action)| {
+            uuid::Uuid::parse_str(id).is_ok() && allowed_actions.contains(&action)
+        })
 }
 
 fn request_origin(headers: &HeaderMap) -> Option<String> {
@@ -374,6 +384,18 @@ mod tests {
             &Method::POST,
             "/api/agent/jobs/00000000-0000-0000-0000-000000000001/complete"
         ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/jobs/00000000-0000-0000-0000-000000000001/heartbeat"
+        ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/deployments/00000000-0000-0000-0000-000000000001/prepare-activation"
+        ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/deployments/00000000-0000-0000-0000-000000000001/commit-activation"
+        ));
     }
 
     #[test]
@@ -386,6 +408,10 @@ mod tests {
         assert!(requires_browser_origin(
             &Method::POST,
             "/api/agent/jobs/00000000-0000-0000-0000-000000000001/retry"
+        ));
+        assert!(requires_browser_origin(
+            &Method::POST,
+            "/api/agent/deployments/00000000-0000-0000-0000-000000000001/prepare-activation/extra"
         ));
     }
 
