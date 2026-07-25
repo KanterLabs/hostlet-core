@@ -60,7 +60,7 @@ ci_tmp_dir() {
 # json_get <dotted.path>: read JSON from stdin and print the value at the path,
 # exiting non-zero if any segment is missing/null.
 json_get() {
-  node -e "let s=''; process.stdin.on('data', d => s += d); process.stdin.on('end', () => { const path = process.argv[1].split('.'); let v = JSON.parse(s); for (const key of path) v = v?.[key]; if (v === undefined || v === null) process.exit(2); process.stdout.write(String(v)); });" "$1"
+  node -e "let s=''; process.stdin.on('data', d => s += d); process.stdin.on('end', () => { const pathText = process.argv[1]; const path = pathText.split('.'); let v = JSON.parse(s); for (const key of path) v = v?.[key]; if (v === undefined || v === null) { console.error('missing JSON path: ' + pathText); process.exit(2); } process.stdout.write(String(v)); });" "$1"
 }
 
 # signed_cookie <value>: mint a v2 HMAC-signed session cookie for the given value
