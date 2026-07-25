@@ -7,6 +7,7 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hostlet-runner-verify-test.XXXXXX")"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 mkdir -p "${TMP_DIR}/bin"
+mkdir -p "${TMP_DIR}/forbidden-home"
 
 cat >"${TMP_DIR}/bin/df" <<'SH'
 #!/usr/bin/env bash
@@ -72,7 +73,10 @@ run_case() {
 run_case pass success
 run_case fail missing-env env -u RUNNER_NAME
 run_case fail wrong-name HOSTLET_ALLOWED_RUNNER_PREFIX=legacy-
-run_case fail arc-host-path-exposed HOSTLET_ALLOW_ARC_HOST_PATHS=0
+run_case fail arc-host-path-exposed \
+  HOSTLET_ALLOW_ARC_HOST_PATHS=0 \
+  HOSTLET_FORBIDDEN_HOME_PATH="${TMP_DIR}/forbidden-home" \
+  HOSTLET_FORBIDDEN_K8S_TOKEN_PATH="${TMP_DIR}/missing-token"
 run_case fail wrong-os RUNNER_OS=macOS
 run_case fail wrong-arch RUNNER_ARCH=ARM64
 run_case fail low-root-disk STUB_ROOT_DF_PERCENT=95
