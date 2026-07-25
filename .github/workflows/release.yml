@@ -19,7 +19,7 @@ jobs:
   # Runs on both tag push and workflow_dispatch so a release can be dry-run-validated.
   release-validation:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: scripts/ci-verify-runner.sh
@@ -33,7 +33,7 @@ jobs:
   linux-cli:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     needs: [release-validation]
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     env:
       # Cap cargo parallelism (release build is the most expensive cargo
       # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
@@ -64,7 +64,10 @@ jobs:
           echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USERNAME: ShaneKanterman04
+        run: echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
       - name: Build and push release images
         if: startsWith(github.ref, 'refs/tags/v')
         env:
