@@ -226,6 +226,13 @@ make_fixture_repo() {
 EOF
 }
 
+fixture_deploy_request() {
+  local repo_name="$1"
+  local commit_sha
+  commit_sha="$(git --git-dir="${TMP_DIR}/git/${repo_name}.git" rev-parse refs/heads/main)"
+  printf '{"commitSha":"%s"}' "${commit_sha}"
+}
+
 assert_runtime_metric() {
   local payload="$1"
   local path="$2"
@@ -435,7 +442,7 @@ JSON
   railpack_app_id="$(printf '%s' "${railpack_app_payload}" | json_get id)"
   CREATED_APP_IDS+=("${railpack_app_id}")
 
-  railpack_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${railpack_app_id}/deploy" --data '{}')"
+  railpack_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${railpack_app_id}/deploy" --data "$(fixture_deploy_request "${repo_name}")")"
   railpack_deployment_id="$(printf '%s' "${railpack_deploy_payload}" | json_get deploymentId)"
   wait_deployment_status "${railpack_deployment_id}"
 
@@ -524,7 +531,7 @@ JSON
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
   printf '%s' "${detail}" | json_get runtimeKind | grep -q '^compose$'
 
-  deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+  deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data "$(fixture_deploy_request "${APP_REPO_NAME}")")"
   deployment_id="$(printf '%s' "${deploy_payload}" | json_get deploymentId)"
   wait_deployment_status "${deployment_id}"
 
@@ -654,7 +661,7 @@ CREATED_APP_IDS+=("${app_id}")
 # Deploy v1: container comes up healthy, serves v1, logs redact the secret, and
 # the published port is bound to loopback only.
 # ---------------------------------------------------------------------------
-deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data "$(fixture_deploy_request "${APP_REPO_NAME}")")"
 deployment_id="$(printf '%s' "${deploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${deployment_id}"
 
@@ -766,7 +773,7 @@ printf '%s' "${port_repair_logs}" | grep -q "Detected Docker-published port drif
 # the original v1 marker).
 # ---------------------------------------------------------------------------
 expect_status 204 -H "cookie: ${AUTH_COOKIE}" -X PUT "${BASE_URL}/api/apps/${app_id}/env/APP_VERSION" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" --data '{"value":"v2"}'
-redeploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data '{}')"
+redeploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data "$(fixture_deploy_request "${APP_REPO_NAME}")")"
 redeploy_id="$(printf '%s' "${redeploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${redeploy_id}"
 published_app_serves 'hostlet-ci-v2-v1'
@@ -839,7 +846,7 @@ compose_app_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}"
 compose_app_id="$(printf '%s' "${compose_app_payload}" | json_get id)"
 CREATED_APP_IDS+=("${compose_app_id}")
 
-compose_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${compose_app_id}/deploy" --data '{}')"
+compose_deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${compose_app_id}/deploy" --data "$(fixture_deploy_request "${COMPOSE_REPO_NAME}")")"
 compose_deployment_id="$(printf '%s' "${compose_deploy_payload}" | json_get deploymentId)"
 wait_deployment_status "${compose_deployment_id}"
 
