@@ -275,6 +275,7 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         deployment_id,
         route_generation,
         local_url.as_deref(),
+        Some(runtime_metadata),
         false,
     )
     .await?;
