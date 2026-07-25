@@ -5,6 +5,8 @@ allowed_names="${HOSTLET_ALLOWED_RUNNER_NAMES:-}"
 allowed_prefix="${HOSTLET_ALLOWED_RUNNER_PREFIX:-}"
 expected_os="${HOSTLET_EXPECTED_RUNNER_OS:-Linux}"
 expected_arch="${HOSTLET_EXPECTED_RUNNER_ARCH:-X64}"
+forbidden_home_path="${HOSTLET_FORBIDDEN_HOME_PATH:-/home/shane}"
+forbidden_k8s_token_path="${HOSTLET_FORBIDDEN_K8S_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
 
 disk_use_percent() {
   df -P "$1" | awk 'NR == 2 { gsub("%", "", $5); print $5 }'
@@ -74,7 +76,7 @@ fi
 
 if [[ "${RUNNER_NAME}" == homelab-* ]]; then
   if [ "${HOSTLET_ALLOW_ARC_HOST_PATHS:-0}" != "1" ] &&
-    { [ -e /home/shane ] || [ -e /var/run/secrets/kubernetes.io/serviceaccount/token ]; }; then
+    { [ -e "${forbidden_home_path}" ] || [ -e "${forbidden_k8s_token_path}" ]; }; then
     echo "ARC runner exposes a forbidden host path or Kubernetes token" >&2
     exit 1
   fi
