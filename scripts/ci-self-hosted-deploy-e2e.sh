@@ -533,6 +533,7 @@ JSON
 
   deploy_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/deploy" --data "$(fixture_deploy_request "${APP_REPO_NAME}")")"
   deployment_id="$(printf '%s' "${deploy_payload}" | json_get deploymentId)"
+  release_project="hostlet-release-${deployment_id//-/}"
   wait_deployment_status "${deployment_id}"
 
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
@@ -553,7 +554,7 @@ assert roles.get("postgres") == "backing", roles
     echo "managed add-on backing service published a host port" >&2
     exit 1
   fi
-  docker ps --filter "label=com.docker.compose.project=${project}" --filter "label=hostlet.role=web" --format '{{.Ports}}' | grep -q '127.0.0.1'
+  docker ps --filter "label=com.docker.compose.project=${release_project}" --filter "label=hostlet.role=web" --format '{{.Ports}}' | grep -q '127.0.0.1'
 
   # The backing Postgres carries the per-service caps from runtime_config
   # (256 MB = 268435456 bytes; 0.25 CPU = 250000000 NanoCpus).
