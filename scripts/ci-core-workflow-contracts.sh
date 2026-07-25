@@ -49,12 +49,12 @@ assert_contains "${ROOT}/.github/workflows/release.yml" 'docker buildx build --p
 assert_contains "${ROOT}/.github/workflows/release.yml" 'hostlet-linux-arm64'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
-assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3,hostlet-core-homelab-4'
-assert_contains "${CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
+assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
+assert_contains "${CI_WORKFLOW}" 'runs-on: homelab'
 assert_not_contains "${CI_WORKFLOW}" 'pull_request:'
 assert_contains "${PR_WORKFLOW}" 'pull_request_target:'
 assert_contains "${PR_WORKFLOW}" "homelab-ci-approved"
-assert_contains "${PR_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
+assert_contains "${PR_WORKFLOW}" 'runs-on: homelab'
 assert_contains "${PR_WORKFLOW}" 'persist-credentials: false'
 assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner.sh'
@@ -63,9 +63,11 @@ assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
 assert_contains "${ROOT}/.github/workflows/release.yml" 'CARGO_BUILD_JOBS: "4"'
 assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
 assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
-assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
-assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: [self-hosted, Linux, X64, hostlet-core-v2]'
-assert_contains "${ROOT}/.github/actionlint.yaml" 'hostlet-core-v2'
+assert_contains "${STAGING_DEPLOYABILITY}" 'runs-on: homelab'
+assert_contains "${FULL_CI_WORKFLOW}" 'runs-on: homelab'
+assert_contains "${ROOT}/.github/actionlint.yaml" 'homelab'
+assert_contains "${PR_WORKFLOW}" 'runs-on: ubuntu-latest'
+assert_contains "${PR_WORKFLOW}" 'github.event.pull_request.head.repo.full_name == github.repository'
 assert_contains "${FULL_CI_WORKFLOW}" "group: full-ci-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${STAGING_DEPLOYABILITY}" "group: deployability-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"'
@@ -120,11 +122,11 @@ import sys
 from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
-self_hosted_jobs = workflow.count("runs-on: [self-hosted, Linux, X64, hostlet-core-v2]")
+self_hosted_jobs = workflow.count("runs-on: homelab")
 approved_guards = workflow.count(
-    "if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'"
+    "if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'"
 )
-if self_hosted_jobs < 6 or approved_guards < 5:
+if self_hosted_jobs < 5 or approved_guards < 5:
     raise SystemExit(
         f"PR homelab CI must be label-gated on self-hosted runners: jobs={self_hosted_jobs} guards={approved_guards}"
     )

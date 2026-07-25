@@ -48,9 +48,10 @@ run_case() {
   set +e
   env \
     PATH="${TMP_DIR}/bin:${PATH}" \
-    RUNNER_NAME=hostlet-core-homelab-2 \
+    RUNNER_NAME=homelab-contract-test \
     RUNNER_OS=Linux \
     RUNNER_ARCH=X64 \
+    HOSTLET_ALLOW_ARC_HOST_PATHS=1 \
     "$@" \
     "${SCRIPT}" >"${TMP_DIR}/${name}.out" 2>"${TMP_DIR}/${name}.err"
   local status="$?"
@@ -69,14 +70,15 @@ run_case() {
 
 run_case pass success
 run_case fail missing-env env -u RUNNER_NAME
-run_case fail wrong-name HOSTLET_ALLOWED_RUNNER_NAMES=hostlet-core-homelab-3
+run_case fail wrong-name HOSTLET_ALLOWED_RUNNER_PREFIX=legacy-
+run_case fail arc-host-path-exposed HOSTLET_ALLOW_ARC_HOST_PATHS=0
 run_case fail wrong-os RUNNER_OS=macOS
 run_case fail wrong-arch RUNNER_ARCH=ARM64
 run_case fail low-root-disk STUB_ROOT_DF_PERCENT=95
 run_case fail docker-unavailable STUB_DOCKER_FAIL=1
-run_case fail docker-not-mounted STUB_DOCKER_NOT_MOUNTED=1
-run_case fail low-docker-disk STUB_DOCKER_DF_PERCENT=95
+run_case fail docker-not-mounted RUNNER_NAME=legacy-runner STUB_DOCKER_NOT_MOUNTED=1
+run_case fail low-docker-disk RUNNER_NAME=legacy-runner STUB_DOCKER_DF_PERCENT=95
 run_case pass root-disk-override STUB_ROOT_DF_PERCENT=95 HOSTLET_ALLOW_LOW_DISK=1
-run_case pass docker-disk-override STUB_DOCKER_DF_PERCENT=95 HOSTLET_ALLOW_LOW_DOCKER_DISK=1
+run_case pass docker-disk-override RUNNER_NAME=legacy-runner STUB_DOCKER_DF_PERCENT=95 HOSTLET_ALLOW_LOW_DOCKER_DISK=1
 
 echo "ci-verify-runner self-test passed"

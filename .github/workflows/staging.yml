@@ -22,7 +22,7 @@ concurrency:
 jobs:
   secrets:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,7 +32,7 @@ jobs:
 
   rust:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     env:
       # Cap cargo parallelism: several workflows from both repos land on one
       # 24-vCPU/48GiB CI VM; uncapped workspace builds stacking up OOM'd the
@@ -53,7 +53,7 @@ jobs:
 
   web:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     defaults:
       run:
         working-directory: apps/web
@@ -68,7 +68,7 @@ jobs:
   images:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [secrets, rust, web]
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     steps:
       - name: Isolate docker credentials for this run
         # Per-run DOCKER_CONFIG so a concurrent hostlet-cloud deploy on the same
@@ -83,7 +83,10 @@ jobs:
       - name: Compute image tags
         run: echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USERNAME: ShaneKanterman04
+        run: echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
       - name: Build and push staging images
         env:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
@@ -109,7 +112,7 @@ jobs:
   notify-cloud:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [images]
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
@@ -121,5 +124,5 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${CLOUD_DISPATCH_PAT}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/ShaneKanterman04/hostlet-cloud/dispatches" \
+            "https://api.github.com/repos/KanterLabs/hostlet-cloud/dispatches" \
             -d "{\"event_type\":\"core-staging-updated\",\"client_payload\":{\"schema_version\":1,\"core_sha\":\"${GITHUB_SHA}\",\"core_tag\":\"sha-${GITHUB_SHA:0:12}\"}}"
