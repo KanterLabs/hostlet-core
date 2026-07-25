@@ -1,6 +1,8 @@
 use super::*;
 mod cleanup;
+mod volumes;
 pub(crate) use cleanup::*;
+use volumes::ensure_stable_named_volumes;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct HostletManifest {
@@ -277,6 +279,11 @@ pub(crate) async fn deploy_compose(
     } else {
         ensure_compose_network(&format!("{stable_project}_default"), &stable_project).await?;
     }
+    // A named volume used only by the web service is not created by the
+    // backing-service `up` above. The release override deliberately treats
+    // every volume as external so blue/green releases share stable app data;
+    // create any missing stable volumes before starting the release.
+    ensure_stable_named_volumes(&cfg, deployment_id, &compose_text, &stable_project).await?;
     let release_override =
         compose_release_override_yaml(&base_override, &compose_text, web_service, &stable_project)?;
     tokio::fs::write(&release_override_file, release_override).await?;
