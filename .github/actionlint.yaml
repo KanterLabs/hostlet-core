@@ -4,5 +4,6 @@ self-hosted-runner:
     - Linux
     - X64
     - homelab
+    - homelab-heavy
 
 config-variables: null

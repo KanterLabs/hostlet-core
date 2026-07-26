@@ -14,6 +14,18 @@ Hostlet is an open-source deployment control panel for running web apps on your 
 
 Hosted-service code, billing, private deployment config, and company infrastructure live outside this public core repo.
 
+## GitHub CI runners
+
+KanterLabs GitHub CI uses ephemeral runner pods managed by Actions Runner
+Controller (ARC). ARC manages fleet size; the runner pod executes one job and
+is deleted afterward. Secrets, compose-policy, notifications, and cache
+maintenance use the `homelab` micro tier. Rust, web/browser, image, release,
+and long deployability jobs use `homelab-heavy`.
+
+See the
+[canonical runner runbook](https://github.com/KanterLabs/infrastructure/tree/main/homelab/ci-runners)
+for architecture, resources, routing, and verification.
+
 ## Quick Start
 
 Prerequisites:

@@ -20,7 +20,7 @@ concurrency:
 jobs:
   clear-approval:
     if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'homelab-ci-approved')
-    runs-on: ubuntu-latest
+    runs-on: homelab
     permissions:
       pull-requests: write
     steps:
@@ -51,9 +51,9 @@ jobs:
 
   rust:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: homelab
+    runs-on: homelab-heavy
     env:
-      CARGO_BUILD_JOBS: "4"
+      CARGO_BUILD_JOBS: "8"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -76,7 +76,7 @@ jobs:
 
   web:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: homelab
+    runs-on: homelab-heavy
     defaults:
       run:
         working-directory: apps/web
@@ -129,7 +129,7 @@ jobs:
 
   docker:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: homelab
+    runs-on: homelab-heavy
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
