@@ -20,7 +20,7 @@ concurrency:
 jobs:
   clear-approval:
     if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'homelab-ci-approved')
-    runs-on: ubuntu-latest
+    runs-on: homelab
     permissions:
       pull-requests: write
     steps:
