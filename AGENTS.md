@@ -11,6 +11,7 @@ production‑only deployment detail **out of this repo** — it is public. See `
   builds and pushes the moving `hostlet-{api,web,agent,screenshotter}:staging` and immutable
   `:sha-<commit>` images to GHCR, then rings the downstream Hostlet Cloud staging deploy
   (a `repository_dispatch`). So a push to `staging` updates the Cloud staging environment.
+
 - **`main` is the release branch.** Releases are git tags `vX.Y.Z` (`release.yml`). The tag
   **must match** the `version` in `apps/cli/Cargo.toml`, `apps/api/Cargo.toml`, and
   `apps/agent/Cargo.toml` — bump all three before tagging or the release fails. Releases
@@ -19,6 +20,16 @@ production‑only deployment detail **out of this repo** — it is public. See `
 - **Downstream:** Hostlet Cloud consumes this repo as a git submodule — its `staging` branch
   tracks core `staging`; its `main` pins a core `vX.Y.Z` tag. Don't rewrite public history;
   don't force‑push shared branches.
+
+### CI runner tiers
+
+ARC manages ephemeral runner pods; it does not execute workflow steps. Keep
+secrets, compose-policy, notifications, and cache maintenance on `homelab`.
+Keep Rust workspaces, web/browser suites, image builds, releases, and long
+deployability jobs on `homelab-heavy`, with `CARGO_BUILD_JOBS=8` for heavy Rust
+jobs. Choose per job. A failing assertion after checkout is a repository
+failure unless runner evidence shows otherwise. The canonical platform
+contract is `KanterLabs/infrastructure/homelab/ci-runners/README.md`.
 
 ## Overlay architecture and placement rules
 
