@@ -26,12 +26,9 @@ jobs:
       - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --redact --verbose
 
   rust:
-    runs-on: homelab
+    runs-on: homelab-heavy
     env:
-      # Cap cargo parallelism: several workflows from both repos land on one
-      # 24-vCPU/48GiB CI VM; uncapped workspace builds stacking up OOM'd the
-      # hypervisor and hard-reset the box (2026-06-10 crash-loop incident).
-      CARGO_BUILD_JOBS: "4"
+      CARGO_BUILD_JOBS: "8"
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
@@ -58,7 +55,7 @@ jobs:
       - run: cargo test --workspace
 
   web:
-    runs-on: homelab
+    runs-on: homelab-heavy
     defaults:
       run:
         working-directory: apps/web
@@ -101,7 +98,7 @@ jobs:
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
 
   docker:
-    runs-on: homelab
+    runs-on: homelab-heavy
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh

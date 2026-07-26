@@ -32,12 +32,9 @@ jobs:
 
   rust:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab
+    runs-on: homelab-heavy
     env:
-      # Cap cargo parallelism: several workflows from both repos land on one
-      # 24-vCPU/48GiB CI VM; uncapped workspace builds stacking up OOM'd the
-      # hypervisor and hard-reset the box (2026-06-10 crash-loop incident).
-      CARGO_BUILD_JOBS: "4"
+      CARGO_BUILD_JOBS: "8"
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-verify-runner.sh
@@ -55,7 +52,7 @@ jobs:
 
   web:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab
+    runs-on: homelab-heavy
     defaults:
       run:
         working-directory: apps/web
@@ -70,7 +67,7 @@ jobs:
   images:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [secrets, rust, web]
-    runs-on: homelab
+    runs-on: homelab-heavy
     steps:
       - name: Isolate docker credentials for this run
         # Per-run DOCKER_CONFIG so a concurrent hostlet-cloud deploy on the same
