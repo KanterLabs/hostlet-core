@@ -8,6 +8,11 @@ use crate::state::AppState;
 use hostlet_contracts::version_is_newer;
 use sqlx::Row;
 
+const HOSTLET_RELEASES_API_URL: &str =
+    "https://api.github.com/repos/KanterLabs/hostlet-core/releases/latest";
+const HOSTLET_RELEASES_LATEST_URL: &str =
+    "https://github.com/KanterLabs/hostlet-core/releases/latest";
+
 /// Cached metadata about the latest available Hostlet release.
 pub struct UpdateCheck {
     latest_version: String,
@@ -21,7 +26,7 @@ pub struct UpdateCheck {
 async fn fetch_latest_release(state: &AppState) -> anyhow::Result<UpdateCheck> {
     let value: serde_json::Value = state
         .http
-        .get("https://api.github.com/repos/ShaneKanterman04/Hostlet/releases/latest")
+        .get(HOSTLET_RELEASES_API_URL)
         .send()
         .await?
         .error_for_status()?
@@ -36,7 +41,7 @@ async fn fetch_latest_release(state: &AppState) -> anyhow::Result<UpdateCheck> {
     let release_notes_url = value
         .get("html_url")
         .and_then(|v| v.as_str())
-        .unwrap_or("https://github.com/ShaneKanterman04/Hostlet/releases/latest")
+        .unwrap_or(HOSTLET_RELEASES_LATEST_URL)
         .to_string();
     let mut update = UpdateCheck {
         latest_version,
@@ -105,9 +110,21 @@ pub async fn apply_update_manifest(
         .and_then(|v| v.as_bool())
         .unwrap_or(update.database_migrations);
     if let Some(notes_url) = value.get("notes_url").and_then(|v| v.as_str()) {
-        update.release_notes_url = notes_url.to_string();
+        update.release_notes_url = canonical_release_notes_url(notes_url);
     }
     Ok(())
+}
+
+fn canonical_release_notes_url(url: &str) -> String {
+    for legacy in [
+        "https://github.com/ShaneKanterman04/Hostlet",
+        "https://github.com/ShaneKanterman04/hostlet-core",
+    ] {
+        if let Some(suffix) = url.strip_prefix(legacy) {
+            return format!("https://github.com/KanterLabs/hostlet-core{suffix}");
+        }
+    }
+    url.to_string()
 }
 
 pub async fn cached_update_check(state: &AppState) -> Option<serde_json::Value> {
@@ -164,4 +181,23 @@ pub async fn refresh_update_check_if_stale(state: &AppState) -> anyhow::Result<(
         let _ = refresh_update_check(state).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_release_notes_urls_are_canonicalized() {
+        assert_eq!(
+            canonical_release_notes_url(
+                "https://github.com/ShaneKanterman04/hostlet-core/releases/tag/v0.2.22"
+            ),
+            "https://github.com/KanterLabs/hostlet-core/releases/tag/v0.2.22"
+        );
+        assert_eq!(
+            canonical_release_notes_url("https://example.test/release"),
+            "https://example.test/release"
+        );
+    }
 }

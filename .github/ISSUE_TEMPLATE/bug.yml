@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible Hostlet Core defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include secrets, private repository contents, or customer data.
+        For suspected vulnerabilities, follow SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: Hostlet version
+      description: Output from `hostlet version`.
+      placeholder: "hostlet 0.x.y"
+    validations:
+      required: true
+  - type: textarea
+    id: host
+    attributes:
+      label: Host environment
+      description: Linux distribution, kernel, CPU architecture, `getconf GNU_LIBC_VERSION`, Docker Engine, and Docker Compose versions.
+    validations:
+      required: true
+  - type: dropdown
+    id: access
+    attributes:
+      label: Access mode
+      options:
+        - LAN
+        - Cloudflare Tunnel
+        - Direct public (advanced)
+        - Local development
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the actual and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest repeatable sequence.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Add relevant `hostlet doctor` output or logs after removing secrets and private data.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private repository contents, and customer data.
+          required: true
+        - label: This is not a suspected security vulnerability.
+          required: true

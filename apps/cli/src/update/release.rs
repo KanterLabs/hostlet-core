@@ -145,6 +145,18 @@ fn image_repository(reference: &str) -> &str {
     }
 }
 
+fn canonical_release_notes_url(url: &str) -> String {
+    for legacy in [
+        "https://github.com/ShaneKanterman04/Hostlet",
+        "https://github.com/ShaneKanterman04/hostlet-core",
+    ] {
+        if let Some(suffix) = url.strip_prefix(legacy) {
+            return format!("https://github.com/KanterLabs/hostlet-core{suffix}");
+        }
+    }
+    url.to_string()
+}
+
 pub(crate) async fn latest_release(client: &reqwest::Client) -> anyhow::Result<ReleaseInfo> {
     let value: Value = client
         .get(format!(
@@ -163,8 +175,8 @@ pub(crate) async fn latest_release(client: &reqwest::Client) -> anyhow::Result<R
     let notes_url = value
         .get("html_url")
         .and_then(|v| v.as_str())
-        .unwrap_or("https://github.com/ShaneKanterman04/Hostlet/releases/latest")
-        .to_string();
+        .map(canonical_release_notes_url)
+        .unwrap_or_else(|| HOSTLET_RELEASES_LATEST_URL.to_string());
     let assets = value
         .get("assets")
         .and_then(|v| v.as_array())
@@ -237,7 +249,7 @@ pub(crate) fn apply_release_manifest_value(release: &mut ReleaseInfo, value: &Va
         .and_then(|v| v.as_bool())
         .unwrap_or(release.database_migrations);
     if let Some(notes_url) = value.get("notes_url").and_then(|v| v.as_str()) {
-        release.notes_url = notes_url.to_string();
+        release.notes_url = canonical_release_notes_url(notes_url);
     }
     release.image_registry = value
         .get("image_registry")
@@ -482,6 +494,26 @@ mod tests {
         let image = parse_release_image(Some(&value)).unwrap();
         assert_eq!(image.reference, "ghcr.io/x:1");
         assert_eq!(image.digest.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn release_notes_urls_use_the_canonical_repository() {
+        assert_eq!(
+            canonical_release_notes_url(
+                "https://github.com/ShaneKanterman04/Hostlet/releases/tag/v0.2.1"
+            ),
+            "https://github.com/KanterLabs/hostlet-core/releases/tag/v0.2.1"
+        );
+        assert_eq!(
+            canonical_release_notes_url(
+                "https://github.com/ShaneKanterman04/hostlet-core/releases/tag/v0.2.22"
+            ),
+            "https://github.com/KanterLabs/hostlet-core/releases/tag/v0.2.22"
+        );
+        assert_eq!(
+            canonical_release_notes_url("https://example.test/release"),
+            "https://example.test/release"
+        );
     }
 
     #[test]

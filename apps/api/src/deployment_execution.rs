@@ -333,7 +333,11 @@ pub async fn commit_activation(
         {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-        for service in candidate.services.into_iter().take(64) {
+        for service in candidate
+            .services
+            .into_iter()
+            .take(hostlet_contracts::DEPLOYMENT_SERVICE_REPORT_MAX)
+        {
             if service.name.is_empty()
                 || service.name.len() > 64
                 || !matches!(service.role.as_str(), "web" | "backing")

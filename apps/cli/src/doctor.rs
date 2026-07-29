@@ -18,7 +18,7 @@ pub(crate) const REQUIRED_ENV_KEYS: &[&str] = &[
 /// Emits the Docker and Docker Compose availability checks shared by both
 /// `status` and `doctor`, in the same order and with the same labels.
 pub(crate) fn check_docker_runtime() {
-    check("Docker", command_ok("docker", &["version"]));
+    check("Docker daemon", command_ok("docker", &["info"]));
     check(
         "Docker Compose",
         command_ok("docker", &["compose", "version"]),

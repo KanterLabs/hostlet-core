@@ -1,8 +1,13 @@
 # Deploying Apps
 
-Hostlet deploys supported GitHub repositories through the local self-hosted
-agent. Remote self-hosted server registration is deferred in Hostlet Core;
-managed worker behavior is outside the public Core runtime.
+Hostlet Core deploys supported GitHub repositories to the same Linux host on
+which it is installed. Remote host registration, multi-host scheduling, and
+cluster orchestration are not part of Core.
+
+Repository inspection is best effort. If inference does not recognize a
+project, add a Dockerfile and explicit port/health settings. Run only
+repositories you trust: builds and app containers share a Docker host with the
+Hostlet agent.
 
 ## Dockerfile Apps
 

@@ -13,6 +13,9 @@ on:
 permissions:
   contents: read
 
+env:
+  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+
 concurrency:
   group: deployability-${{ github.event_name == 'schedule' && 'staging' || github.ref }}
   cancel-in-progress: true
@@ -20,18 +23,19 @@ concurrency:
 jobs:
   generated-apps:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab-heavy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           # Scheduled runs validate staging, not the default branch.
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
+      - run: scripts/ci-verify-runner.sh
       - run: scripts/ci-install-railpack.sh
       - run: test -x "${HOSTLET_RAILPACK_BIN}"
       - run: scripts/ci-railpack-generated-fixtures.sh
         env:
           HOSTLET_RAILPACK_METRICS_FILE: ${{ github.workspace }}/reports/railpack-generated-fixtures-metrics.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: railpack-generated-fixtures-metrics
@@ -41,33 +45,34 @@ jobs:
 
   self-hosted-api:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab-heavy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           # Scheduled runs validate staging, not the default branch.
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
+      - run: scripts/ci-verify-runner.sh
       - name: Use runner's cached rustup
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: scripts/ci-self-hosted-api-smoke.sh
 
   patchwork-canary:
     if: github.event_name == 'schedule'
     continue-on-error: true
-    runs-on: [self-hosted, Linux, X64, hostlet-core]
+    runs-on: homelab-heavy
     env:
       CARGO_BUILD_JOBS: "2"
       HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"
       HOSTLET_TOPOLOGY_CANARY_REPO: ShaneKanterman04/patchwork-pirates
       HOSTLET_TOPOLOGY_CANARY_SHA: fae18d0fab8bc5586a33af598fa4371a06f51576
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: staging
       - run: scripts/ci-verify-runner.sh
       - run: scripts/ci-install-railpack.sh
       - name: Use runner's cached rustup
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: scripts/ci-self-hosted-deploy-e2e.sh

@@ -35,10 +35,7 @@ pub async fn delete_app(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if deployment_rows.is_empty() {
-        return delete_app_synchronously(&state, id, user_id, &domain, public_exposure).await;
-    }
-    enqueue_app_teardown(
+    start_app_teardown_request(
         &state,
         &app,
         id,
@@ -50,33 +47,9 @@ pub async fn delete_app(
     .await
 }
 
-/// Tear an app down immediately when it has no deployments to clean up: close
-/// any public DNS, then delete its records in one transaction.
-async fn delete_app_synchronously(
-    state: &AppState,
-    id: Uuid,
-    user_id: Uuid,
-    domain: &str,
-    public_exposure: bool,
-) -> Response {
-    if public_exposure {
-        if let Err(response) = close_public_app_dns(state, id, domain).await {
-            return response;
-        }
-    }
-    match delete_app_records(state, id, user_id, &[]).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, app_id = %id, "failed to delete app records");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-/// Enqueue an asynchronous teardown job for an app that has deployments (and
-/// therefore containers/images that an agent must remove off-box first).
-async fn enqueue_app_teardown(
+/// Establish the durable deletion marker and either enqueue agent cleanup or
+/// finalize immediately when the app has no runtime resources to remove.
+async fn start_app_teardown_request(
     state: &AppState,
     app: &sqlx::postgres::PgRow,
     id: Uuid,
@@ -102,16 +75,22 @@ async fn enqueue_app_teardown(
         "containers": containers,
         "images": images,
     });
-    let job_id =
-        match deploy::enqueue_agent_job(state, server_id, Some(id), None, "delete_app", payload, 5)
-            .await
-        {
-            Ok(job_id) => job_id,
-            Err(err) => {
-                tracing::warn!(error = %err, app_id = %id, "failed to enqueue app teardown job");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let teardown = match crate::job_control::start_app_teardown(
+        state,
+        server_id,
+        id,
+        payload,
+        !deployment_rows.is_empty(),
+    )
+    .await
+    {
+        Ok(teardown) => teardown,
+        Err(err) => {
+            tracing::warn!(error = %err, app_id = %id, "failed to establish app teardown fence");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let job_id = teardown.job_id;
     record_audit_event(
         state,
         AuditEventInput {
@@ -125,6 +104,20 @@ async fn enqueue_app_teardown(
         },
     )
     .await;
+    if !teardown.agent_cleanup_required && teardown.active_jobs == 0 {
+        return match finalize_delete_app_from_job(state, job_id).await {
+            Ok(true) => StatusCode::NO_CONTENT.into_response(),
+            Ok(false) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"jobId": job_id})),
+            )
+                .into_response(),
+            Err(err) => {
+                tracing::warn!(error = %err, app_id = %id, "failed to finalize synchronous app teardown");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
+    }
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({"jobId": job_id})),
@@ -142,19 +135,6 @@ fn dedup_column(rows: &[sqlx::postgres::PgRow], column: &str) -> Vec<String> {
     values.sort();
     values.dedup();
     values
-}
-
-/// Close the public tunnel DNS for a deleting app, mapping a failure onto the
-/// `502 Bad Gateway` response the handler returns to the caller.
-async fn close_public_app_dns(state: &AppState, id: Uuid, domain: &str) -> Result<(), Response> {
-    delete_cloudflare_app_dns(state, id, domain).await.map_err(|err| {
-        tracing::warn!(error = %err, domain = %domain, "failed to remove public tunnel DNS while deleting app");
-        (
-            StatusCode::BAD_GATEWAY,
-            "failed to close public tunnel for app domain",
-        )
-            .into_response()
-    })
 }
 
 pub async fn finalize_delete_app_from_job(state: &AppState, job_id: Uuid) -> anyhow::Result<bool> {
@@ -188,6 +168,9 @@ pub async fn finalize_delete_app_from_job(state: &AppState, job_id: Uuid) -> any
     let Some(user_id) = user_id else {
         return Ok(false);
     };
+    if crate::job_control::refresh_app_teardown_fence(state, app_id).await? > 0 {
+        return Ok(false);
+    }
     let domain = payload
         .get("domain")
         .and_then(|v| v.as_str())
@@ -268,6 +251,19 @@ pub(in crate::web) async fn delete_app_records(
     containers: &[String],
 ) -> anyhow::Result<bool> {
     let mut tx = state.db.begin().await?;
+    let active_jobs: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM agent_jobs
+         WHERE app_id=$1
+           AND job_type<>'delete_app'
+           AND status IN ('claimed','running')",
+    )
+    .bind(app_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_jobs > 0 {
+        return Ok(false);
+    }
     if !containers.is_empty()
         && sqlx::query("DELETE FROM app_resource_snapshots WHERE container_name = ANY($1)")
             .bind(containers)
@@ -285,6 +281,14 @@ pub(in crate::web) async fn delete_app_records(
             .bind(app_id)
             .fetch_all(&mut *tx)
             .await?;
+    sqlx::query(
+        "UPDATE agent_jobs
+         SET payload_json='{}'::jsonb,updated_at=now()
+         WHERE app_id=$1",
+    )
+    .bind(app_id)
+    .execute(&mut *tx)
+    .await?;
     let res = sqlx::query("DELETE FROM apps WHERE id=$1 AND user_id=$2")
         .bind(app_id)
         .bind(user_id)
@@ -390,17 +394,21 @@ mod tests {
             std::env::temp_dir().join(format!("hostlet-del-test-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&state.screenshot_dir)
             .await
-            .ok()?;
+            .expect("create app-delete DB test screenshot directory");
         Some(state)
     }
 
     async fn reset_db(state: &AppState) {
         sqlx::query(
-            "TRUNCATE app_screenshots, agent_jobs, deployments, app_env_vars, apps, users CASCADE",
+            "TRUNCATE app_screenshots, agent_jobs, deployments, app_env_vars, apps CASCADE",
         )
         .execute(&state.db)
         .await
         .unwrap();
+        sqlx::query("DELETE FROM users")
+            .execute(&state.db)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -444,7 +452,7 @@ mod tests {
         let job_id: Uuid = sqlx::query_scalar(
             "INSERT INTO agent_jobs
                (server_id,app_id,deployment_id,job_type,status,payload_json)
-             VALUES ($1,$2,$3,'capture_screenshot','running','{}'::jsonb)
+             VALUES ($1,$2,$3,'capture_screenshot','success','{}'::jsonb)
              RETURNING id",
         )
         .bind(state.local_server_id)

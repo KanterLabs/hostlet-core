@@ -14,10 +14,10 @@ async fn db_enqueue_applies_app_queue_priority_offset_within_bands() {
     let paid_app = insert_app_2(&state, user_id).await;
     set_queue_priority_offset(&state, free_app, 3).await;
 
-    let free_urgent = enqueue(&state, Some(free_app), 5).await;
-    let free_normal = enqueue(&state, Some(free_app), 20).await;
-    let paid_normal = enqueue(&state, Some(paid_app), 20).await;
-    let orphan = enqueue(&state, None, 20).await;
+    let free_urgent = enqueue(&state, Some(free_app), "deploy", 5).await;
+    let free_normal = enqueue(&state, Some(free_app), "deploy", 20).await;
+    let paid_normal = enqueue(&state, Some(paid_app), "deploy", 20).await;
+    let orphan = enqueue(&state, None, "docker_cleanup", 20).await;
 
     assert_eq!(job_priority(&state, free_urgent).await, 8);
     assert_eq!(job_priority(&state, free_normal).await, 23);
@@ -40,14 +40,19 @@ async fn set_queue_priority_offset(state: &AppState, app_id: Uuid, offset: i32) 
         .unwrap();
 }
 
-async fn enqueue(state: &AppState, app_id: Option<Uuid>, base_priority: i32) -> Uuid {
+async fn enqueue(
+    state: &AppState,
+    app_id: Option<Uuid>,
+    job_type: &str,
+    base_priority: i32,
+) -> Uuid {
     crate::deploy::enqueue_agent_job(
         state,
         TEST_SERVER_ID,
         app_id,
         None,
-        "deploy",
-        serde_json::json!({"type": "deploy"}),
+        job_type,
+        serde_json::json!({"type": job_type}),
         base_priority,
     )
     .await

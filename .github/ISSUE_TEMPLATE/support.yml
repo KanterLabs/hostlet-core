@@ -1,0 +1,54 @@
+name: Setup or usage help
+description: Ask for help operating Hostlet Core
+title: "[Support]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Support is best effort. Do not include secrets, private repository contents,
+        customer data, or suspected vulnerabilities in this public issue.
+  - type: input
+    id: version
+    attributes:
+      label: Hostlet version
+      description: Output from `hostlet version`.
+      placeholder: "hostlet 0.x.y"
+    validations:
+      required: true
+  - type: textarea
+    id: host
+    attributes:
+      label: Host environment
+      description: Linux distribution, kernel, CPU architecture, `getconf GNU_LIBC_VERSION`, Docker Engine, and Docker Compose versions.
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: attempts
+    attributes:
+      label: What have you tried?
+      description: Include the relevant commands and exact redacted error.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Add relevant `hostlet doctor` output or logs after removing secrets and private data.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private repository contents, and customer data.
+          required: true
+        - label: This is not a suspected security vulnerability.
+          required: true

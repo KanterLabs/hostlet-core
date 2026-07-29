@@ -23,7 +23,13 @@ hostlet down
 
 ## Updates
 
-Hostlet checks GitHub Releases for stable updates. When `hostlet-release.json` is present, Hostlet uses it for release version, minimum supported direct-upgrade version, checksums, image metadata, and migration flags.
+Hostlet checks GitHub Releases for published non-prerelease updates. When
+`hostlet-release.json` is present, Hostlet uses it for release version, minimum
+supported direct-upgrade version, checksums, image metadata, and migration
+flags. Generated release notes summarize merged changes; they do not guarantee
+dedicated migration or rollback sections. Review the machine-readable
+migration flags, take a current backup, and confirm your rollback path before
+updating.
 
 Production deploys should use immutable release image refs from `.env`:
 

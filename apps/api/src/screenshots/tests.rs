@@ -319,12 +319,16 @@ async fn reset_screenshot_db(state: &AppState) {
     tokio::fs::create_dir_all(&state.screenshot_dir)
         .await
         .unwrap();
-    sqlx::query(
-        "TRUNCATE app_screenshots, agent_jobs, deployments, app_env_vars, apps, users CASCADE",
-    )
-    .execute(&state.db)
-    .await
-    .unwrap();
+    sqlx::query("TRUNCATE app_screenshots, agent_jobs, deployments, app_env_vars, apps CASCADE")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    // DELETE preserves the NULL-owned local server; TRUNCATE ... CASCADE does
+    // not inspect row values and would remove it through the users FK.
+    sqlx::query("DELETE FROM users")
+        .execute(&state.db)
+        .await
+        .unwrap();
 }
 
 async fn insert_user(state: &AppState, github_id: i64, login: &str) -> Uuid {

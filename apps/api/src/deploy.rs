@@ -28,6 +28,8 @@ pub(crate) const ACTIVE_DEPLOYMENT_STATUSES: &[&str] = &[
     "routing",
 ];
 
+pub(crate) const TEARDOWN_FENCE_PAYLOAD_KEY: &str = "teardown_fence";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeploymentQueue {
@@ -717,12 +719,76 @@ pub async fn enqueue_agent_job(
     payload: serde_json::Value,
     priority: i32,
 ) -> anyhow::Result<Uuid> {
+    let mut transaction = state.db.begin().await?;
+    let queue_priority_offset = match app_id {
+        Some(app_id) => {
+            // Ordinary app-bound enqueues share this row lock. App teardown
+            // takes FOR UPDATE, so a racing enqueue either commits before the
+            // teardown fence (and is cancelled by it) or observes the durable
+            // delete marker after the fence commits.
+            let offset = sqlx::query_scalar::<_, i32>(
+                "SELECT queue_priority_offset FROM apps WHERE id=$1 FOR KEY SHARE",
+            )
+            .bind(app_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
+            if job_type != "delete_app" {
+                let deletion_fenced = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                       SELECT 1
+                       FROM agent_jobs
+                       WHERE app_id=$1
+                         AND job_type='delete_app'
+                         AND (
+                           status IN ('queued','claimed','running','success')
+                           OR payload_json->>'teardown_fence'='true'
+                         )
+                     )",
+                )
+                .bind(app_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+                anyhow::ensure!(!deletion_fenced, "app deletion is in progress");
+            }
+            offset
+        }
+        None => {
+            anyhow::ensure!(
+                job_type == "docker_cleanup",
+                "app-bound agent job is missing its app"
+            );
+            0
+        }
+    };
+    let id = insert_agent_job_in_transaction(
+        &mut transaction,
+        server_id,
+        app_id,
+        deployment_id,
+        job_type,
+        payload,
+        priority + queue_priority_offset,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(id)
+}
+
+pub(crate) async fn insert_agent_job_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    server_id: Uuid,
+    app_id: Option<Uuid>,
+    deployment_id: Option<Uuid>,
+    job_type: &str,
+    payload: serde_json::Value,
+    priority: i32,
+) -> anyhow::Result<Uuid> {
     let protocol_version = required_protocol_version(job_type, &payload);
     let id = sqlx::query(
         "INSERT INTO agent_jobs
            (server_id,app_id,deployment_id,job_type,status,payload_json,priority,protocol_version)
-         VALUES ($1,$2,$3,$4,'queued',$5,
-                 $6 + COALESCE((SELECT queue_priority_offset FROM apps WHERE id = $2), 0),$7)
+         VALUES ($1,$2,$3,$4,'queued',$5,$6,$7)
          RETURNING id",
     )
     .bind(server_id)
@@ -732,7 +798,7 @@ pub async fn enqueue_agent_job(
     .bind(payload)
     .bind(priority)
     .bind(protocol_version)
-    .fetch_one(&state.db)
+    .fetch_one(&mut **transaction)
     .await?
     .get::<Uuid, _>("id");
     Ok(id)

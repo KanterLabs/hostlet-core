@@ -9,7 +9,7 @@ use anyhow::{bail, Context};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -196,14 +196,26 @@ impl AppState {
 
 async fn connect_db() -> anyhow::Result<PgPool> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
-    Ok(PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&database_url)
-        .await?)
+    let options = PgPoolOptions::new().max_connections(10);
+    #[cfg(test)]
+    let options = if bool_env("HOSTLET_DB_TEST_REQUIRED") {
+        options.acquire_timeout(std::time::Duration::from_secs(5))
+    } else {
+        options
+    };
+    Ok(options.connect(&database_url).await?)
 }
 
 async fn run_migrations(db: &PgPool) -> anyhow::Result<()> {
-    sqlx::migrate::Migrator::new(Path::new("apps/api/migrations"))
+    // Cargo executes this package's unit-test binary from `apps/api`, while
+    // the packaged API runs from the repository-shaped `/app` directory.
+    // Keep the production path unchanged and make only the test build resolve
+    // migrations relative to its package manifest.
+    #[cfg(test)]
+    let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    #[cfg(not(test))]
+    let migrations_dir = PathBuf::from("apps/api/migrations");
+    sqlx::migrate::Migrator::new(migrations_dir)
         .await?
         .run(db)
         .await?;
@@ -314,8 +326,25 @@ fn parse_local_server_id(value: Option<String>) -> anyhow::Result<Uuid> {
 
 #[cfg(test)]
 pub async fn db_test_state_from_env() -> Option<AppState> {
-    let database_url = std::env::var("HOSTLET_DB_TEST_URL").ok()?;
+    // Most local `cargo test` runs do not have Postgres available, so the
+    // DB-backed tests remain optional by default. CI sets
+    // HOSTLET_DB_TEST_REQUIRED=1: in that mode a missing URL or an
+    // initialization/migration failure must fail the test instead of turning
+    // every DB assertion into a silent early return.
+    let required = bool_env("HOSTLET_DB_TEST_REQUIRED");
+    let database_url = optional_db_test_result(
+        required,
+        std::env::var("HOSTLET_DB_TEST_URL"),
+        "HOSTLET_DB_TEST_URL is required for DB-backed tests",
+    )?;
     std::env::set_var("DATABASE_URL", database_url);
+    if required {
+        let existing = std::env::var("PGOPTIONS").unwrap_or_default();
+        let required_options = "-c statement_timeout=15000 -c lock_timeout=5000";
+        if !existing.ends_with(required_options) {
+            std::env::set_var("PGOPTIONS", format!("{existing} {required_options}"));
+        }
+    }
     set_test_env_default("HOSTLET_MODE", "self_hosted");
     set_test_env_default("PUBLIC_API_URL", "http://127.0.0.1:18080");
     set_test_env_default("PUBLIC_WEB_URL", "http://127.0.0.1:3000");
@@ -340,7 +369,23 @@ pub async fn db_test_state_from_env() -> Option<AppState> {
     );
     set_test_env_default("HOSTLET_BASE_DOMAIN", "example.test");
     set_test_env_default("HOSTLET_UPDATE_CHECKS", "false");
-    AppState::from_env().await.ok()
+    optional_db_test_result(
+        required,
+        AppState::from_env().await,
+        "failed to initialize DB-backed test state",
+    )
+}
+
+#[cfg(test)]
+fn optional_db_test_result<T, E>(required: bool, result: Result<T, E>, context: &str) -> Option<T>
+where
+    E: std::fmt::Display,
+{
+    match result {
+        Ok(value) => Some(value),
+        Err(error) if required => panic!("{context}: {error}"),
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -412,5 +457,33 @@ mod tests {
     fn local_server_id_rejects_invalid_uuid() {
         let err = parse_local_server_id(Some("not-a-uuid".into())).unwrap_err();
         assert!(err.to_string().contains("LOCAL_SERVER_ID must be a UUID"));
+    }
+
+    #[test]
+    fn unavailable_database_remains_optional_by_default() {
+        let result =
+            optional_db_test_result::<(), _>(false, Err("database unavailable"), "test context");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "test context: database unavailable")]
+    fn unavailable_database_panics_when_gate_is_required() {
+        let _ = optional_db_test_result::<(), _>(true, Err("database unavailable"), "test context");
+    }
+
+    #[tokio::test]
+    async fn required_database_preflight() {
+        if !bool_env("HOSTLET_DB_TEST_REQUIRED") {
+            return;
+        }
+        let state = db_test_state_from_env()
+            .await
+            .expect("required DB test state must initialize");
+        let value: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&state.db)
+            .await
+            .expect("required DB test query must succeed");
+        assert_eq!(value, 1);
     }
 }

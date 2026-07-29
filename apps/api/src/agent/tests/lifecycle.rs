@@ -336,13 +336,14 @@ async fn db_retry_deploy_job_creates_fresh_deployment_with_fresh_secrets() {
         .await
         .unwrap();
     let old_deployment = insert_deployment_with_status(&state, app_id, "failed").await;
+    let commit_sha = "0123456789abcdef0123456789abcdef01234567";
     let old_job = insert_job_with_payload(
         &state,
         app_id,
         old_deployment,
         "deploy",
         "failed",
-        serde_json::json!({"type": "deploy", "commit_sha": "HEAD"}),
+        serde_json::json!({"type": "deploy", "commit_sha": commit_sha}),
     )
     .await;
 
@@ -365,7 +366,7 @@ async fn db_retry_deploy_job_creates_fresh_deployment_with_fresh_secrets() {
     .await
     .unwrap()
     .expect("a fresh deployment must exist");
-    assert_eq!(new_deployment.get::<String, _>("commit_sha"), "HEAD");
+    assert_eq!(new_deployment.get::<String, _>("commit_sha"), commit_sha);
 
     let new_job = sqlx::query(
         "SELECT payload_json FROM agent_jobs

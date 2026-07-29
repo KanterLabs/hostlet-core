@@ -4,6 +4,7 @@ use crate::deployment_policy::{
     DeploymentStatusDecision, DeploymentStatusEvent, DeploymentStatusPolicy,
 };
 
+mod deletion_fence;
 mod health;
 mod lifecycle;
 mod priority;
@@ -67,7 +68,6 @@ async fn db_agent_jobs_claim_complete_and_ingest_events() {
     let user_id = insert_user(&state).await;
     let app_id = insert_app(&state, user_id).await;
     let deployment_id = insert_deployment(&state, app_id).await;
-    let failed_deployment_id = insert_deployment(&state, app_id).await;
     let job_id = insert_job(&state, app_id, deployment_id).await;
     let headers = agent_headers(&state, TEST_SERVER_ID);
 
@@ -75,8 +75,12 @@ async fn db_agent_jobs_claim_complete_and_ingest_events() {
     assert_claim_marks_job_claimed(&state, &headers, job_id).await;
     assert_complete_rejects_unknown_status(&state, &headers, job_id).await;
     assert_complete_success_marks_job_succeeded(&state, &headers, job_id).await;
-    assert_failed_deployment_status_records_runtime_metadata(&state, failed_deployment_id).await;
     assert_deployment_status_becomes_current(&state, app_id, deployment_id).await;
+    // The active-deployment uniqueness invariant permits only one in-flight
+    // deployment per app. Finish the first before seeding the distinct failure
+    // event whose runtime metadata this scenario also verifies.
+    let failed_deployment_id = insert_deployment(&state, app_id).await;
+    assert_failed_deployment_status_records_runtime_metadata(&state, failed_deployment_id).await;
     assert_only_valid_log_streams_are_stored(&state, deployment_id).await;
     resource::assert_resource_stats_record_numeric_metrics(&state, user_id, app_id).await;
     resource::assert_resource_stats_reject_invalid_numeric_metrics(&state, app_id).await;
@@ -160,6 +164,56 @@ async fn assert_deployment_status_becomes_current(
     assert_eq!(
         current_deployment(state, app_id).await.as_ref(),
         Some(&deployment_id)
+    );
+}
+
+#[tokio::test]
+async fn db_deployment_status_retains_topology_beyond_runtime_log_target_cap() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+    let deployment_id = insert_deployment(&state, app_id).await;
+    let services = (0..=hostlet_contracts::DEPLOYMENT_SERVICE_REPORT_MAX)
+        .map(|index| {
+            serde_json::json!({
+                "name": format!("service-{index:02}"),
+                "role": "web",
+                "containerName": format!("hostlet-app-{index:02}"),
+                "imageTag": "example:test",
+                "targetPort": 3_000,
+                "publishedPort": 32_000 + index,
+                "status": "running",
+                "healthStatus": "healthy"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    handle_agent_message(
+        &state,
+        TEST_SERVER_ID,
+        serde_json::json!({
+            "type": "deployment_status",
+            "deployment_id": deployment_id,
+            "status": "success",
+            "services": services
+        }),
+    )
+    .await;
+
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM deployment_services WHERE deployment_id=$1",
+    )
+    .bind(deployment_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        count,
+        hostlet_contracts::DEPLOYMENT_SERVICE_REPORT_MAX as i64,
+        "the runtime-log target cap must not truncate durable topology"
     );
 }
 
@@ -273,7 +327,32 @@ async fn db_expired_agent_jobs_retry_then_fail_at_max_attempts() {
         Some("failed")
     );
 
+    // Recovery applies a retry backoff. An immediate poll must not reclaim the
+    // job before available_at, then it becomes claimable once time advances.
     let headers = agent_headers(&state, TEST_SERVER_ID);
+    assert_eq!(
+        claim_job(
+            State(state.clone()),
+            headers.clone(),
+            Json(ClaimJobRequest {
+                agent_id: Some("ci-agent".into()),
+                protocol_version: 2,
+            }),
+        )
+        .await
+        .into_response()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        job_status(&state, retry_job).await.as_deref(),
+        Some("queued")
+    );
+    sqlx::query("UPDATE agent_jobs SET available_at=now() - interval '1 second' WHERE id=$1")
+        .bind(retry_job)
+        .execute(&state.db)
+        .await
+        .unwrap();
     assert_eq!(
         claim_job(
             State(state.clone()),

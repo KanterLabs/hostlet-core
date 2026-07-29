@@ -76,6 +76,10 @@ pub(in crate::agent) async fn handle_agent_message(
     server_id: Uuid,
     msg: serde_json::Value,
 ) {
+    if msg.get("type").and_then(|v| v.as_str()) == Some("runtime_logs_response") {
+        crate::runtime_logs::handle_agent_runtime_logs(server_id, msg);
+        return;
+    }
     match msg.get("type").and_then(|v| v.as_str()) {
         Some("heartbeat") => handle_heartbeat(state, server_id).await,
         Some("deployment_status") => handle_deployment_status(state, server_id, &msg).await,
@@ -223,7 +227,10 @@ async fn persist_deployment_services(
     deployment_id: Uuid,
     services: &[serde_json::Value],
 ) {
-    for service in services {
+    for service in services
+        .iter()
+        .take(hostlet_contracts::DEPLOYMENT_SERVICE_REPORT_MAX)
+    {
         let Some(name) = service.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -250,6 +257,10 @@ async fn persist_deployment_services(
              SELECT $1, d.app_id, $2, $3, $4, $5, $6, $7, $8, $9, now(), \
                     CASE WHEN $9 = 'healthy' THEN now() ELSE NULL END \
              FROM deployments d WHERE d.id = $1 AND d.server_id = $10 \
+               AND (EXISTS (SELECT 1 FROM deployment_services existing \
+                            WHERE existing.deployment_id = $1 AND existing.service_name = $2) \
+                    OR (SELECT count(*) FROM deployment_services capped \
+                        WHERE capped.deployment_id = $1) < $11) \
              ON CONFLICT (deployment_id, service_name) DO UPDATE SET \
                role = EXCLUDED.role, \
                container_name = EXCLUDED.container_name, \
@@ -272,6 +283,7 @@ async fn persist_deployment_services(
         .bind(svc_status)
         .bind(health_status)
         .bind(server_id)
+        .bind(hostlet_contracts::DEPLOYMENT_SERVICE_REPORT_MAX as i64)
         .execute(&state.db)
         .await;
     }

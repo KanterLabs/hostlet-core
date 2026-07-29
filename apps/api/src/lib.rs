@@ -16,6 +16,7 @@ pub mod operator;
 pub mod password;
 pub mod policies;
 pub mod rate_limit;
+pub mod runtime_logs;
 pub mod runtime_recovery;
 pub mod screenshots;
 pub mod serialization;
@@ -173,6 +174,10 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
                 .delete(web::delete_app),
         )
         .route("/api/apps/:id/resources", get(web::app_resources))
+        .route(
+            "/api/apps/:id/runtime-logs",
+            get(runtime_logs::get_app_runtime_logs),
+        )
         .route("/api/apps/:id/health", get(web::app_health))
         .route("/api/apps/:id/health/events", get(web::app_health_events))
         .route(

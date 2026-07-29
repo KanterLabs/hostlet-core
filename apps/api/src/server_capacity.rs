@@ -392,7 +392,9 @@ mod tests {
         .unwrap();
         sqlx::query(
             "UPDATE servers
-             SET capabilities=ARRAY['builder','app_runner']::TEXT[],
+             SET kind='local',
+                 status='online',
+                 capabilities=ARRAY['builder','app_runner']::TEXT[],
                  draining=false,
                  max_concurrent_apps=8,
                  max_concurrent_builds=1

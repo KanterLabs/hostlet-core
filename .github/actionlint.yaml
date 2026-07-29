@@ -1,8 +1,6 @@
 self-hosted-runner:
   labels:
-    - self-hosted
-    - Linux
-    - X64
-    - hostlet-core-v2
+    - homelab
+    - homelab-heavy
 
 config-variables: null

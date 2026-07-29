@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3,hostlet-core-homelab-4
+  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -17,30 +17,30 @@ concurrency:
 
 jobs:
   secrets:
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
       - run: scripts/ci-verify-runner.sh
       - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --redact --verbose
 
   rust:
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab-heavy
     env:
       # Cap cargo parallelism: several workflows from both repos land on one
       # 24-vCPU/48GiB CI VM; uncapped workspace builds stacking up OOM'd the
       # hypervisor and hard-reset the box (2026-06-10 crash-loop incident).
       CARGO_BUILD_JOBS: "4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: scripts/ci-verify-runner.sh
       # Put the runner's pre-installed rustup on PATH so dtolnay/rust-toolchain
       # reuses the cached toolchain instead of re-bootstrapping it via
       # `curl sh.rustup.rs` (slow + flaky) on every job.
       - name: Use runner's cached rustup
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           # rustup minimal profile (dtolnay default) drops these when it
           # refreshes stable; pin them so cargo fmt/clippy stay available.
@@ -51,19 +51,24 @@ jobs:
       - run: scripts/check-line-cap.sh
       - run: scripts/check-line-cap-selftest.sh
       - run: scripts/check-migration-versions.sh
+      - run: bash scripts/ci-db-tests-selftest.sh
+      - run: bash scripts/ci-release-mainline-gate-selftest.sh
       - run: scripts/ci-core-workflow-contracts.sh
       - run: scripts/ci-verify-runner-selftest.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
 
+  database:
+    uses: ./.github/workflows/database-tests.yml
+
   web:
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab-heavy
     defaults:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: ../../scripts/ci-verify-runner.sh
       - run: node --version && pnpm --version
       - run: pnpm install --frozen-lockfile
@@ -76,7 +81,7 @@ jobs:
       - run: ../../scripts/ci-security-artifact-smoke.sh
 
   compose:
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     env:
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
@@ -95,15 +100,15 @@ jobs:
       HOSTLET_SCREENSHOTTER_IMAGE: ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       DOCKER_GID: "998"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: scripts/ci-verify-runner.sh
       - run: docker compose -f infra/docker-compose.yml config >/dev/null
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
 
   docker:
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab-heavy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: scripts/ci-verify-runner.sh
       - run: scripts/ci-docker-retry.sh docker build -f apps/web/Dockerfile -t hostlet-web-ci .
       - run: scripts/ci-docker-retry.sh docker build -f apps/api/Dockerfile -t hostlet-api-ci .
