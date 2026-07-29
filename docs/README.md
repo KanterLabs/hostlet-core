@@ -1,6 +1,10 @@
 # Hostlet Documentation
 
-Use this index for current Hostlet documentation. Historical plans, versioned validation files, and release notes are intentionally not kept here; GitHub Releases are the source of release history.
+Use this index for the current Hostlet Core beta. Historical plans and
+versioned validation files are intentionally not kept here. New tagged
+[GitHub Releases](https://github.com/KanterLabs/hostlet-core/releases) publish
+artifacts and an automatically generated change summary. Some earlier releases
+have no written notes.
 
 ## Start Here
 
@@ -17,6 +21,8 @@ Use this index for current Hostlet documentation. Historical plans, versioned va
 
 - [Architecture](architecture.md): services, data flow, deployment flow, and runtime boundaries.
 - [Security](security.md): controls, threat model, secret handling, and remaining risks.
+- [Project support](../SUPPORT.md): where to ask for help and what diagnostic context to include.
+- [Security policy](../SECURITY.md): supported versions and private vulnerability reporting.
 
 ## Project
 

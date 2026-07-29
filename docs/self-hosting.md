@@ -1,9 +1,18 @@
 # Self-Hosting Hostlet
 
-Self-hosted Hostlet runs the web UI, API, Postgres, local agent, and Caddy router on your machine.
+Self-hosted Hostlet runs the web UI, API, Postgres, local agent, and Caddy
+router on one machine. The supported stable host target is Linux x86_64 with
+glibc 2.39 or newer (for example, Ubuntu 24.04 LTS or newer), Docker Engine,
+and Docker Compose v2. Alpine/musl and older glibc hosts are unsupported by the
+current CLI binary.
 
 The Machines page reports this local deploy target, including agent heartbeat
 and deployment mode. Remote VPS management is not active in the current Core UI.
+
+Core does not provide multi-host scheduling, high availability, automatic
+failover, or a formal capacity/SLA target. Builds, app containers, Postgres,
+and the control plane share the host, so size and monitor it for the workloads
+you choose to run.
 
 ## Access Modes
 
@@ -23,6 +32,24 @@ PUBLIC_WEBHOOK_URL=https://hostlet.example.com
 ```
 
 These modes describe access to Hostlet itself. Apps are private by default and are exposed per app through Hostlet routing controls.
+
+## Network Ports
+
+The image-only Compose file keeps the API on `127.0.0.1:8080` and the web UI on
+`127.0.0.1:3000`. Postgres listens on port `5432` only inside the Compose
+network. App containers use dynamic loopback ports behind Caddy rather than
+fixed public host ports.
+
+| Access mode | Host ports | Network requirement |
+| --- | --- | --- |
+| LAN | TCP `HOSTLET_LAN_PORT` (default `80`) on the IPv4 address selected during `hostlet init` | Allow that port only from the intended LAN. |
+| Cloudflare Tunnel | Caddy listens on loopback TCP `18080`; no public inbound app/control-plane port is required | `cloudflared` must be able to connect outbound to Cloudflare. |
+| Direct public (manual, not turnkey) | TCP `80` and `443` | Public DNS must resolve to the host. Wildcard app TLS also requires a DNS-01-capable custom Caddy build/provider or a mounted wildcard certificate. |
+
+Do not expose loopback ports `3000`, `8080`, dynamic app ports, the Docker
+socket, or Postgres directly. The development Compose file is intentionally
+different: it publishes the web UI and API for local development and binds
+Postgres to loopback.
 
 ## GitHub Auth
 
@@ -48,9 +75,11 @@ Hostlet uses:
 
 Set strong values for production secrets and keep `.env` out of git.
 
-## Production Compose
+## Image-Only Compose
 
-Production Compose is image-only. It pulls release images by immutable digest and starts with `--no-build`.
+The production-named Compose profile is image-only. “Production” describes the
+packaging mode, not a maturity, support, or uptime guarantee. It pulls release
+images by immutable digest and starts with `--no-build`.
 
 `hostlet init` and `hostlet update` write the release image refs into `.env`:
 
@@ -77,10 +106,24 @@ With tunnel profile:
 docker compose --project-name infra --env-file .env -f infra/docker-compose.prod.yml --profile tunnel up -d --no-build
 ```
 
-Direct public hosting is an advanced, manual configuration. Set `HOSTLET_CADDYFILE=./Caddyfile.direct` and use
-real DNS names for `HOSTLET_CONTROL_PLANE_HOST` and `HOSTLET_BASE_DOMAIN` so
-Caddy can provision HTTPS certificates. The tunnel Caddyfile is the only mode
-that intentionally serves plain HTTP on loopback.
+Direct public hosting is an advanced template, not a turnkey path. The stock
+`caddy:2-alpine` image can obtain a normal control-plane certificate through
+HTTP-01, but it cannot obtain the wildcard certificate required by
+`*.HOSTLET_APPS_HOST`: ACME wildcard certificates require DNS-01, and the
+stock image does not include DNS provider modules.
+
+Before using `Caddyfile.direct`, provide one of:
+
+- a custom Caddy image containing the correct DNS provider module, corresponding
+  least-privilege DNS credentials, and an explicit `tls { dns ... }` policy; or
+- a pre-provisioned wildcard certificate and key mounted into Caddy with an
+  explicit `tls <cert> <key>` policy.
+
+Then set `HOSTLET_CADDYFILE=./Caddyfile.direct` and real DNS names for
+`HOSTLET_CONTROL_PLANE_HOST` and `HOSTLET_BASE_DOMAIN`. The Core CLI and Compose
+file do not build the provider-enabled image, mount certificates, or configure
+DNS-01 for you. Use Cloudflare Tunnel unless you deliberately supply and
+operate this TLS setup.
 
 ## Public App URLs
 

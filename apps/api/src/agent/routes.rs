@@ -153,6 +153,7 @@ pub async fn claim_job(
 
     // Free up any of this server's own jobs whose lease expired before we look
     // for new work, so a crashed-and-restarted agent can re-claim them.
+    let _ = reconcile_teardown_fenced_jobs(&state, Some(server_id)).await;
     requeue_expired_jobs_for_server(&state, server_id).await;
 
     match claim_next_queued_job(&state, server_id, agent_id, protocol_version).await {
@@ -167,9 +168,25 @@ pub async fn claim_job(
 
 /// Predicate identifying jobs whose lease has lapsed but still have retries left.
 /// Shared verbatim with `recover_stale_agent_jobs` so the requeue rule cannot drift.
-const RETRYABLE_EXPIRED_JOBS_PREDICATE: &str = "status IN ('claimed','running')
-           AND lease_expires_at < now()
-           AND attempt < max_attempts";
+const RETRYABLE_EXPIRED_JOBS_PREDICATE: &str = "j.status IN ('claimed','running')
+           AND j.lease_expires_at < now()
+           AND j.attempt < j.max_attempts
+           AND (
+             j.job_type IN ('docker_cleanup','delete_app')
+             OR (
+               j.app_id IS NOT NULL
+               AND EXISTS (SELECT 1 FROM apps a WHERE a.id=j.app_id)
+               AND NOT EXISTS (
+                 SELECT 1 FROM agent_jobs deletion
+                 WHERE deletion.app_id=j.app_id
+                   AND deletion.job_type='delete_app'
+                   AND (
+                     deletion.status IN ('queued','claimed','running','success')
+                     OR deletion.payload_json->>'teardown_fence'='true'
+                   )
+               )
+             )
+           )";
 
 /// SET clause that returns an expired job to the queue, clearing claim/lease state.
 const REQUEUE_JOB_SET_CLAUSE: &str = "SET status='queued',
@@ -183,9 +200,9 @@ const REQUEUE_JOB_SET_CLAUSE: &str = "SET status='queued',
 /// Requeue this server's own expired-but-retryable jobs (scoped lease recovery).
 async fn requeue_expired_jobs_for_server(state: &AppState, server_id: Uuid) {
     let _ = sqlx::query(&format!(
-        "UPDATE agent_jobs
+        "UPDATE agent_jobs j
          {REQUEUE_JOB_SET_CLAUSE}
-         WHERE server_id=$1
+         WHERE j.server_id=$1
            AND {RETRYABLE_EXPIRED_JOBS_PREDICATE}"
     ))
     .bind(server_id)
@@ -221,17 +238,49 @@ async fn claim_next_queued_job(
             updated_at=now()
         WHERE id = (
             SELECT id
-            FROM agent_jobs
-            WHERE server_id=$1
-              AND status='queued'
-              AND available_at <= now()
-              AND protocol_version <= $4
-              AND COALESCE(payload_json, '{}'::jsonb) <> '{}'::jsonb
-              AND (job_type <> 'docker_cleanup' OR NOT EXISTS (
+            FROM agent_jobs j
+            WHERE j.server_id=$1
+              AND j.status='queued'
+              AND j.available_at <= now()
+              AND j.protocol_version <= $4
+              AND COALESCE(j.payload_json, '{}'::jsonb) <> '{}'::jsonb
+              AND (
+                j.job_type='docker_cleanup'
+                OR (
+                  j.job_type='delete_app'
+                  AND (
+                    j.app_id IS NULL
+                    OR NOT EXISTS (
+                      SELECT 1
+                      FROM agent_jobs active
+                      WHERE active.app_id=j.app_id
+                        AND active.id<>j.id
+                        AND active.job_type<>'delete_app'
+                        AND active.status IN ('claimed','running')
+                    )
+                  )
+                )
+                OR (
+                  j.job_type NOT IN ('docker_cleanup','delete_app')
+                  AND j.app_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM apps a WHERE a.id=j.app_id)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM agent_jobs deletion
+                    WHERE deletion.app_id=j.app_id
+                      AND deletion.job_type='delete_app'
+                      AND (
+                        deletion.status IN ('queued','claimed','running','success')
+                        OR deletion.payload_json->>'teardown_fence'='true'
+                      )
+                  )
+                )
+              )
+              AND (j.job_type <> 'docker_cleanup' OR NOT EXISTS (
                 SELECT 1 FROM deployments d
                 WHERE d.server_id=$1 AND d.status = ANY($3)
               ))
-            ORDER BY priority ASC, created_at ASC
+            ORDER BY j.priority ASC, j.created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
@@ -362,9 +411,10 @@ pub async fn complete_job(
 
     match result {
         Ok(Some(row)) => {
+            let job_type = row.get::<String, _>("job_type");
             if crate::browser_health::record_job_result(
                 &mut tx,
-                &row.get::<String, _>("job_type"),
+                &job_type,
                 row.get::<Option<Uuid>, _>("app_id"),
                 row.get::<Option<Uuid>, _>("deployment_id"),
                 &request.status,
@@ -410,7 +460,21 @@ pub async fn complete_job(
                 }
             }
             match tx.commit().await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Ok(()) => {
+                    if request.status == "success" && job_type == "delete_app" {
+                        match crate::web::finalize_delete_app_from_job(&state, id).await {
+                            Ok(_) => {}
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    job_id = %id,
+                                    "delete job completed but app finalization remains pending"
+                                );
+                            }
+                        }
+                    }
+                    StatusCode::NO_CONTENT.into_response()
+                }
                 Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
         }
@@ -423,10 +487,11 @@ pub async fn complete_job(
 }
 
 pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
+    let teardown_cancelled = reconcile_teardown_fenced_jobs(state, None).await?;
     // Expired jobs with retries left go back to the queue (same rule as the
     // per-server requeue in `claim_job`, shared via the constant predicate).
     let retried = sqlx::query(&format!(
-        "UPDATE agent_jobs
+        "UPDATE agent_jobs j
          {REQUEUE_JOB_SET_CLAUSE}
          WHERE {RETRYABLE_EXPIRED_JOBS_PREDICATE}"
     ))
@@ -436,7 +501,7 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
 
     // Expired jobs that have exhausted their attempts are marked failed.
     let failed = sqlx::query(
-        "UPDATE agent_jobs
+        "UPDATE agent_jobs j
          SET status='failed',
              failure_summary=COALESCE(failure_summary, 'Agent job lease expired and retry limit was reached.'),
              last_error=COALESCE(last_error, 'Agent job lease expired and retry limit was reached.'),
@@ -444,9 +509,9 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
              lease_expires_at=NULL,
              updated_at=now(),
              finished_at=now()
-         WHERE status IN ('claimed','running')
-           AND lease_expires_at < now()
-           AND attempt >= max_attempts",
+         WHERE j.status IN ('claimed','running')
+           AND j.lease_expires_at < now()
+           AND j.attempt >= j.max_attempts",
     )
     .execute(&state.db)
     .await?
@@ -479,7 +544,105 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
         );
     }
 
-    Ok(retried + failed)
+    Ok(teardown_cancelled + retried + failed)
+}
+
+async fn reconcile_teardown_fenced_jobs(
+    state: &AppState,
+    server_id: Option<Uuid>,
+) -> anyhow::Result<u64> {
+    let terminal = sqlx::query(
+        "UPDATE agent_jobs j
+         SET status='cancelled',
+             failure_summary=COALESCE(
+               failure_summary,
+               'App was deleted or fenced before this job could run.'
+             ),
+             last_error=COALESCE(
+               last_error,
+               'App was deleted or fenced before this job could run.'
+             ),
+             payload_json='{}'::jsonb,
+             claim_token=NULL,lease_expires_at=NULL,cancel_requested_at=NULL,
+             updated_at=now(),finished_at=now()
+         WHERE ($1::uuid IS NULL OR j.server_id=$1)
+           AND j.job_type NOT IN ('docker_cleanup','delete_app')
+           AND (
+             j.app_id IS NULL
+             OR EXISTS (
+               SELECT 1
+               FROM agent_jobs deletion
+               WHERE deletion.app_id=j.app_id
+                 AND deletion.job_type='delete_app'
+                 AND (
+                   deletion.status IN ('queued','claimed','running','success')
+                   OR deletion.payload_json->>'teardown_fence'='true'
+                 )
+             )
+           )
+           AND (
+             j.status='queued'
+             OR (
+               j.status IN ('claimed','running')
+               AND j.lease_expires_at < now()
+             )
+           )
+         RETURNING deployment_id",
+    )
+    .bind(server_id)
+    .fetch_all(&state.db)
+    .await?;
+    let terminal_count = terminal.len() as u64;
+    let deployment_ids = terminal
+        .into_iter()
+        .filter_map(|row| row.get::<Option<Uuid>, _>("deployment_id"))
+        .collect::<Vec<_>>();
+    if !deployment_ids.is_empty() {
+        sqlx::query(
+            "UPDATE deployments
+             SET status='canceled',failure_code='cancelled_by_owner',
+                 failure_summary='App deletion fenced this deployment.',
+                 finished_at=now()
+             WHERE id = ANY($1) AND status = ANY($2)",
+        )
+        .bind(&deployment_ids)
+        .bind(crate::deploy::ACTIVE_DEPLOYMENT_STATUSES)
+        .execute(&state.db)
+        .await?;
+        sqlx::query(
+            "UPDATE apps
+             SET pending_deployment_id=NULL,updated_at=now()
+             WHERE pending_deployment_id = ANY($1)",
+        )
+        .bind(&deployment_ids)
+        .execute(&state.db)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE agent_jobs j
+         SET cancel_requested_at=COALESCE(cancel_requested_at,now()),updated_at=now()
+         WHERE ($1::uuid IS NULL OR j.server_id=$1)
+           AND j.job_type NOT IN ('docker_cleanup','delete_app')
+           AND j.status IN ('claimed','running')
+           AND (j.lease_expires_at IS NULL OR j.lease_expires_at >= now())
+           AND (
+             j.app_id IS NULL
+             OR EXISTS (
+               SELECT 1
+               FROM agent_jobs deletion
+               WHERE deletion.app_id=j.app_id
+                 AND deletion.job_type='delete_app'
+                 AND (
+                   deletion.status IN ('queued','claimed','running','success')
+                   OR deletion.payload_json->>'teardown_fence'='true'
+                 )
+             )
+           )",
+    )
+    .bind(server_id)
+    .execute(&state.db)
+    .await?;
+    Ok(terminal_count)
 }
 
 /// Strips decrypted secrets (env map, GitHub token) from terminal jobs'

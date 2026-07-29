@@ -2,6 +2,14 @@
 
 Hostlet controls deployments and should be treated as infrastructure software. Run self-hosted Hostlet on trusted machines, use strong secrets, and restrict control-plane access.
 
+Hostlet Core is not a hardened multi-tenant isolation boundary. Do not run
+untrusted third-party repositories on a host containing sensitive workloads;
+use a dedicated VM or machine for higher-risk code.
+
+For supported versions and private reporting instructions, see the repository
+[security policy](../SECURITY.md). Do not report suspected vulnerabilities in
+a public issue.
+
 ## Current Controls
 
 - First-run control-plane password with Argon2 hashing.
@@ -61,6 +69,7 @@ Important security objectives:
 - User-provided Dockerfiles are responsible for their own runtime user.
 - Image vulnerability scanning is not yet integrated.
 - Settings shows a recent audit trail, but full audit search/export is not yet complete.
-- Scheduled off-host backups and clean-machine restore validation remain operational work.
+- Scheduled off-host backups and clean-machine restore validation remain
+  operator responsibilities.
 
 Use separate machines or VMs for higher-risk workloads.

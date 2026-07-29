@@ -38,11 +38,18 @@ Use narrower checks for small docs-only changes, but always run link and secret 
 
 ## Release Expectations
 
-Production releases are tagged `vX.Y.Z` and publish:
+Published releases are tagged `vX.Y.Z`. GitHub-generated notes categorize
+merged pull requests as features, fixes, or other changes. They are a change
+summary, not proof that migration or rollback considerations are absent.
+Release operators should add explicit breaking, configuration, migration, and
+rollback guidance when applicable; the `hostlet-release.json` migration flags
+remain the machine-readable source used by the updater.
 
-- CLI binary and checksum
+The release publishes:
+
+- Linux x86_64 CLI binary and checksum
 - `hostlet-release.json`
-- GHCR images for API, web, agent, and screenshotter
+- Linux x86_64 GHCR images for API, web, agent, and screenshotter
 
 ## Security Review Expectations
 

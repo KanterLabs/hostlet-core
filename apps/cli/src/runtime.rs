@@ -218,17 +218,23 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
 pub(crate) fn preflight(root: &Path) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
     let linux = cfg!(target_os = "linux");
-    let arch = matches!(std::env::consts::ARCH, "x86_64" | "aarch64");
-    let docker = command_ok("docker", &["--version"]);
+    let arch = host_arch_supported(std::env::consts::ARCH);
+    let glibc = glibc_version_supported();
+    let docker = command_ok("docker", &["info"]);
     let compose = command_ok("docker", &["compose", "version"]);
     let disk = disk_space_ok(root);
     check("Linux host", linux);
-    check("CPU architecture", arch);
-    check("Docker Engine", docker);
+    check("CPU architecture (x86_64)", arch);
+    check(&format!("glibc >= {MINIMUM_GLIBC_VERSION_LABEL}"), glibc);
+    check("Docker daemon", docker);
     check("Docker Compose v2", compose);
     check("Free disk space (>1 GiB)", disk);
-    if !(linux && arch && docker && compose && disk) {
-        bail!("preflight failed; install Docker Engine with Compose v2 and ensure at least 1 GiB is free, then rerun `hostlet preflight`");
+    if !(linux && arch && glibc && docker && compose && disk) {
+        bail!(
+            "preflight failed; Hostlet requires Linux x86_64 with glibc >= \
+             {MINIMUM_GLIBC_VERSION_LABEL}, a reachable Docker daemon, Docker Compose v2, \
+             and more than 1 GiB free; fix the failed checks and rerun `hostlet preflight`"
+        );
     }
     Ok(())
 }

@@ -121,6 +121,215 @@ pub async fn mark_agent_job_failed(state: &AppState, job_id: Uuid, failure: &str
     .await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppTeardownStart {
+    pub job_id: Uuid,
+    pub agent_cleanup_required: bool,
+    pub active_jobs: u64,
+}
+
+/// Establishes a durable app-deletion marker and fences every other job for
+/// the app in one transaction.
+///
+/// The app row is locked FOR UPDATE. Ordinary enqueues take FOR KEY SHARE and
+/// re-check the marker after acquiring that lock, so an enqueue racing this
+/// function is either included in the cancellation pass or rejected.
+pub async fn start_app_teardown(
+    state: &AppState,
+    server_id: Uuid,
+    app_id: Uuid,
+    mut payload: serde_json::Value,
+    agent_cleanup_required: bool,
+) -> anyhow::Result<AppTeardownStart> {
+    let Some(object) = payload.as_object_mut() else {
+        anyhow::bail!("delete_app payload must be a JSON object");
+    };
+    object.insert(
+        deploy::TEARDOWN_FENCE_PAYLOAD_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+
+    let mut transaction = state.db.begin().await?;
+    let queue_priority_offset = sqlx::query_scalar::<_, i32>(
+        "SELECT queue_priority_offset FROM apps WHERE id=$1 FOR UPDATE",
+    )
+    .bind(app_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
+
+    let existing = sqlx::query(
+        "SELECT id,status
+         FROM agent_jobs
+         WHERE app_id=$1 AND job_type='delete_app'
+         ORDER BY created_at DESC
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(app_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let target_status = if agent_cleanup_required {
+        "queued"
+    } else {
+        "success"
+    };
+    let job_id = if let Some(existing) = existing {
+        let job_id = existing.get::<Uuid, _>("id");
+        let status = existing.get::<String, _>("status");
+        if matches!(status.as_str(), "failed" | "cancelled" | "expired") {
+            sqlx::query(
+                "UPDATE agent_jobs
+                 SET status=$2,payload_json=$3,priority=$4,attempt=0,
+                     claimed_by=NULL,claimed_at=NULL,claim_token=NULL,
+                     lease_expires_at=NULL,cancel_requested_at=NULL,
+                     failure_summary=NULL,last_error=NULL,result_json=NULL,
+                     available_at=now(),started_at=NULL,
+                     finished_at=CASE WHEN $2='success' THEN now() ELSE NULL END,
+                     updated_at=now()
+                 WHERE id=$1",
+            )
+            .bind(job_id)
+            .bind(target_status)
+            .bind(&payload)
+            .bind(5 + queue_priority_offset)
+            .execute(&mut *transaction)
+            .await?;
+        } else if status == "queued" && agent_cleanup_required {
+            sqlx::query(
+                "UPDATE agent_jobs
+                 SET payload_json=$2,priority=$3,updated_at=now()
+                 WHERE id=$1",
+            )
+            .bind(job_id)
+            .bind(&payload)
+            .bind(5 + queue_priority_offset)
+            .execute(&mut *transaction)
+            .await?;
+        } else if status == "queued" {
+            sqlx::query(
+                "UPDATE agent_jobs
+                 SET status='success',payload_json=$2,priority=$3,
+                     started_at=COALESCE(started_at,now()),finished_at=now(),updated_at=now()
+                 WHERE id=$1",
+            )
+            .bind(job_id)
+            .bind(&payload)
+            .bind(5 + queue_priority_offset)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        job_id
+    } else {
+        let job_id = deploy::insert_agent_job_in_transaction(
+            &mut transaction,
+            server_id,
+            Some(app_id),
+            None,
+            "delete_app",
+            payload,
+            5 + queue_priority_offset,
+        )
+        .await?;
+        if !agent_cleanup_required {
+            sqlx::query(
+                "UPDATE agent_jobs
+                 SET status='success',started_at=now(),finished_at=now(),updated_at=now()
+                 WHERE id=$1",
+            )
+            .bind(job_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        job_id
+    };
+
+    let active_jobs = fence_app_jobs_in_transaction(&mut transaction, app_id).await?;
+    transaction.commit().await?;
+    Ok(AppTeardownStart {
+        job_id,
+        agent_cleanup_required,
+        active_jobs,
+    })
+}
+
+/// Reapplies an existing teardown fence before finalization. This catches
+/// legacy or already-in-flight work without creating a second delete marker.
+pub async fn refresh_app_teardown_fence(state: &AppState, app_id: Uuid) -> anyhow::Result<u64> {
+    let mut transaction = state.db.begin().await?;
+    let app_exists = sqlx::query_scalar::<_, Uuid>("SELECT id FROM apps WHERE id=$1 FOR UPDATE")
+        .bind(app_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+    if !app_exists {
+        return Ok(0);
+    }
+    let active_jobs = fence_app_jobs_in_transaction(&mut transaction, app_id).await?;
+    transaction.commit().await?;
+    Ok(active_jobs)
+}
+
+async fn fence_app_jobs_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    app_id: Uuid,
+) -> anyhow::Result<u64> {
+    let active_jobs = sqlx::query_scalar::<_, i64>(
+        "WITH fenced AS (
+           UPDATE agent_jobs
+           SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
+               cancel_requested_at=CASE
+                 WHEN status IN ('claimed','running') THEN COALESCE(cancel_requested_at,now())
+                 ELSE cancel_requested_at
+               END,
+               failure_summary=CASE
+                 WHEN status='queued' THEN 'App deletion was requested before this job could run.'
+                 ELSE failure_summary
+               END,
+               last_error=CASE
+                 WHEN status='queued' THEN 'App deletion was requested before this job could run.'
+                 ELSE last_error
+               END,
+               payload_json=CASE
+                 WHEN status='queued' THEN '{}'::jsonb
+                 ELSE payload_json - 'env' - 'github_token'
+               END,
+               lease_expires_at=CASE WHEN status='queued' THEN NULL ELSE lease_expires_at END,
+               finished_at=CASE WHEN status='queued' THEN now() ELSE finished_at END,
+               updated_at=now()
+           WHERE app_id=$1
+             AND job_type<>'delete_app'
+             AND status IN ('queued','claimed','running')
+           RETURNING deployment_id,status
+         ), cancelled_deployments AS (
+           UPDATE deployments d
+           SET status='canceled',failure_code='cancelled_by_owner',
+               failure_summary='App deletion was requested before this deployment could run.',
+               finished_at=now()
+           FROM fenced f
+           WHERE f.status='cancelled'
+             AND d.id=f.deployment_id
+             AND d.status = ANY($2)
+           RETURNING d.id
+         ), cleared_pending AS (
+           UPDATE apps a
+           SET pending_deployment_id=NULL,updated_at=now()
+           WHERE a.id=$1
+             AND EXISTS (
+               SELECT 1
+               FROM cancelled_deployments d
+               WHERE d.id=a.pending_deployment_id
+             )
+         )
+         SELECT count(*) FILTER (WHERE status IN ('claimed','running')) FROM fenced",
+    )
+    .bind(app_id)
+    .bind(deploy::ACTIVE_DEPLOYMENT_STATUSES)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(active_jobs.max(0) as u64)
+}
+
 pub async fn retry_agent_job(
     state: &AppState,
     user_id: Uuid,

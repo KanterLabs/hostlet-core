@@ -46,4 +46,11 @@ async fn recover_runtime_state(state: &AppState) {
         Ok(_) => {}
         Err(err) => tracing::warn!(error = %err, "periodic stale-job recovery failed"),
     }
+    match web::reconcile_completed_delete_jobs(state).await {
+        Ok(finalized) if finalized > 0 => {
+            tracing::warn!(finalized, "finalized completed delete jobs");
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(error = %err, "periodic delete-job reconciliation failed"),
+    }
 }

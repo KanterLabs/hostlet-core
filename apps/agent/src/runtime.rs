@@ -13,22 +13,43 @@ pub(crate) async fn rollback_generated_topology(
 
 use pipeline::deploy;
 
-/// Single-job concurrency slot. Acquired only via `try_acquire`'s
+const WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Single-flight concurrency slot. Acquired only via `try_acquire`'s
 /// compare_exchange and released only by the `Drop` guard, so the flag clears on
 /// normal completion AND on panic (the unwind drops the guard inside the spawned
-/// job task).
-struct JobGuard(Arc<AtomicBool>);
+/// task).
+struct SingleFlightGuard(Arc<AtomicBool>);
 
-impl Drop for JobGuard {
+impl Drop for SingleFlightGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
 }
 
-fn try_acquire(slot: &Arc<AtomicBool>) -> Option<JobGuard> {
+fn try_acquire(slot: &Arc<AtomicBool>) -> Option<SingleFlightGuard> {
     slot.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .ok()
-        .map(|_| JobGuard(slot.clone()))
+        .map(|_| SingleFlightGuard(slot.clone()))
+}
+
+async fn await_websocket_send<F, T, E>(send: F, timeout: Duration) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match tokio::time::timeout(timeout, send).await {
+        Ok(result) => result.map_err(anyhow::Error::new),
+        Err(_) => bail!("websocket send timed out after {} ms", timeout.as_millis()),
+    }
+}
+
+async fn send_websocket_message<S>(socket: &mut S, message: Message) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    await_websocket_send(socket.send(message), WEBSOCKET_SEND_TIMEOUT).await
 }
 
 #[derive(Clone)]
@@ -180,15 +201,25 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // across a WS drop/reconnect: the reconnected loop cannot claim a second job
     // while the old one holds the slot.
     let job_slot = Arc::new(AtomicBool::new(false));
+    // Runtime log collection is independently single-flight and also outlives a
+    // socket connection. An old collection therefore cannot overlap one started
+    // immediately after reconnecting.
+    let runtime_log_slot = Arc::new(AtomicBool::new(false));
     loop {
-        if let Err(err) = connect_loop(cfg.clone(), job_slot.clone()).await {
+        if let Err(err) =
+            connect_loop(cfg.clone(), job_slot.clone(), runtime_log_slot.clone()).await
+        {
             tracing::warn!("agent disconnected: {err}");
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 }
 
-pub(crate) async fn connect_loop(cfg: Config, job_slot: Arc<AtomicBool>) -> anyhow::Result<()> {
+pub(crate) async fn connect_loop(
+    cfg: Config,
+    job_slot: Arc<AtomicBool>,
+    runtime_log_slot: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     let ws_url = cfg
         .api_url
         .replace("http://", "ws://")
@@ -206,9 +237,17 @@ pub(crate) async fn connect_loop(cfg: Config, job_slot: Arc<AtomicBool>) -> anyh
     let mut storage_stats = tokio::time::interval(Duration::from_secs(60));
     let mut runtime_health = tokio::time::interval(runtime_health_interval());
     let mut health_counts: HashMap<Uuid, HealthCounts> = HashMap::new();
+    // Docker log collection runs in a spawned task. Only its small, bounded
+    // response returns through this channel for the socket loop to write.
+    let (runtime_log_tx, mut runtime_log_rx) = tokio::sync::mpsc::channel::<Value>(1);
     loop {
         tokio::select! {
-            _ = heartbeat.tick() => ws.send(Message::Text(json!({"type":"heartbeat"}).to_string())).await?,
+            _ = heartbeat.tick() => {
+                send_websocket_message(
+                    &mut ws,
+                    Message::Text(json!({"type":"heartbeat"}).to_string()),
+                ).await?;
+            }
             _ = job_claim.tick() => {
                 // Job execution only ever happens inside a spawned task, so every
                 // other select arm stays pollable during a multi-minute deploy.
@@ -229,10 +268,36 @@ pub(crate) async fn connect_loop(cfg: Config, job_slot: Arc<AtomicBool>) -> anyh
                 tokio::spawn(async move { publish_storage_stats(&cfg).await; });
             }
             _ = runtime_health.tick() => publish_runtime_health(&cfg, &mut health_counts).await,
+            Some(response) = runtime_log_rx.recv() => {
+                send_websocket_message(&mut ws, Message::Text(response.to_string())).await?;
+            }
             msg = ws.next() => {
                 match msg {
-                    Some(Ok(Message::Text(text))) => handle_ws_text(&cfg, &job_slot, &text).await,
-                    Some(Ok(Message::Ping(payload))) => ws.send(Message::Pong(payload)).await?,
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(request) = crate::runtime_logs::runtime_logs_request(&text) {
+                            if let Some(guard) = try_acquire(&runtime_log_slot) {
+                                let response_tx = runtime_log_tx.clone();
+                                tokio::spawn(async move {
+                                    let _guard = guard;
+                                    let response =
+                                        crate::runtime_logs::runtime_logs_response(request).await;
+                                    let _ = response_tx.send(response).await;
+                                });
+                            } else {
+                                let response =
+                                    crate::runtime_logs::runtime_logs_busy_response(&request);
+                                send_websocket_message(
+                                    &mut ws,
+                                    Message::Text(response.to_string()),
+                                ).await?;
+                            }
+                        } else {
+                            handle_ws_text(&cfg, &job_slot, &text).await;
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        send_websocket_message(&mut ws, Message::Pong(payload)).await?;
+                    }
                     Some(Ok(Message::Close(_))) | None => bail!("websocket closed"),
                     Some(Ok(_)) => continue,
                     Some(Err(err)) => bail!("websocket error: {err}"),
@@ -621,6 +686,22 @@ mod tests {
     }
 
     #[test]
+    fn repeated_runtime_log_requests_cannot_acquire_a_second_slot() {
+        let runtime_log_slot = Arc::new(AtomicBool::new(false));
+        let held = try_acquire(&runtime_log_slot).expect("first request acquires the slot");
+
+        for _ in 0..32 {
+            assert!(
+                try_acquire(&runtime_log_slot).is_none(),
+                "repeated requests remain single-flight"
+            );
+        }
+
+        drop(held);
+        assert!(try_acquire(&runtime_log_slot).is_some());
+    }
+
+    #[test]
     fn dropping_the_guard_frees_the_slot() {
         let slot = Arc::new(AtomicBool::new(false));
 
@@ -655,5 +736,19 @@ mod tests {
             try_acquire(&slot).is_some(),
             "the slot is free after the panicking task unwinds"
         );
+    }
+
+    #[tokio::test]
+    async fn stalled_websocket_send_exits_within_its_deadline() {
+        let started = Instant::now();
+        let error = await_websocket_send(
+            futures_util::future::pending::<Result<(), std::io::Error>>(),
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("websocket send timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

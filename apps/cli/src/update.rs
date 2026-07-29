@@ -217,11 +217,12 @@ fn swap_cli_binary(tmp_dir: &Path, tmp_binary: &Path) -> anyhow::Result<PathBuf>
 }
 
 pub(crate) fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Result<()> {
-    check("Docker", command_ok("docker", &["version"]));
-    check(
-        "Docker Compose",
-        command_ok("docker", &["compose", "version"]),
-    );
+    let glibc = glibc_version_supported();
+    let docker = command_ok("docker", &["info"]);
+    let compose = command_ok("docker", &["compose", "version"]);
+    check(&format!("glibc >= {MINIMUM_GLIBC_VERSION_LABEL}"), glibc);
+    check("Docker daemon", docker);
+    check("Docker Compose", compose);
     check(".env exists", root.join(".env").exists());
     check(
         "Hostlet release asset",
@@ -234,6 +235,12 @@ pub(crate) fn update_preflight(root: &Path, release: &ReleaseInfo) -> anyhow::Re
             .is_some(),
     );
     ensure_repo_root(root)?;
+    if !(glibc && docker && compose) {
+        bail!(
+            "update preflight failed; Hostlet requires glibc >= \
+             {MINIMUM_GLIBC_VERSION_LABEL}, a reachable Docker daemon, and Docker Compose v2"
+        );
+    }
     if !root.join(".env").exists() {
         bail!("missing .env; run hostlet init first");
     }

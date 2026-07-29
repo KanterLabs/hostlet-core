@@ -23,6 +23,18 @@ pub(in crate::agent) async fn handle_socket(state: AppState, server_id: Uuid, so
     });
     while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Text(text) = msg {
+            // Agent WebSocket traffic is heartbeat-sized except for the bounded
+            // runtime-log snapshot. Reject oversized frames before JSON parsing
+            // so a compromised authenticated agent cannot force a 64 MiB parse
+            // and deep allocation on the API.
+            if !agent_ws_message_within_limit(&text) {
+                tracing::warn!(
+                    %server_id,
+                    bytes = text.len(),
+                    "ignored oversized agent websocket message"
+                );
+                continue;
+            }
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                 handle_agent_message(&state, server_id, value).await;
             }
@@ -30,6 +42,10 @@ pub(in crate::agent) async fn handle_socket(state: AppState, server_id: Uuid, so
     }
     send_task.abort();
     disconnect_agent(&state, &db, server_id, connection_id).await;
+}
+
+fn agent_ws_message_within_limit(text: &str) -> bool {
+    text.len() <= hostlet_contracts::RUNTIME_LOG_MAX_BYTES
 }
 
 /// Register this connection as the agent for `server_id`, marking the server
@@ -84,5 +100,19 @@ async fn disconnect_agent(
             .bind(server_id)
             .execute(db)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_websocket_message_limit_is_enforced_at_the_boundary() {
+        let at_limit = "x".repeat(hostlet_contracts::RUNTIME_LOG_MAX_BYTES);
+        let over_limit = "x".repeat(hostlet_contracts::RUNTIME_LOG_MAX_BYTES + 1);
+
+        assert!(agent_ws_message_within_limit(&at_limit));
+        assert!(!agent_ws_message_within_limit(&over_limit));
     }
 }

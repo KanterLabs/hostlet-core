@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_NAMES: hostlet-core-homelab-2,hostlet-core-homelab-3,hostlet-core-homelab-4
+  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
 
 concurrency:
   group: pr-homelab-ci-${{ github.event.pull_request.number }}
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   clear-approval:
     if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'homelab-ci-approved')
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    runs-on: homelab
     permissions:
       pull-requests: write
     steps:
@@ -37,8 +37,8 @@ jobs:
             "https://api.github.com/repos/${REPO}/issues/${ISSUE}/labels/homelab-ci-approved"
 
   secrets:
-    if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    runs-on: homelab
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -50,8 +50,8 @@ jobs:
       - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --redact --verbose
 
   rust:
-    if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    runs-on: homelab-heavy
     env:
       CARGO_BUILD_JOBS: "4"
     steps:
@@ -66,6 +66,8 @@ jobs:
       - run: scripts/check-line-cap.sh
       - run: scripts/check-line-cap-selftest.sh
       - run: scripts/check-migration-versions.sh
+      - run: bash scripts/ci-db-tests-selftest.sh
+      - run: bash scripts/ci-release-mainline-gate-selftest.sh
       - run: scripts/ci-core-workflow-contracts.sh
       - run: scripts/ci-verify-runner-selftest.sh
       - run: cargo fmt --all -- --check
@@ -73,8 +75,8 @@ jobs:
       - run: cargo test --workspace
 
   web:
-    if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    runs-on: homelab-heavy
     defaults:
       run:
         working-directory: apps/web
@@ -96,8 +98,8 @@ jobs:
       - run: ../../scripts/ci-security-artifact-smoke.sh
 
   compose:
-    if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    runs-on: homelab
     env:
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
@@ -126,8 +128,8 @@ jobs:
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
 
   docker:
-    if: github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    runs-on: homelab-heavy
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

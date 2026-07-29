@@ -53,13 +53,19 @@ fn cleanup_keep_failed_hours_value_rejects_negative_empty_nonnumeric_over_720() 
 // DB-gated helpers -----------------------------------------------------------
 
 async fn reset_cleanup_db(state: &AppState) {
+    // Keep the NULL-owned local server seeded by AppState. PostgreSQL
+    // `TRUNCATE users CASCADE` truncates `servers` even when its FK is NULL.
     sqlx::query(
         "TRUNCATE deployment_logs, app_health_events, app_health_snapshots, \
-             app_resource_snapshots, agent_jobs, deployments, app_env_vars, apps, users CASCADE",
+             app_resource_snapshots, agent_jobs, deployments, app_env_vars, apps CASCADE",
     )
     .execute(&state.db)
     .await
     .unwrap();
+    sqlx::query("DELETE FROM users")
+        .execute(&state.db)
+        .await
+        .unwrap();
 }
 
 pub(super) async fn insert_cleanup_user(state: &AppState) -> Uuid {

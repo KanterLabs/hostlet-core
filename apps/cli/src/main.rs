@@ -16,13 +16,19 @@ use std::{
     time::Duration,
 };
 
-const HOSTLET_REPO: &str = "ShaneKanterman04/Hostlet";
-fn linux_asset() -> anyhow::Result<&'static str> {
-    match std::env::consts::ARCH {
+const HOSTLET_REPO: &str = "KanterLabs/hostlet-core";
+const HOSTLET_RELEASES_LATEST_URL: &str =
+    "https://github.com/KanterLabs/hostlet-core/releases/latest";
+
+fn linux_asset_for_arch(arch: &str) -> anyhow::Result<&'static str> {
+    match arch {
         "x86_64" => Ok("hostlet-linux-x64"),
-        "aarch64" => Ok("hostlet-linux-arm64"),
-        arch => bail!("Hostlet releases do not support Linux architecture {arch}"),
+        arch => bail!("Hostlet stable releases support Linux x86_64 only (got {arch})"),
     }
+}
+
+fn linux_asset() -> anyhow::Result<&'static str> {
+    linux_asset_for_arch(std::env::consts::ARCH)
 }
 
 mod backups;
@@ -43,4 +49,19 @@ use util::*;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     runtime::run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linux_asset_for_arch;
+
+    #[test]
+    fn release_asset_is_x86_64_only() {
+        assert_eq!(
+            linux_asset_for_arch("x86_64").expect("x86_64 should be supported"),
+            "hostlet-linux-x64"
+        );
+        assert!(linux_asset_for_arch("aarch64").is_err());
+        assert!(linux_asset_for_arch("arm").is_err());
+    }
 }

@@ -44,6 +44,7 @@ import {
   UptimeStrip,
 } from "@/components/ui";
 import { WebhookNotice } from "@/components/WebhookNotice";
+import { RuntimeLogsPanel } from "@/components/RuntimeLogsPanel";
 import {
   appVisitHref,
   appVisitLabel,
@@ -373,6 +374,10 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   />
                 )}
               </section>
+
+              {app && (
+                <RuntimeLogsPanel appId={id} deploymentId={app.currentDeploymentId} />
+              )}
 
               <Panel>
                 <SectionHeader icon={Settings} title="App settings" />

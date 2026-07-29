@@ -7,21 +7,42 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
+  contents: read
+
+env:
+  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
 
 jobs:
+  release-source:
+    runs-on: homelab
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require release source on main
+        run: bash scripts/ci-release-mainline-gate.sh
+      - run: bash scripts/ci-release-mainline-gate-selftest.sh
+      - run: scripts/ci-verify-runner.sh
+
+  database:
+    needs: [release-source]
+    uses: ./.github/workflows/database-tests.yml
+
   # Release gate: the heavy integration suites no longer run on every staging
   # push, so they run here against the exact commit being released. linux-cli
   # (which builds + publishes the release images) needs this to pass first.
   # Runs on both tag push and workflow_dispatch so a release can be dry-run-validated.
   release-validation:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    needs: [release-source]
+    runs-on: homelab-heavy
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
       - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: scripts/ci-self-hosted-api-smoke.sh
@@ -32,21 +53,49 @@ jobs:
 
   linux-cli:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    needs: [release-validation]
-    runs-on: [self-hosted, Linux, X64, hostlet-core-v2]
+    needs: [database, release-validation]
+    runs-on: homelab-heavy
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
     env:
       # Cap cargo parallelism (release build is the most expensive cargo
       # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
       CARGO_BUILD_JOBS: "4"
+      HOSTLET_MAX_GLIBC_VERSION: "2.39"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
       - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: cargo build --release -p hostlet
-      - name: Build ARM64 CLI
+      - name: Enforce x64 CLI glibc baseline
         run: |
-          cargo install cross --version 0.2.5 --locked
-          cross build --release -p hostlet --target aarch64-unknown-linux-gnu
+          command -v readelf >/dev/null
+          required="$(
+            readelf --version-info target/release/hostlet |
+              grep -oE 'GLIBC_[0-9]+\.[0-9]+' |
+              sort -Vu |
+              tail -1
+          )"
+          if [ -z "${required}" ]; then
+            echo "could not determine the x64 CLI glibc requirement" >&2
+            exit 1
+          fi
+          required="${required#GLIBC_}"
+          newest="$(
+            printf '%s\n' "${required}" "${HOSTLET_MAX_GLIBC_VERSION}" |
+              sort -V |
+              tail -1
+          )"
+          if [ "${newest}" != "${HOSTLET_MAX_GLIBC_VERSION}" ]; then
+            echo "x64 CLI requires glibc ${required}; maximum supported is ${HOSTLET_MAX_GLIBC_VERSION}" >&2
+            exit 1
+          fi
+          echo "x64 CLI requires glibc ${required} (supported maximum ${HOSTLET_MAX_GLIBC_VERSION})"
       - run: |
           VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -64,13 +113,16 @@ jobs:
           echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USERNAME: ShaneKanterman04
+        run: echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
       - name: Build and push release images
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           IMAGE_REGISTRY: ghcr.io/shanekanterman04
         run: |
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64,linux/arm64 --push \
+          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -78,7 +130,7 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-api:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-api:${SHA_TAG}" \
             .
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64,linux/arm64 --push \
+          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -86,7 +138,7 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-web:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-web:${SHA_TAG}" \
             .
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64,linux/arm64 --push \
+          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -94,7 +146,7 @@ jobs:
             -t "${IMAGE_REGISTRY}/hostlet-agent:${RELEASE_TAG}" \
             -t "${IMAGE_REGISTRY}/hostlet-agent:${SHA_TAG}" \
             .
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64,linux/arm64 --push \
+          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE_TAG}" \
@@ -122,15 +174,12 @@ jobs:
       - run: |
           mkdir -p dist
           cp target/release/hostlet dist/hostlet-linux-x64
-          cp target/aarch64-unknown-linux-gnu/release/hostlet dist/hostlet-linux-arm64
-          chmod +x dist/hostlet-linux-x64 dist/hostlet-linux-arm64
+          chmod +x dist/hostlet-linux-x64
           cd dist
           sha256sum hostlet-linux-x64 > hostlet-linux-x64.sha256
-          sha256sum hostlet-linux-arm64 > hostlet-linux-arm64.sha256
           VERSION="${GITHUB_REF_NAME#v}"
           IMAGE_TAG="${GITHUB_REF_NAME}"
           CHECKSUM="$(cut -d ' ' -f 1 hostlet-linux-x64.sha256)"
-          ARM64_CHECKSUM="$(cut -d ' ' -f 1 hostlet-linux-arm64.sha256)"
           RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > hostlet-release.json <<EOF
           {
@@ -160,9 +209,6 @@ jobs:
             "assets": {
               "hostlet-linux-x64": {
                 "sha256": "${CHECKSUM}"
-              },
-              "hostlet-linux-arm64": {
-                "sha256": "${ARM64_CHECKSUM}"
               }
             },
             "compose_migrations": true,
@@ -171,6 +217,8 @@ jobs:
           }
           EOF
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # The JavaScript template literal must not expand in the shell.
+            # shellcheck disable=SC2016
             node -e '
               const fs = require("fs");
               const manifest = JSON.parse(fs.readFileSync("hostlet-release.json", "utf8"));
@@ -189,7 +237,7 @@ jobs:
         run: |
           install -m 700 -d ~/.gnupg
           printf '%s' "$HOSTLET_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
-          for checksum in dist/hostlet-linux-x64.sha256 dist/hostlet-linux-arm64.sha256; do
+          for checksum in dist/hostlet-linux-x64.sha256; do
             gpg --batch --yes --pinentry-mode loopback \
               --passphrase "$HOSTLET_RELEASE_GPG_PASSPHRASE" \
               --armor --detach-sign "$checksum"
@@ -204,8 +252,6 @@ jobs:
           subject-path: |
             dist/hostlet-linux-x64
             dist/hostlet-linux-x64.sha256
-            dist/hostlet-linux-arm64
-            dist/hostlet-linux-arm64.sha256
             dist/hostlet-release.json
             dist/hostlet-linux-x64.spdx.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -215,20 +261,15 @@ jobs:
             dist/hostlet-linux-x64
             dist/hostlet-linux-x64.sha256
             dist/hostlet-linux-x64.sha256.asc*
-            dist/hostlet-linux-arm64
-            dist/hostlet-linux-arm64.sha256
-            dist/hostlet-linux-arm64.sha256.asc*
             dist/hostlet-release.json
             dist/hostlet-linux-x64.spdx.json
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         if: startsWith(github.ref, 'refs/tags/')
         with:
+          generate_release_notes: true
           files: |
             dist/hostlet-linux-x64
             dist/hostlet-linux-x64.sha256
             dist/hostlet-linux-x64.sha256.asc*
-            dist/hostlet-linux-arm64
-            dist/hostlet-linux-arm64.sha256
-            dist/hostlet-linux-arm64.sha256.asc*
             dist/hostlet-release.json
             dist/hostlet-linux-x64.spdx.json

@@ -1,0 +1,42 @@
+name: Database Tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  database:
+    runs-on: homelab-heavy
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "4"
+      HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+      HOSTLET_DB_TEST_REQUIRED: "1"
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_USER: hostlet_ci
+          POSTGRES_PASSWORD: hostlet-ci-test-password
+          POSTGRES_DB: hostlet_ci_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U hostlet_ci -d hostlet_ci_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - name: Run destructive database tests against ephemeral Postgres
+        env:
+          HOSTLET_DB_TEST_URL: postgresql://hostlet_ci:hostlet-ci-test-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/hostlet_ci_test
+        run: bash scripts/ci-db-tests.sh

@@ -89,6 +89,34 @@ pub(crate) fn command_ok(bin: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn host_arch_supported(arch: &str) -> bool {
+    arch == "x86_64"
+}
+
+pub(crate) const MINIMUM_GLIBC_VERSION: (u32, u32) = (2, 39);
+pub(crate) const MINIMUM_GLIBC_VERSION_LABEL: &str = "2.39";
+
+pub(crate) fn parse_glibc_version(output: &str) -> Option<(u32, u32)> {
+    let version = output.trim().strip_prefix("glibc ")?;
+    let (major, remainder) = version.split_once('.')?;
+    let minor = remainder.split('.').next()?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+pub(crate) fn glibc_version_supported_from(output: &str) -> bool {
+    parse_glibc_version(output).is_some_and(|version| version >= MINIMUM_GLIBC_VERSION)
+}
+
+pub(crate) fn glibc_version_supported() -> bool {
+    Command::new("getconf")
+        .arg("GNU_LIBC_VERSION")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|output| glibc_version_supported_from(&output))
+}
+
 /// Runs `docker compose <subcommand...>` in `root` with output suppressed and
 /// reports whether the resulting output satisfies `accept`.
 fn compose_status(
@@ -473,6 +501,32 @@ mod tests {
     fn quote_env_and_unquote_env_treat_empty_as_empty() {
         assert_eq!(quote_env(""), "");
         assert_eq!(unquote_env(""), "");
+    }
+
+    #[test]
+    fn glibc_baseline_accepts_2_39_and_newer() {
+        assert!(glibc_version_supported_from("glibc 2.39\n"));
+        assert!(glibc_version_supported_from("glibc 2.43\n"));
+        assert!(glibc_version_supported_from("glibc 3.0\n"));
+    }
+
+    #[test]
+    fn glibc_baseline_rejects_old_or_non_glibc_hosts() {
+        assert!(!glibc_version_supported_from("glibc 2.38\n"));
+        assert!(!glibc_version_supported_from("musl 1.2.5\n"));
+        assert!(!glibc_version_supported_from(""));
+    }
+
+    #[test]
+    fn stable_host_architecture_is_x86_64_only() {
+        assert!(host_arch_supported("x86_64"));
+        assert!(!host_arch_supported("aarch64"));
+        assert!(!host_arch_supported("arm"));
+    }
+
+    #[test]
+    fn glibc_parser_accepts_patch_versions() {
+        assert_eq!(parse_glibc_version("glibc 2.39.1\n"), Some((2, 39)));
     }
 
     #[test]

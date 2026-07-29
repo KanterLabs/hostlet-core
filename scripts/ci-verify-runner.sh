@@ -2,8 +2,11 @@
 set -euo pipefail
 
 allowed_names="${HOSTLET_ALLOWED_RUNNER_NAMES:-}"
+allowed_prefix="${HOSTLET_ALLOWED_RUNNER_PREFIX:-}"
 expected_os="${HOSTLET_EXPECTED_RUNNER_OS:-Linux}"
 expected_arch="${HOSTLET_EXPECTED_RUNNER_ARCH:-X64}"
+forbidden_home_path="${HOSTLET_FORBIDDEN_HOME_PATH:-/home/shane}"
+forbidden_k8s_token_path="${HOSTLET_FORBIDDEN_K8S_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
 
 disk_use_percent() {
   df -P "$1" | awk 'NR == 2 { gsub("%", "", $5); print $5 }'
@@ -56,6 +59,11 @@ if [ -n "${allowed_names}" ]; then
   fi
 fi
 
+if [ -n "${allowed_prefix}" ] && [[ "${RUNNER_NAME}" != "${allowed_prefix}"* ]]; then
+  echo "unexpected runner name: got ${RUNNER_NAME}, expected prefix ${allowed_prefix}" >&2
+  exit 1
+fi
+
 if [ "${HOSTLET_ALLOW_LOW_DISK:-0}" != "1" ]; then
   disk_fail_percent="${HOSTLET_RUNNER_DISK_FAIL_PERCENT:-92}"
   check_disk_below_threshold / root "${disk_fail_percent}"
@@ -66,14 +74,22 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! mountpoint -q /var/lib/docker; then
-  echo "/var/lib/docker is not a dedicated mount; refusing CI without isolated Docker storage" >&2
-  exit 1
-fi
+if [[ "${RUNNER_NAME}" == homelab-* ]]; then
+  if [ "${HOSTLET_ALLOW_ARC_HOST_PATHS:-0}" != "1" ] &&
+    { [ -e "${forbidden_home_path}" ] || [ -e "${forbidden_k8s_token_path}" ]; }; then
+    echo "ARC runner exposes a forbidden host path or Kubernetes token" >&2
+    exit 1
+  fi
+else
+  if ! mountpoint -q /var/lib/docker; then
+    echo "/var/lib/docker is not a dedicated mount; refusing CI without isolated Docker storage" >&2
+    exit 1
+  fi
 
-if [ "${HOSTLET_ALLOW_LOW_DOCKER_DISK:-0}" != "1" ]; then
-  docker_disk_fail_percent="${HOSTLET_RUNNER_DOCKER_DISK_FAIL_PERCENT:-92}"
-  check_disk_below_threshold /var/lib/docker Docker "${docker_disk_fail_percent}"
+  if [ "${HOSTLET_ALLOW_LOW_DOCKER_DISK:-0}" != "1" ]; then
+    docker_disk_fail_percent="${HOSTLET_RUNNER_DOCKER_DISK_FAIL_PERCENT:-92}"
+    check_disk_below_threshold /var/lib/docker Docker "${docker_disk_fail_percent}"
+  fi
 fi
 
 echo "verified self-hosted runner ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"

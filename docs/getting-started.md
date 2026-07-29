@@ -1,29 +1,56 @@
 # Getting Started
 
-This guide gets self-hosted Hostlet running on a Linux server with Docker.
+This guide gets Hostlet Core running on one Linux server with Docker.
 
 ## Prerequisites
 
-- Docker and Docker Compose.
+- Linux x86_64 with glibc 2.39 or newer. Ubuntu 24.04 LTS and newer meet this
+  baseline. Alpine/musl and distributions with older glibc versions do not;
+  ARM64 release artifacts are not published.
+- Docker Engine with a running daemon and the Docker Compose v2 plugin. The
+  installing user must be able to run Docker commands.
 - Git and curl.
 - A GitHub OAuth App with Device Flow enabled.
 - A GitHub account that will own the Hostlet install.
+- More than 1 GiB of free disk space, which `hostlet preflight` enforces. App
+  builds and images normally need substantially more; Core does not publish or
+  enforce a fixed CPU, RAM, or production-capacity minimum.
 
-The hosted-service layer is not required for self-hosted use.
+[Hostlet Cloud](https://hostlet.cloud) is the managed portfolio service; it is
+not required to install or run Hostlet Core.
 
 ## Install
 
 ```bash
-git clone https://github.com/ShaneKanterman04/hostlet-core.git
+git clone https://github.com/KanterLabs/hostlet-core.git
 cd hostlet-core
-curl -L https://github.com/ShaneKanterman04/Hostlet/releases/latest/download/hostlet-linux-x64 -o hostlet
-chmod +x hostlet
-sudo mv hostlet /usr/local/bin/hostlet
+[ "$(uname -m)" = "x86_64" ] || { echo "Stable releases currently support Linux x86_64 only" >&2; exit 1; }
+glibc_output="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+if [[ "$glibc_output" =~ ^glibc[[:space:]]+([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+  glibc_major="${BASH_REMATCH[1]}"
+  glibc_minor="${BASH_REMATCH[2]}"
+else
+  echo "Stable releases require glibc 2.39 or newer" >&2
+  exit 1
+fi
+(( glibc_major > 2 || (glibc_major == 2 && glibc_minor >= 39) )) || {
+  echo "Stable releases require glibc 2.39 or newer (found $glibc_major.$glibc_minor)" >&2
+  exit 1
+}
+curl -fLO https://github.com/KanterLabs/hostlet-core/releases/latest/download/hostlet-linux-x64
+curl -fLO https://github.com/KanterLabs/hostlet-core/releases/latest/download/hostlet-linux-x64.sha256
+sha256sum --check hostlet-linux-x64.sha256
+sudo install -m 0755 hostlet-linux-x64 /usr/local/bin/hostlet
+hostlet version
 ```
 
-The public source lives in `hostlet-core`; release assets are currently
-published from the `ShaneKanterman04/Hostlet` GitHub Releases feed that the CLI
-updater reads.
+Run the preflight before initialization. It checks the host OS, x86_64
+architecture, glibc baseline, reachable Docker daemon, Compose v2, and free
+disk space:
+
+```bash
+hostlet preflight
+```
 
 ## Initialize
 
@@ -53,10 +80,6 @@ Then open the URL printed by the CLI, enter the setup token if prompted, set a
 control-plane password of at least 12 characters, unlock the panel, and connect
 GitHub. The setup token field is used only when the install was configured with
 one.
-
-The web UI includes a persisted light/dark/system theme toggle. It is shown in
-the side rail on desktop and in the top-right corner on mobile, and it applies
-before the page paints on later visits.
 
 ## First App
 

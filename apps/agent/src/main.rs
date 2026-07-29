@@ -26,6 +26,7 @@ mod journal;
 mod ops;
 mod railpack;
 mod runtime;
+mod runtime_logs;
 mod validation;
 
 pub(crate) use build::*;
