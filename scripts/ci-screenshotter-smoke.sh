@@ -4,16 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${HOSTLET_SCREENSHOTTER_TEST_IMAGE:-hostlet-screenshotter-ci}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hostlet-screenshotter-smoke.XXXXXX")"
+SMOKE_CONTAINER="hostlet-screenshotter-smoke-$$"
 REDIRECT_CONTAINER="hostlet-screenshotter-redirect-$$"
-trap 'docker rm -f "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
+trap 'docker rm -f "${SMOKE_CONTAINER}" "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
 
 if [ "${HOSTLET_SCREENSHOTTER_SKIP_BUILD:-0}" != "1" ]; then
   "${ROOT}/scripts/ci-docker-retry.sh" docker build -f "${ROOT}/apps/screenshotter/Dockerfile" -t "${IMAGE}" "${ROOT}"
 fi
-
-# The screenshotter now runs as non-root (pwuser). Make the bind-mounted output
-# directory world-accessible so the container user can create files inside it.
-chmod a+rwx "${TMP_DIR}"
 
 SMOKE_URL="$(python3 - <<'PY'
 from urllib.parse import quote
@@ -81,12 +78,18 @@ print("data:text/html," + quote(html))
 PY
 )"
 
-docker run --rm \
+# Keep the output in the container's writable layer and copy it out after the
+# process exits. A bind mount here is unreliable on containerized CI runners:
+# the Docker daemon may resolve the host path outside the runner container,
+# where chmod from the job does not affect the mounted directory.
+docker create --name "${SMOKE_CONTAINER}" \
   -e HOSTLET_BROWSER_SMOKE=1 \
-  -v "${TMP_DIR}:/out" \
   "${IMAGE}" \
   "${SMOKE_URL}" \
-  /out/screenshot.webp
+  /tmp/screenshot.webp >/dev/null
+docker start --attach "${SMOKE_CONTAINER}"
+docker cp "${SMOKE_CONTAINER}:/tmp/screenshot.webp" "${TMP_DIR}/screenshot.webp"
+docker rm "${SMOKE_CONTAINER}" >/dev/null
 
 python3 - "${TMP_DIR}/screenshot.webp" <<'PY'
 import sys
