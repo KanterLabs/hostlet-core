@@ -13,6 +13,36 @@ fn patchwork_inventory(client_manifest: &str) -> RepositoryInventory {
     }
 }
 
+#[tokio::test]
+async fn topology_inventory_is_scoped_to_the_validated_project_root() {
+    let checkout = temp_checkout("project-root");
+    let project = checkout.join("apps/workspace");
+    tokio::fs::create_dir_all(project.join("packages/client"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(checkout.join("apps/unrelated"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        project.join("packages/client/package.json"),
+        r#"{"name":"client"}"#,
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        checkout.join("apps/unrelated/package.json"),
+        r#"{"name":"unrelated"}"#,
+    )
+    .await
+    .unwrap();
+
+    let inventory = checkout_inventory(&project).await.unwrap();
+    assert_eq!(inventory.files.len(), 1);
+    assert_eq!(inventory.files[0].path, "packages/client/package.json");
+
+    tokio::fs::remove_dir_all(checkout).await.unwrap();
+}
+
 #[test]
 fn semver_proof_accepts_patchwork_metadata_only_change() {
     assert!(resolved_satisfies("^1.61.1", "1.61.1"));

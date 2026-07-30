@@ -204,11 +204,11 @@ pub(super) async fn deploy_generated_topology(
     app_id: Uuid,
     app_name: &str,
     route_key: &str,
-    checkout: &Path,
+    project_dir: &Path,
     domain: &str,
     git_sync_duration_ms: u128,
 ) -> anyhow::Result<()> {
-    let inventory = checkout_inventory(checkout).await?;
+    let inventory = checkout_inventory(project_dir).await?;
     let plan = hostlet_contracts::plan_repository_topology(&inventory);
     let config: GeneratedTopologyConfig = serde_json::from_value(
         payload
@@ -229,7 +229,7 @@ pub(super) async fn deploy_generated_topology(
         )
         .await;
     }
-    let lock_receipt = match repair_pnpm_lock_metadata(checkout, &inventory).await {
+    let lock_receipt = match repair_pnpm_lock_metadata(project_dir, &inventory).await {
         Ok(receipt) => receipt,
         Err(err) => {
             let message = format!("Lockfile preflight failed: {err}");
@@ -265,7 +265,7 @@ pub(super) async fn deploy_generated_topology(
             service,
             &public_origin,
             &public_ws_origin,
-            checkout,
+            project_dir,
         )
         .await?;
         let built = build_image(
@@ -273,7 +273,7 @@ pub(super) async fn deploy_generated_topology(
             deployment_id,
             &format!("{app_name}-{service_slug}"),
             &image,
-            checkout,
+            project_dir,
             service.container_port.into(),
             &service_payload,
             git_sync_duration_ms,
