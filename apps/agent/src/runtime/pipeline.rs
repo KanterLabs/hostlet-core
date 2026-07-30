@@ -85,7 +85,7 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
             app_id,
             &app_name,
             &route_key,
-            &checkout,
+            &project_dir,
             domain,
             git_sync_duration_ms,
         )
