@@ -15,7 +15,7 @@ use uuid::Uuid;
 pub(super) const DEPLOY_APP_COLUMNS: &str = "id,server_id,name,repo_full_name,branch,\
      container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,\
      packaging_strategy,root_directory,install_command,build_command,start_command,\
-     memory_limit_mb,cpu_limit";
+     memory_limit_mb,cpu_limit,suspended_at IS NOT NULL AS suspended";
 
 /// A single `apps` row decoded into the fields a deploy job payload is built
 /// from. Reading every column once here (rather than repeatedly off the raw
@@ -38,6 +38,7 @@ pub(super) struct DeployApp {
     pub start_command: Option<String>,
     pub memory_limit_mb: Option<i32>,
     pub cpu_limit: Option<f64>,
+    pub suspended: bool,
 }
 
 impl DeployApp {
@@ -60,6 +61,7 @@ impl DeployApp {
             start_command: row.get("start_command"),
             memory_limit_mb: row.get("memory_limit_mb"),
             cpu_limit: row.get("cpu_limit"),
+            suspended: row.get("suspended"),
         }
     }
 

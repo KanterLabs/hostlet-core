@@ -8,7 +8,10 @@ pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> 
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let rows = sqlx::query(
-        "SELECT id,name,public_ip,kind,status,last_seen_at,created_at,capabilities,draining,max_concurrent_apps,max_concurrent_builds,agent_protocol_version \
+        "SELECT id,name,public_ip,kind,status,last_seen_at,created_at,capabilities,draining,
+                max_concurrent_apps,max_concurrent_builds,agent_protocol_version,
+                max_runtime_memory_mb,max_running_services,min_available_memory_mb,
+                min_disk_free_mb,resource_snapshot_json,resource_snapshot_at \
          FROM servers WHERE kind='local' ORDER BY created_at ASC",
     )
     .fetch_all(&state.db)
@@ -26,6 +29,12 @@ pub async fn list_servers(State(state): State<AppState>, headers: HeaderMap) -> 
                         "lastSeenAt": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_seen_at"),
                         "capabilities": r.get::<Vec<String>, _>("capabilities"),
                         "agentProtocolVersion": r.get::<i32, _>("agent_protocol_version"),
+                        "maxRuntimeMemoryMb": r.get::<Option<i32>, _>("max_runtime_memory_mb"),
+                        "maxRunningServices": r.get::<Option<i32>, _>("max_running_services"),
+                        "minAvailableMemoryMb": r.get::<Option<i32>, _>("min_available_memory_mb"),
+                        "minDiskFreeMb": r.get::<Option<i32>, _>("min_disk_free_mb"),
+                        "resourceSnapshot": r.get::<Option<serde_json::Value>, _>("resource_snapshot_json"),
+                        "resourceSnapshotAt": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("resource_snapshot_at"),
                         "draining": r.get::<bool, _>("draining"),
                         "maxConcurrentApps": r.get::<i32, _>("max_concurrent_apps"),
                         "maxConcurrentBuilds": r.get::<i32, _>("max_concurrent_builds"),

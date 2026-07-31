@@ -15,7 +15,7 @@ use hostlet_contracts::{
     AgentJobHeartbeat, AgentJobHeartbeatReceipt, CommitActivationRequest, PrepareActivationReceipt,
     PrepareActivationRequest,
 };
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
 const LEASE_MINUTES: i64 = 5;
@@ -414,6 +414,19 @@ pub async fn commit_activation(
             }
         }
     }
+    let previous_deployment_id = row.get::<Option<Uuid>, _>("current_deployment_id");
+    if schedule_previous_runtime_stop(
+        &mut tx,
+        server_id,
+        app_id,
+        previous_deployment_id,
+        deployment_id,
+    )
+    .await
+    .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     match tx.commit().await {
         Ok(()) => {
             if let Err(err) =
@@ -429,4 +442,83 @@ pub async fn commit_activation(
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+async fn schedule_previous_runtime_stop(
+    tx: &mut Transaction<'_, Postgres>,
+    server_id: Uuid,
+    app_id: Uuid,
+    previous_deployment_id: Option<Uuid>,
+    new_deployment_id: Uuid,
+) -> anyhow::Result<()> {
+    // A rollback can make the target of an older delayed stop current again.
+    // Cancel every still-queued delayed stop before scheduling the newly
+    // superseded runtime.
+    sqlx::query(
+        "UPDATE agent_jobs
+         SET status='cancelled',
+             failure_summary='Superseded by a newer activation decision.',
+             payload_json='{}'::jsonb,
+             updated_at=now(),finished_at=now()
+         WHERE app_id=$1 AND job_type='stop_previous_deployment' AND status='queued'",
+    )
+    .bind(app_id)
+    .execute(&mut **tx)
+    .await?;
+    let Some(previous_deployment_id) = previous_deployment_id.filter(|id| *id != new_deployment_id)
+    else {
+        return Ok(());
+    };
+    let target = sqlx::query(
+        "SELECT d.container_name,d.compose_project,d.published_port,
+                a.container_port,a.health_path,a.domain
+         FROM deployments d
+         JOIN apps a ON a.id=d.app_id
+         WHERE d.id=$1 AND d.app_id=$2 AND d.server_id=$3",
+    )
+    .bind(previous_deployment_id)
+    .bind(app_id)
+    .bind(server_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let (Some(container_name), Some(published_port)) = (
+        target.get::<Option<String>, _>("container_name"),
+        target.get::<Option<i32>, _>("published_port"),
+    ) else {
+        return Ok(());
+    };
+    let payload = serde_json::json!({
+        "type": "stop_previous_deployment",
+        "app_id": app_id,
+        "deployment_id": previous_deployment_id,
+        "container_name": container_name,
+        "compose_project": target.get::<Option<String>, _>("compose_project"),
+        "container_port": target.get::<i32, _>("container_port"),
+        "published_port": published_port,
+        "health_path": target.get::<String, _>("health_path"),
+        "domain": target.get::<String, _>("domain"),
+        "route_key": format!("app-{app_id}"),
+    });
+    let job_id = crate::deploy::insert_agent_job_in_transaction(
+        tx,
+        server_id,
+        Some(app_id),
+        Some(previous_deployment_id),
+        "stop_previous_deployment",
+        payload,
+        20,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE agent_jobs
+         SET available_at=now() + interval '15 minutes'
+         WHERE id=$1",
+    )
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }

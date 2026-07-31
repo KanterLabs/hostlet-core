@@ -128,7 +128,9 @@ pub(crate) async fn deployment_queue_status(
     deployment_status: &str,
 ) -> DeploymentQueue {
     let job = match sqlx::query(
-        "SELECT id, status, priority, created_at, updated_at
+        "SELECT id,status,priority,created_at,updated_at,
+                payload_json->>'capacity_wait' AS capacity_wait,
+                payload_json->>'capacity_wait_reason' AS capacity_wait_reason
          FROM agent_jobs
          WHERE deployment_id=$1 AND job_type IN ('deploy','rollback')
          ORDER BY created_at DESC
@@ -186,7 +188,12 @@ pub(crate) async fn deployment_queue_status(
             }
         };
         return DeploymentQueue {
-            status: "queued".to_string(),
+            status: if job.get::<Option<String>, _>("capacity_wait").as_deref() == Some("true") {
+                "waiting_capacity"
+            } else {
+                "queued"
+            }
+            .to_string(),
             position: Some(deploys_ahead + 1),
             deploys_ahead,
             updated_at: Some(updated_at),
@@ -317,6 +324,10 @@ pub async fn create_and_send_deploy_with_approval(
     .fetch_one(&state.db)
     .await?;
     let app = DeployApp::from_row(&app_row);
+    anyhow::ensure!(
+        !app.suspended,
+        "this app is paused; resume it before starting a deployment"
+    );
     // Storage quota gate (soft): refuse to start a new deploy when storage is
     // already over the limit, using the last sampled usage. Usage counts the
     // built image plus the managed volume(s); the ephemeral container writable
@@ -366,13 +377,6 @@ pub async fn create_and_send_deploy_with_approval(
         }
     }
     let server_id = app.server_id;
-    // Re-check the assigned server's capacity before enqueuing. `select_app_runner`
-    // reserves a slot at app-create time by counting *live* apps, but an app
-    // created before its first deploy counts toward no server there, so several
-    // apps can be placed on a server with room for one. Enforce the real cap here.
-    // This closes the create-many-then-deploy gap; see `ensure_server_has_capacity`
-    // for the residual truly-concurrent-deploy race and why it is bounded/low-risk.
-    crate::server_capacity::ensure_server_has_capacity(state, server_id, app_id).await?;
     // Resolve mutable branch/HEAD requests before creating any durable work.
     // Every queued deployment and retry is therefore pinned to immutable source.
     let github_token = state
@@ -676,10 +680,19 @@ async fn send_job(
         )
         .await;
     }
-    // Best-effort: advance 'queued' → 'running' now that the job is enqueued.
-    // If this update fails, the agent's own status report will correct the state;
-    // we must NOT fail the call after the job row already exists.
-    mark_deployment_running(state, deployment_id).await;
+    let waiting_for_capacity: bool = sqlx::query_scalar(
+        "SELECT COALESCE(payload_json->>'capacity_wait'='true',false)
+         FROM agent_jobs WHERE id=$1",
+    )
+    .bind(job_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false);
+    // Best-effort: advance 'queued' → 'running' only once the capacity
+    // scheduler has made the job claimable.
+    if !waiting_for_capacity {
+        mark_deployment_running(state, deployment_id).await;
+    }
     Ok(())
 }
 
@@ -716,10 +729,40 @@ pub async fn enqueue_agent_job(
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
     job_type: &str,
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
     priority: i32,
 ) -> anyhow::Result<Uuid> {
     let mut transaction = state.db.begin().await?;
+    let capacity_decision = if matches!(job_type, "deploy" | "rollback") {
+        let app_id =
+            app_id.ok_or_else(|| anyhow::anyhow!("capacity-managed job is missing its app"))?;
+        Some(
+            crate::server_capacity::capacity_decision_in_transaction(
+                &mut transaction,
+                server_id,
+                app_id,
+                None,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let Some(object) = payload.as_object_mut() {
+        match capacity_decision {
+            Some(crate::server_capacity::CapacityDecision::Admitted) => {
+                object.insert("capacity_reserved".into(), serde_json::Value::Bool(true));
+            }
+            Some(crate::server_capacity::CapacityDecision::Waiting(reason)) => {
+                object.insert("capacity_wait".into(), serde_json::Value::Bool(true));
+                object.insert(
+                    "capacity_wait_reason".into(),
+                    serde_json::Value::String(reason.to_string()),
+                );
+            }
+            None => {}
+        }
+    }
     let queue_priority_offset = match app_id {
         Some(app_id) => {
             // Ordinary app-bound enqueues share this row lock. App teardown
@@ -771,6 +814,19 @@ pub async fn enqueue_agent_job(
         priority + queue_priority_offset,
     )
     .await?;
+    if matches!(
+        capacity_decision,
+        Some(crate::server_capacity::CapacityDecision::Waiting(_))
+    ) {
+        sqlx::query(
+            "UPDATE agent_jobs
+             SET available_at=now() + interval '100 years'
+             WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     Ok(id)
 }
@@ -806,6 +862,7 @@ pub(crate) async fn insert_agent_job_in_transaction(
 
 fn required_protocol_version(job_type: &str, payload: &serde_json::Value) -> i32 {
     match job_type {
+        "suspend_app" | "resume_app" | "stop_previous_deployment" => 4,
         "deploy"
             if payload
                 .pointer("/runtime_config/generatedTopology")

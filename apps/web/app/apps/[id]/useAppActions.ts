@@ -283,6 +283,34 @@ export function useAppActions({
     }
   }, [busyAction, confirmAction, id]);
 
+  const togglePause = useCallback(async () => {
+    if (!app || busyAction) return;
+    const paused = Boolean(app.suspendedAt);
+    if (!(await confirmAction({
+      title: paused ? "Resume app?" : "Pause app?",
+      description: paused
+        ? "Start the preserved app runtime again? Other suspension reasons can still keep it paused."
+        : "Stop every service for this app while preserving its containers and volumes?",
+      confirmLabel: paused ? "Resume" : "Pause",
+    }))) return;
+    setBusyAction(paused ? "resume" : "pause");
+    setHealthMessage(paused ? "Requesting app resume..." : "Requesting app pause...");
+    try {
+      await api(`/api/apps/${id}/${paused ? "resume" : "pause"}`, {
+        method: "POST",
+        body: "{}",
+      });
+      await refreshApp();
+      setHealthMessage(paused ? "App resume requested." : "App paused.");
+    } catch (error) {
+      setHealthMessage(
+        `${paused ? "Resume" : "Pause"} could not start. ${error instanceof Error ? error.message : ""}`,
+      );
+    } finally {
+      if (mountedRef.current) setBusyAction("");
+    }
+  }, [app, busyAction, confirmAction, id, refreshApp]);
+
   const captureScreenshot = useCallback(async () => {
     if (busyAction) return;
     setBusyAction("screenshot");
@@ -348,6 +376,7 @@ export function useAppActions({
     checkHealthNow,
     checkBrowserNow,
     restartContainer,
+    togglePause,
     captureScreenshot,
     deleteEnvVar,
   };

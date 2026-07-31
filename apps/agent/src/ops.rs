@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 mod activation;
 mod capture_url;
 mod health;
+mod host_resources;
 mod reconcile;
 mod resource_stats;
 #[cfg(test)]
@@ -25,6 +26,7 @@ use health::{
     failed_health_probe, health_status_event, health_target_from_payload, health_targets,
     probe_health_target, single_probe_health_event, HealthProbeResult, HealthTarget,
 };
+pub(crate) use host_resources::collect_host_resource_snapshot;
 use reconcile::{
     container_actual_from_state, decide_reconcile, ContainerActual, ReconcileDecision,
 };
@@ -490,6 +492,59 @@ pub(crate) async fn stop_container_job(payload: &Value) -> anyhow::Result<()> {
         &["No such container"],
     )
     .await
+}
+
+async fn app_runtime_containers(payload: &Value) -> anyhow::Result<Vec<String>> {
+    let compose_project = payload.get("compose_project").and_then(Value::as_str);
+    if let Some(project) = compose_project {
+        if !valid_compose_project_name(project) {
+            bail!("app transition job contains an invalid compose project");
+        }
+        let containers = docker_names_by_label(
+            "ps",
+            &[
+                "-a",
+                "--filter",
+                &format!("label=com.docker.compose.project={project}"),
+            ],
+            "{{.Names}}",
+        )
+        .await?;
+        if containers.iter().any(|name| !valid_container_name(name)) {
+            bail!("app transition job resolved an invalid managed container");
+        }
+        if !containers.is_empty() {
+            return Ok(containers);
+        }
+    }
+    let Some(target) = health_target_from_payload(payload) else {
+        bail!("app transition job missing valid runtime target");
+    };
+    Ok(vec![target.container_name])
+}
+
+/// Stop every container belonging to the current app topology while preserving
+/// containers and volumes for a later resume.
+pub(crate) async fn suspend_app_job(payload: &Value) -> anyhow::Result<()> {
+    for container in app_runtime_containers(payload).await? {
+        run_quiet_absent_ok("docker", &["stop", &container], &["No such container"]).await?;
+    }
+    Ok(())
+}
+
+/// Start every preserved container belonging to an app and verify the primary
+/// HTTP target after the topology is back online.
+pub(crate) async fn resume_app_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
+    for container in app_runtime_containers(payload).await? {
+        run_quiet_absent_ok("docker", &["start", &container], &["No such container"]).await?;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let Some(mut target) = health_target_from_payload(payload) else {
+        bail!("resume job missing valid health target");
+    };
+    let result = probe_health_target(cfg, &mut target).await;
+    post(cfg, single_probe_health_event(&target, &result)).await;
+    Ok(())
 }
 
 /// Concise, user-facing reasons for a failed screenshot capture. They flow
