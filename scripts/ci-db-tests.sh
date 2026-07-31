@@ -78,6 +78,14 @@ export HOSTLET_DB_TEST_REQUIRED=1
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
 export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-5}"
 export PGOPTIONS="${PGOPTIONS:+${PGOPTIONS} }-c statement_timeout=15000 -c lock_timeout=5000"
+# Deploy retries now enqueue the universal build phase. The DB suite only
+# verifies the queued records, so use non-secret loopback transport fixtures;
+# no registry process or network request is needed.
+export HOSTLET_ARTIFACT_REGISTRY_LOCAL_URL="${HOSTLET_ARTIFACT_REGISTRY_LOCAL_URL:-http://127.0.0.1:5000}"
+export HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME="${HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME:-ci-builder}"
+export HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD="${HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD:-test-only-builder-credential}"
+export HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME="${HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME:-ci-runner}"
+export HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD="${HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD:-test-only-runner-credential}"
 
 cd "${ROOT}"
 
