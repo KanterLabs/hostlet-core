@@ -358,7 +358,7 @@ async fn db_retry_deploy_job_creates_fresh_deployment_with_fresh_secrets() {
 
     let new_deployment = sqlx::query(
         "SELECT commit_sha FROM deployments
-         WHERE app_id=$1 AND status IN ('queued','running')
+         WHERE app_id=$1 AND status IN ('queued','queued_for_build','running')
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(app_id)
@@ -370,18 +370,18 @@ async fn db_retry_deploy_job_creates_fresh_deployment_with_fresh_secrets() {
 
     let new_job = sqlx::query(
         "SELECT payload_json FROM agent_jobs
-         WHERE app_id=$1 AND job_type='deploy' AND status='queued'
+         WHERE app_id=$1 AND job_type='build' AND status='queued'
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(app_id)
     .fetch_optional(&state.db)
     .await
     .unwrap()
-    .expect("a fresh deploy job must exist");
+    .expect("a fresh build job must exist");
     let new_payload: serde_json::Value = new_job.get("payload_json");
     assert_eq!(
         new_payload["env"]["K"], "fresh-value",
-        "retried deploy must carry freshly decrypted env vars"
+        "retried deployment build must carry freshly decrypted env vars"
     );
 
     assert_eq!(
