@@ -361,11 +361,15 @@ mod tests {
         let Some(state) = crate::state::db_test_state_from_env().await else {
             return;
         };
-        let user_id: Uuid = sqlx::query_scalar("SELECT user_id FROM servers WHERE id=$1")
-            .bind(state.local_server_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (github_id,login)
+             VALUES (9851,'suspension-test-user')
+             ON CONFLICT (github_id) DO UPDATE SET login=EXCLUDED.login
+             RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
         let app_id: Uuid = sqlx::query_scalar(
             "INSERT INTO apps
                (user_id,server_id,name,repo_full_name,branch,container_port,health_path,domain)

@@ -14,9 +14,11 @@ async fn db_enqueue_applies_app_queue_priority_offset_within_bands() {
     let paid_app = insert_app_2(&state, user_id).await;
     set_queue_priority_offset(&state, free_app, 3).await;
 
-    let free_urgent = enqueue(&state, Some(free_app), "deploy", 5).await;
-    let free_normal = enqueue(&state, Some(free_app), "deploy", 20).await;
-    let paid_normal = enqueue(&state, Some(paid_app), "deploy", 20).await;
+    // Keep this priority-only test independent of deploy-capacity admission,
+    // which may deliberately delay otherwise claimable deploy jobs.
+    let free_urgent = enqueue(&state, Some(free_app), "capture_screenshot", 5).await;
+    let free_normal = enqueue(&state, Some(free_app), "capture_screenshot", 20).await;
+    let paid_normal = enqueue(&state, Some(paid_app), "capture_screenshot", 20).await;
     let orphan = enqueue(&state, None, "docker_cleanup", 20).await;
 
     assert_eq!(job_priority(&state, free_urgent).await, 8);

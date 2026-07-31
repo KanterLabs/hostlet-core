@@ -786,7 +786,7 @@ mod tests {
         let app_id = insert_idle_app(state, user_id, server_id, name).await;
         sqlx::query(
             "INSERT INTO agent_jobs (server_id,app_id,job_type,status,payload_json)
-             VALUES ($1,$2,'deploy','queued','{}'::jsonb)",
+             VALUES ($1,$2,'deploy','queued','{\"capacity_reserved\":true}'::jsonb)",
         )
         .bind(server_id)
         .bind(app_id)
