@@ -411,7 +411,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <Field label="Build command" value={settings.build_command} onChange={(value) => setSettings({ ...settings, build_command: value })} />
                   <Field label="Start command" value={settings.start_command} onChange={(value) => setSettings({ ...settings, start_command: value })} />
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <SelectField label="Memory" value={settings.memory_limit_mb} onChange={(value) => setSettings({ ...settings, memory_limit_mb: value })}>
+                    <SelectField label="Memory hard cap" value={settings.memory_limit_mb} onChange={(value) => setSettings({ ...settings, memory_limit_mb: value })}>
                       <option value="">No cap</option>
                       <option value="256">256 MB</option>
                       <option value="512">512 MB</option>
