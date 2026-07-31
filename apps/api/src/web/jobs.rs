@@ -88,7 +88,9 @@ pub async fn agent_job_status(
     let user_id = context.user_id;
     let sql = format!(
         r#"
-        SELECT j.id,j.job_type,j.app_id,j.status,j.failure_summary,j.finished_at
+        SELECT j.id,j.job_type,j.app_id,j.status,j.failure_summary,j.finished_at,
+               j.payload_json->>'capacity_wait' AS capacity_wait,
+               j.payload_json->>'capacity_wait_reason' AS capacity_wait_reason
         FROM agent_jobs j
         JOIN servers s ON s.id = j.server_id
         WHERE j.id=$1
@@ -104,10 +106,16 @@ pub async fn agent_job_status(
         .await;
     match row {
         Ok(Some(row)) => {
-            let status = resolve_job_status(&state, id, &row).await;
+            let mut status = resolve_job_status(&state, id, &row).await;
+            if status == "queued"
+                && row.get::<Option<String>, _>("capacity_wait").as_deref() == Some("true")
+            {
+                status = "waiting_capacity".into();
+            }
             Json(serde_json::json!({
             "id": row.get::<Uuid, _>("id"),
             "status": status,
+            "capacityWaitReason": row.get::<Option<String>, _>("capacity_wait_reason"),
             "failure": row.get::<Option<String>, _>("failure_summary"),
             "finishedAt": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
             }))
@@ -130,6 +138,8 @@ pub async fn list_agent_jobs(
     let sql = format!(
         r#"
         SELECT j.id,j.job_type,j.app_id,j.deployment_id,j.status,j.failure_summary,
+               j.payload_json->>'capacity_wait' AS capacity_wait,
+               j.payload_json->>'capacity_wait_reason' AS capacity_wait_reason,
                j.attempt,j.max_attempts,j.claimed_by,j.created_at,j.updated_at,j.finished_at
         FROM agent_jobs j
         JOIN servers s ON s.id = j.server_id
@@ -149,12 +159,22 @@ pub async fn list_agent_jobs(
         Ok(rows) => Json(
             rows.into_iter()
                 .map(|row| {
+                    let stored_status = row.get::<String, _>("status");
+                    let status = if stored_status == "queued"
+                        && row.get::<Option<String>, _>("capacity_wait").as_deref()
+                            == Some("true")
+                    {
+                        "waiting_capacity".to_string()
+                    } else {
+                        stored_status
+                    };
                     serde_json::json!({
                         "id": row.get::<Uuid, _>("id"),
                         "type": row.get::<String, _>("job_type"),
                         "appId": row.get::<Option<Uuid>, _>("app_id"),
                         "deploymentId": row.get::<Option<Uuid>, _>("deployment_id"),
-                        "status": row.get::<String, _>("status"),
+                        "status": status,
+                        "capacityWaitReason": row.get::<Option<String>, _>("capacity_wait_reason"),
                         "failure": row.get::<Option<String>, _>("failure_summary"),
                         "attempt": row.get::<i32, _>("attempt"),
                         "maxAttempts": row.get::<i32, _>("max_attempts"),

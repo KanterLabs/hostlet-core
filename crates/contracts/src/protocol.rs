@@ -4,7 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// Current durable deployment-execution protocol spoken by Core API and agent.
-pub const DEPLOYMENT_PROTOCOL_VERSION: i32 = 3;
+pub const DEPLOYMENT_PROTOCOL_VERSION: i32 = 4;
 /// Maximum service topology retained from a deployment status report.
 ///
 /// This is deliberately independent from the much smaller runtime-log target
@@ -79,6 +79,23 @@ pub struct AgentJobHeartbeat {
 pub struct AgentJobHeartbeatReceipt {
     pub cancel_requested: bool,
     pub lease_expires_at: String,
+}
+
+/// Bounded host-level telemetry attached to the agent's websocket heartbeat.
+/// It contains capacity facts only—never process arguments, environment
+/// values, paths, or tenant identifiers.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostResourceSnapshot {
+    pub memory_total_mib: u64,
+    pub memory_available_mib: u64,
+    pub swap_used_mib: u64,
+    pub disk_total_mib: u64,
+    pub disk_free_mib: u64,
+    pub load_one: f64,
+    pub load_five: f64,
+    pub load_fifteen: f64,
+    pub running_containers: u32,
 }
 
 /// Runtime facts durably prepared by the agent before a route can be changed.

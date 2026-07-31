@@ -107,6 +107,7 @@ export type App = {
   currentDeploymentId?: string | null;
   publicExposure?: boolean | null;
   autoDeploy?: boolean | null;
+  suspendedAt?: string | null;
   server?: { id: string; name: string; kind: string; status: string; publicIp?: string | null; lastSeenAt?: string | null } | null;
   latestDeployment?: { id: string; status?: string | null; failure?: string | null; commitSha?: string | null; startedAt?: string | null; finishedAt?: string | null; runtimeMetadata?: RuntimeMetadata | null } | null;
   currentDeployment?: { status: string; publishedPort?: number | null; finishedAt?: string | null } | null;
@@ -122,7 +123,7 @@ export type App = {
 
 export type AgentJob = {
   id: string;
-  status: "queued" | "running" | "success" | "failed";
+  status: "queued" | "waiting_capacity" | "running" | "success" | "failed";
   failure?: string | null;
 };
 
@@ -176,5 +177,7 @@ export type BusyAction =
   | "health"
   | "browser"
   | "restart"
+  | "pause"
+  | "resume"
   | "screenshot"
   | "";

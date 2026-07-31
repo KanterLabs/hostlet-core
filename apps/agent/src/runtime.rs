@@ -243,9 +243,16 @@ pub(crate) async fn connect_loop(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
+                let resources = match collect_host_resource_snapshot().await {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to collect host resource snapshot");
+                        None
+                    }
+                };
                 send_websocket_message(
                     &mut ws,
-                    Message::Text(json!({"type":"heartbeat"}).to_string()),
+                    Message::Text(json!({"type":"heartbeat","resources":resources}).to_string()),
                 ).await?;
             }
             _ = job_claim.tick() => {
@@ -623,6 +630,8 @@ pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()
             Ok(())
         }
         Some("stop_container") => stop_container_job(&payload).await,
+        Some("suspend_app") | Some("stop_previous_deployment") => suspend_app_job(&payload).await,
+        Some("resume_app") => resume_app_job(&cfg, &payload).await,
         Some("docker_cleanup") => docker_cleanup_job(&payload).await,
         _ => Ok(()),
     }

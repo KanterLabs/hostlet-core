@@ -13,6 +13,7 @@ import {
   GitBranch,
   Globe2,
   KeyRound,
+  Pause,
   Play,
   RotateCcw,
   Save,
@@ -115,6 +116,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     checkHealthNow,
     checkBrowserNow,
     restartContainer,
+    togglePause,
     captureScreenshot,
     deleteEnvVar,
   } = useAppActions({
@@ -252,6 +254,16 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <button className="button-secondary" disabled={!!busyAction || !app?.currentDeploymentId} onClick={restartContainer}>
                     <RotateCcw size={16} />
                     {busyAction === "restart" ? "Restarting..." : "Restart"}
+                  </button>
+                  <button className="button-secondary" disabled={!!busyAction || active || !app?.currentDeploymentId} onClick={togglePause}>
+                    {app?.suspendedAt ? <Play size={16} /> : <Pause size={16} />}
+                    {busyAction === "pause"
+                      ? "Pausing..."
+                      : busyAction === "resume"
+                        ? "Resuming..."
+                        : app?.suspendedAt
+                          ? "Resume"
+                          : "Pause"}
                   </button>
                 </div>
               </div>

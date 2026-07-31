@@ -16,6 +16,7 @@ pub mod operator;
 pub mod password;
 pub mod policies;
 pub mod rate_limit;
+pub mod readiness;
 pub mod runtime_logs;
 pub mod runtime_recovery;
 pub mod screenshots;
@@ -23,6 +24,7 @@ pub mod serialization;
 pub mod server_capacity;
 pub mod state;
 pub mod storage;
+pub mod suspensions;
 pub mod update_checks;
 pub mod web;
 
@@ -53,6 +55,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         .init();
 
     let state = AppState::from_env().await?;
+    server_capacity::configure_local_server_capacity_from_env(&state).await?;
     runtime_recovery::recover_startup_state(&state).await?;
     // One-shot orphan sweep: runs once at startup in the background to remove
     // screenshot files that have no app_screenshots row. Not added to the
@@ -62,6 +65,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         screenshots::sweep_orphaned_screenshot_files(&sweep_state).await;
     });
     runtime_recovery::spawn_runtime_recovery_task(state.clone());
+    server_capacity::spawn_capacity_scheduler_task(state.clone());
     // Unlike the orphan sweep above, this one does recur: it periodically
     // re-queues portfolio screenshot captures for apps whose newest
     // screenshot has gone stale, even though a screenshot already exists.
@@ -101,6 +105,7 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
     let guard_state = state.clone();
     Ok(Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/readyz", get(readiness::readyz))
         .route(
             "/install-agent.sh",
             get(|| async {
@@ -185,6 +190,8 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
             post(web::check_app_health_now),
         )
         .route("/api/apps/:id/restart", post(web::restart_app_container))
+        .route("/api/apps/:id/pause", post(suspensions::pause_app))
+        .route("/api/apps/:id/resume", post(suspensions::resume_app))
         .route(
             "/api/apps/:id/screenshots",
             post(screenshots::capture_app_screenshot),

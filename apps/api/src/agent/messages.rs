@@ -81,7 +81,7 @@ pub(in crate::agent) async fn handle_agent_message(
         return;
     }
     match msg.get("type").and_then(|v| v.as_str()) {
-        Some("heartbeat") => handle_heartbeat(state, server_id).await,
+        Some("heartbeat") => handle_heartbeat(state, server_id, &msg).await,
         Some("deployment_status") => handle_deployment_status(state, server_id, &msg).await,
         Some("log") => handle_log(state, server_id, &msg).await,
         Some("resource_stats") => handle_resource_stats(state, server_id, &msg).await,
@@ -93,11 +93,35 @@ pub(in crate::agent) async fn handle_agent_message(
     }
 }
 
-async fn handle_heartbeat(state: &AppState, server_id: Uuid) {
-    let _ = sqlx::query("UPDATE servers SET status='online', last_seen_at=now() WHERE id=$1")
-        .bind(server_id)
-        .execute(&state.db)
-        .await;
+async fn handle_heartbeat(state: &AppState, server_id: Uuid, msg: &serde_json::Value) {
+    let snapshot = msg
+        .get("resources")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<hostlet_contracts::HostResourceSnapshot>(value).ok()
+        })
+        .filter(valid_host_resource_snapshot);
+    let _ = sqlx::query(
+        "UPDATE servers
+         SET status='online',last_seen_at=now(),
+             resource_snapshot_json=COALESCE($2,resource_snapshot_json),
+             resource_snapshot_at=CASE WHEN $2::jsonb IS NULL THEN resource_snapshot_at ELSE now() END
+         WHERE id=$1",
+    )
+    .bind(server_id)
+    .bind(snapshot.and_then(|value| serde_json::to_value(value).ok()))
+    .execute(&state.db)
+    .await;
+}
+
+fn valid_host_resource_snapshot(snapshot: &hostlet_contracts::HostResourceSnapshot) -> bool {
+    snapshot.memory_total_mib > 0
+        && snapshot.memory_available_mib <= snapshot.memory_total_mib
+        && snapshot.disk_total_mib > 0
+        && snapshot.disk_free_mib <= snapshot.disk_total_mib
+        && snapshot.load_one.is_finite()
+        && snapshot.load_five.is_finite()
+        && snapshot.load_fifteen.is_finite()
 }
 
 /// Return the agent-reported top-level `container_name` only when it is a managed
