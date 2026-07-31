@@ -130,6 +130,7 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
             health_path,
             git_sync_duration_ms,
             web_image.as_deref(),
+            false,
         )
         .await;
     }
@@ -292,10 +293,191 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         route_generation,
         local_url.as_deref(),
         Some(&runtime_metadata),
-        false,
+        p.get("type").and_then(Value::as_str) == Some("rollback"),
     )
     .await?;
     Ok(())
+}
+
+/// Activates a previously built immutable image on the app runner. Remote build
+/// jobs use this path after the API has verified and persisted the OCI manifest.
+pub(crate) async fn release_single_image(
+    cfg: Config,
+    p: Value,
+    image: String,
+) -> anyhow::Result<()> {
+    let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
+    let app_id = Uuid::parse_str(p["app_id"].as_str().context("app_id")?)?;
+    let app_name = app_slug(&format!("app-{app_id}"));
+    let route_key = p
+        .get("route_key")
+        .and_then(Value::as_str)
+        .map(app_slug)
+        .unwrap_or_else(|| app_name.clone());
+    let port = p["container_port"].as_i64().context("container_port")?;
+    let domain = p["domain"].as_str().context("domain")?;
+    let health_path = p["health_path"].as_str().unwrap_or("/");
+    validate_port(port)?;
+    validate_domain(domain)?;
+    validate_health_path(health_path)?;
+
+    let runtime_metadata = p
+        .pointer("/artifact_manifest/runtimeMetadata")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let hardening = if runtime_metadata
+        .get("readOnlyRootFilesystem")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        ContainerHardening::WritableRootFs
+    } else {
+        ContainerHardening::ReadOnlyRootFs
+    };
+
+    status(&cfg, deployment_id, "starting", None).await;
+    let container = format!("hostlet-{app_name}-{deployment_id}");
+    let container_start_started = Instant::now();
+    let internal_port = run_app_container(
+        &cfg,
+        deployment_id,
+        app_id,
+        &image,
+        &container,
+        port,
+        hardening,
+        &p,
+    )
+    .await?;
+    let container_start_duration_ms = container_start_started.elapsed().as_millis();
+    status(&cfg, deployment_id, "health_checking", None).await;
+    let health_check_started = Instant::now();
+    let health_check_duration =
+        match wait_health(&cfg, deployment_id, &container, internal_port, health_path).await {
+            Ok(duration) => duration,
+            Err(err) => {
+                log(&cfg, deployment_id, "stderr", "Recent container logs:").await;
+                let _ = run_log(
+                    &cfg,
+                    deployment_id,
+                    "docker",
+                    &["logs", "--tail", "80", &container],
+                )
+                .await;
+                stop_failed_container_after_health_check(&cfg, deployment_id, &container).await;
+                let failure = health_check_failure_message(&err);
+                let runtime_metadata = add_startup_runtime_metadata(
+                    runtime_metadata,
+                    container_start_duration_ms,
+                    health_check_started.elapsed().as_millis(),
+                );
+                status_extra(
+                    &cfg,
+                    deployment_id,
+                    "failed",
+                    StatusDetails {
+                        failure: Some(&failure),
+                        image: Some(&image),
+                        container: Some(&container),
+                        published_port: Some(internal_port),
+                        runtime_metadata: Some(runtime_metadata),
+                        ..StatusDetails::default()
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+    let runtime_metadata = add_startup_runtime_metadata(
+        runtime_metadata,
+        container_start_duration_ms,
+        health_check_duration.as_millis(),
+    );
+    let route_generation = prepare_candidate_activation(
+        &cfg,
+        &p,
+        deployment_id,
+        Some(&image),
+        &container,
+        internal_port,
+        None,
+        runtime_metadata.clone(),
+        Vec::new(),
+    )
+    .await?;
+    let mut local_url = None;
+    let routing_started = Instant::now();
+    let routing_result = if cfg.local_mode {
+        if let Some(router) = &cfg.local_router {
+            apply_local_caddy_route_versioned(
+                &cfg,
+                deployment_id,
+                router,
+                &route_key,
+                domain,
+                internal_port,
+                route_generation,
+            )
+            .await
+        } else {
+            Ok(())
+        }
+    } else {
+        apply_caddy_route_versioned(
+            &cfg,
+            deployment_id,
+            &route_key,
+            domain,
+            internal_port,
+            route_generation,
+        )
+        .await
+    };
+    let runtime_metadata =
+        add_routing_runtime_metadata(runtime_metadata, routing_started.elapsed().as_millis());
+    if let Err(err) = routing_result {
+        let failure = format!("Routing failed after health check: {err}. The container was left running and the previous working route was preserved when possible.");
+        status_extra(
+            &cfg,
+            deployment_id,
+            "failed",
+            StatusDetails {
+                failure: Some(&failure),
+                image: Some(&image),
+                container: Some(&container),
+                published_port: Some(internal_port),
+                runtime_metadata: Some(runtime_metadata.clone()),
+                ..StatusDetails::default()
+            },
+        )
+        .await;
+        return Err(reported_deployment_failure(failure));
+    }
+    if cfg.local_mode {
+        let url = if cfg.local_router.is_some() {
+            domain.to_string()
+        } else {
+            format!("localhost:{internal_port}")
+        };
+        log(
+            &cfg,
+            deployment_id,
+            "stdout",
+            &format!("Local app is available at https://{url}"),
+        )
+        .await;
+        local_url = Some(url);
+    }
+    commit_candidate_activation(
+        &cfg,
+        &p,
+        deployment_id,
+        route_generation,
+        local_url.as_deref(),
+        Some(&runtime_metadata),
+        p.get("type").and_then(Value::as_str) == Some("rollback"),
+    )
+    .await
 }
 
 async fn stop_failed_container_after_health_check(
@@ -319,13 +501,13 @@ fn health_check_failure_message(err: &anyhow::Error) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ContainerHardening {
+pub(crate) enum ContainerHardening {
     ReadOnlyRootFs,
     WritableRootFs,
 }
 
 impl ContainerHardening {
-    fn for_generated_runtime(generated: bool) -> Self {
+    pub(crate) fn for_generated_runtime(generated: bool) -> Self {
         if generated {
             Self::WritableRootFs
         } else {
@@ -333,7 +515,7 @@ impl ContainerHardening {
         }
     }
 
-    fn read_only_root_filesystem(self) -> bool {
+    pub(crate) fn read_only_root_filesystem(self) -> bool {
         matches!(self, Self::ReadOnlyRootFs)
     }
 
@@ -354,15 +536,15 @@ impl ContainerHardening {
 
 /// Outcome of building the deployment image: the metadata reported to the API
 /// plus the container hardening profile needed to run that image.
-struct BuiltImage {
-    runtime_metadata: Value,
-    hardening: ContainerHardening,
+pub(crate) struct BuiltImage {
+    pub(crate) runtime_metadata: Value,
+    pub(crate) hardening: ContainerHardening,
 }
 
 /// Prepares the build plan, writes the `.dockerignore` for generated builds, and
 /// builds the image via buildx (with a local cache) or a plain `docker build`.
 #[allow(clippy::too_many_arguments)]
-async fn build_image(
+pub(crate) async fn build_image(
     cfg: &Config,
     deployment_id: Uuid,
     app_name: &str,
@@ -450,7 +632,7 @@ async fn build_image(
     }
     let build_started = Instant::now();
     let build_result: anyhow::Result<()> = async {
-        if docker_buildx_available().await {
+        if docker_buildx_available().await && docker_buildx_supports_local_cache().await {
             let cache_root = cfg.workdir.join("build-cache").join(app_name);
             let cache_next = cfg
                 .workdir
@@ -470,6 +652,20 @@ async fn build_image(
             run_log(cfg, deployment_id, "docker", &args).await?;
             let _ = tokio::fs::remove_dir_all(&cache_root).await;
             let _ = tokio::fs::rename(&cache_next, &cache_root).await;
+        } else if docker_buildx_available().await {
+            log(
+                cfg,
+                deployment_id,
+                "stdout",
+                "Docker buildx uses the Docker driver; building without an external cache.",
+            )
+            .await;
+            let args = buildx_args_without_cache(
+                image,
+                build.dockerfile.to_str().unwrap(),
+                build.context.to_str().unwrap(),
+            );
+            run_log(cfg, deployment_id, "docker", &args).await?;
         } else {
             log(
                 cfg,

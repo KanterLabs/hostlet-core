@@ -70,7 +70,8 @@ type Deployment = {
 };
 
 type DeploymentQueue = {
-  status: "queued" | "building" | "not_applicable";
+  status: "queued" | "waiting_builder" | "waiting_capacity" | "building" | "not_applicable";
+  reason?: string | null;
   position?: number | null;
   deploysAhead?: number | null;
   updatedAt?: string | null;
@@ -79,6 +80,18 @@ type DeploymentQueue = {
 function queueMessage(queue?: DeploymentQueue | null) {
   if (!queue || queue.status === "not_applicable") return null;
   if (queue.status === "building") return "Your app is building now";
+  if (queue.status === "waiting_builder") {
+    const messages: Record<string, string> = {
+      control_plane_agent_requires_upgrade: "Waiting for the control-plane agent to be upgraded",
+      control_plane_builder_offline: "Waiting for the control-plane builder to come online",
+      no_enrolled_builder: "Waiting for a builder to be enrolled in this pool",
+      no_compatible_builder_platform: "Waiting for a builder that supports this app server's platform",
+      builder_agents_require_upgrade: "Waiting for a compatible builder agent upgrade",
+      compatible_builders_draining: "Waiting for a compatible builder to leave drain mode",
+      no_online_compatible_builder: "Waiting for a compatible builder to come online",
+    };
+    return messages[queue.reason || ""] || "Waiting for a compatible build server";
+  }
   const deploysAhead = Math.max(0, queue.deploysAhead ?? 0);
   if (deploysAhead === 0) return "You're next in line";
   return `${deploysAhead} ${deploysAhead === 1 ? "deploy" : "deploys"} ahead of you`;

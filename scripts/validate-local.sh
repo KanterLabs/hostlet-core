@@ -60,6 +60,10 @@ compose_config() {
   HOSTLET_WEB_IMAGE="${HOSTLET_WEB_IMAGE:-ghcr.io/shanekanterman04/hostlet-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
   HOSTLET_AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-ghcr.io/shanekanterman04/hostlet-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
   HOSTLET_SCREENSHOTTER_IMAGE="${HOSTLET_SCREENSHOTTER_IMAGE:-ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+  HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME="${HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME:-hostlet-builder}" \
+  HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD="${HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD:-$(ci_test_secret_value registry-push)}" \
+  HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME="${HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME:-hostlet-runner}" \
+  HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD="${HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD:-$(ci_test_secret_value registry-pull)}" \
   docker compose -f "$1" config >/dev/null
 }
 compose_config infra/docker-compose.yml

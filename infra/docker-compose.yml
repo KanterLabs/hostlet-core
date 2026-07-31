@@ -17,6 +17,14 @@ services:
     environment:
       HOSTLET_IMAGE_TAG: ${HOSTLET_IMAGE_TAG:-dev}
       HOSTLET_IMAGE_REGISTRY: ${HOSTLET_IMAGE_REGISTRY:-local}
+      HOSTLET_AGENT_IMAGE: ${HOSTLET_AGENT_IMAGE:-hostlet-agent:dev}
+      HOSTLET_ARTIFACT_REGISTRY_URL: ${HOSTLET_ARTIFACT_REGISTRY_URL:-http://127.0.0.1:5000}
+      HOSTLET_ARTIFACT_REGISTRY_INTERNAL_URL: http://registry:5000
+      HOSTLET_ARTIFACT_REGISTRY_LOCAL_URL: http://127.0.0.1:5000
+      HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME: ${HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME:-hostlet-builder}
+      HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD: ${HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD:-}
+      HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME: ${HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME:-hostlet-runner}
+      HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD: ${HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD:-}
       DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}:${POSTGRES_PASSWORD:?Run hostlet init first}@postgres:5432/${POSTGRES_DB:-hostlet}
       BIND_ADDR: 0.0.0.0:8080
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
@@ -55,6 +63,17 @@ services:
       - hostlet-screenshots:/var/lib/hostlet/screenshots
     depends_on:
       - postgres
+      - registry
+
+  registry:
+    image: ghcr.io/project-zot/zot-linux-amd64:v2.1.18
+    command: serve /etc/zot/config.json
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ./zot-config.json:/etc/zot/config.json:ro
+      - ../.hostlet/registry/htpasswd:/etc/zot/htpasswd:ro
+      - hostlet-registry:/var/lib/registry
 
   local-agent:
     image: rust:latest
@@ -135,3 +154,4 @@ volumes:
   hostlet-postgres:
   hostlet-agent:
   hostlet-screenshots:
+  hostlet-registry:

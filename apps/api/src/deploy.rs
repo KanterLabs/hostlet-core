@@ -3,6 +3,7 @@ mod recovery;
 pub(crate) use recovery::*;
 
 use crate::{auth::request_context, state::AppState};
+use anyhow::Context;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -15,14 +16,18 @@ use axum::{
 use deploy_app::{DeployApp, DEPLOY_APP_COLUMNS};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
 pub(crate) const ACTIVE_DEPLOYMENT_STATUSES: &[&str] = &[
     "queued",
+    "queued_for_build",
     "running",
     "building",
+    "publishing",
+    "queued_for_release",
+    "pulling",
     "starting",
     "health_checking",
     "routing",
@@ -34,6 +39,7 @@ pub(crate) const TEARDOWN_FENCE_PAYLOAD_KEY: &str = "teardown_fence";
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeploymentQueue {
     pub status: String,
+    pub reason: Option<String>,
     pub position: Option<i64>,
     pub deploys_ahead: i64,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -43,6 +49,7 @@ impl DeploymentQueue {
     fn not_applicable(updated_at: Option<chrono::DateTime<chrono::Utc>>) -> Self {
         Self {
             status: "not_applicable".to_string(),
+            reason: None,
             position: None,
             deploys_ahead: 0,
             updated_at,
@@ -128,11 +135,13 @@ pub(crate) async fn deployment_queue_status(
     deployment_status: &str,
 ) -> DeploymentQueue {
     let job = match sqlx::query(
-        "SELECT id,status,priority,created_at,updated_at,
+        "SELECT id,status,priority,created_at,updated_at,job_type,build_pool_id,
                 payload_json->>'capacity_wait' AS capacity_wait,
-                payload_json->>'capacity_wait_reason' AS capacity_wait_reason
+                payload_json->>'capacity_wait_reason' AS capacity_wait_reason,
+                (SELECT waiting_reason FROM deployment_builds b
+                 WHERE b.deployment_id=$1) AS builder_waiting_reason
          FROM agent_jobs
-         WHERE deployment_id=$1 AND job_type IN ('deploy','rollback')
+         WHERE deployment_id=$1 AND job_type IN ('deploy','rollback','build','release')
          ORDER BY created_at DESC
          LIMIT 1",
     )
@@ -155,6 +164,7 @@ pub(crate) async fn deployment_queue_status(
                 "not_applicable"
             }
             .to_string(),
+            reason: None,
             position: None,
             deploys_ahead: 0,
             updated_at: None,
@@ -166,34 +176,53 @@ pub(crate) async fn deployment_queue_status(
     if job_status == "queued" {
         let priority = job.get::<i32, _>("priority");
         let created_at = job.get::<chrono::DateTime<chrono::Utc>, _>("created_at");
-        let deploys_ahead = match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::bigint
-             FROM agent_jobs
-             WHERE server_id=$1
-               AND status='queued'
-               AND COALESCE(payload_json, '{}'::jsonb) <> '{}'::jsonb
-               AND job_type IN ('deploy','rollback')
-               AND (priority < $2 OR (priority = $2 AND created_at < $3))",
-        )
-        .bind(server_id)
-        .bind(priority)
-        .bind(created_at)
-        .fetch_one(&state.db)
-        .await
-        {
+        let job_type = job.get::<String, _>("job_type");
+        let build_pool_id = job.get::<Option<Uuid>, _>("build_pool_id");
+        let count = if job_type == "build" {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::bigint FROM agent_jobs
+                 WHERE build_pool_id=$1 AND status='queued' AND job_type='build'
+                   AND COALESCE(payload_json, '{}'::jsonb) <> '{}'::jsonb
+                   AND (priority < $2 OR (priority = $2 AND created_at < $3))",
+            )
+            .bind(build_pool_id)
+            .bind(priority)
+            .bind(created_at)
+            .fetch_one(&state.db)
+            .await
+        } else {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::bigint FROM agent_jobs
+                 WHERE server_id=$1 AND status='queued'
+                   AND COALESCE(payload_json, '{}'::jsonb) <> '{}'::jsonb
+                   AND job_type IN ('deploy','rollback','release')
+                   AND (priority < $2 OR (priority = $2 AND created_at < $3))",
+            )
+            .bind(server_id)
+            .bind(priority)
+            .bind(created_at)
+            .fetch_one(&state.db)
+            .await
+        };
+        let deploys_ahead = match count {
             Ok(count) => count,
             Err(err) => {
                 tracing::warn!(error = %err, deployment_id = %deployment_id, "failed to count deployment queue position");
                 return DeploymentQueue::not_applicable(Some(updated_at));
             }
         };
+        let builder_waiting_reason = job.get::<Option<String>, _>("builder_waiting_reason");
         return DeploymentQueue {
-            status: if job.get::<Option<String>, _>("capacity_wait").as_deref() == Some("true") {
+            status: if builder_waiting_reason.is_some() {
+                "waiting_builder"
+            } else if job.get::<Option<String>, _>("capacity_wait").as_deref() == Some("true") {
                 "waiting_capacity"
             } else {
                 "queued"
             }
             .to_string(),
+            reason: builder_waiting_reason
+                .or_else(|| job.get::<Option<String>, _>("capacity_wait_reason")),
             position: Some(deploys_ahead + 1),
             deploys_ahead,
             updated_at: Some(updated_at),
@@ -209,6 +238,7 @@ pub(crate) async fn deployment_queue_status(
             "not_applicable"
         }
         .to_string(),
+        reason: None,
         position: None,
         deploys_ahead: 0,
         updated_at: Some(updated_at),
@@ -454,7 +484,17 @@ pub async fn create_and_send_deploy_with_approval(
                 json!(approved_backing_spec_hash),
             );
         }
-        send_job(state, server_id, deployment_id, payload).await?;
+        let pool = selected_build_pool(state, app.build_pool_id).await?;
+        enqueue_build(
+            state,
+            pool.id,
+            &pool.provider,
+            server_id,
+            deployment_id,
+            app_id,
+            payload,
+        )
+        .await?;
         Ok(())
     }
     .await;
@@ -478,6 +518,8 @@ pub async fn create_and_send_deploy_with_approval(
     .await;
     Ok(deployment_id)
 }
+
+include!("deploy/build_queue.rs");
 
 async fn resolve_commit_sha(
     state: &AppState,
@@ -526,8 +568,18 @@ pub(crate) async fn create_and_send_rollback(
         anyhow::bail!("rollback is not supported for this runtime");
     }
     let current: Option<Uuid> = app.get("current_deployment_id");
-    let prev = sqlx::query("SELECT id,image_tag,container_name,published_port,compose_project,runtime_metadata FROM deployments WHERE app_id=$1 AND status='success' AND ($2::uuid IS NULL OR id <> $2) ORDER BY finished_at DESC LIMIT 1")
-        .bind(app_id).bind(current).fetch_optional(&state.db).await?;
+    let prev = sqlx::query(
+        "SELECT id,image_tag,container_name,published_port,compose_project,
+                                   runtime_metadata,artifact_manifest_json
+                            FROM deployments
+                            WHERE app_id=$1 AND status='success'
+                              AND ($2::uuid IS NULL OR id <> $2)
+                            ORDER BY finished_at DESC LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(current)
+    .fetch_optional(&state.db)
+    .await?;
     let Some(prev) = prev else {
         anyhow::bail!("no previous successful deployment is available");
     };
@@ -590,6 +642,26 @@ pub(crate) async fn create_and_send_rollback(
         .bind(prev.get::<Uuid, _>("id"))
         .execute(&state.db)
         .await?;
+        let artifact_manifest = prev
+            .try_get::<serde_json::Value, _>("artifact_manifest_json")
+            .unwrap_or_else(|_| json!({}));
+        let artifact_registry = if artifact_manifest
+            .get("schemaVersion")
+            .and_then(Value::as_u64)
+            == Some(hostlet_contracts::BUILD_ARTIFACT_SCHEMA_VERSION as u64)
+        {
+            let url = required_registry_env("HOSTLET_ARTIFACT_REGISTRY_URL")?;
+            Some(json!({
+                "url": url,
+                "host": registry_host(&url)?,
+                "repository": format!("hostlet/apps/{app_id}/artifacts"),
+                "tag": format!("deployment-{}", prev.get::<Uuid, _>("id")),
+                "pullUsername": required_registry_env("HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME")?,
+                "pullPassword": required_registry_env("HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD")?,
+            }))
+        } else {
+            None
+        };
         let payload = json!({
             "type": "rollback",
             "deployment_id": rollback_id,
@@ -605,6 +677,8 @@ pub(crate) async fn create_and_send_rollback(
             "target_compose_project": prev.get::<Option<String>,_>("compose_project"),
             "target_runtime_metadata": prev.get::<serde_json::Value,_>("runtime_metadata"),
             "target_services": target_services,
+            "artifact_manifest": artifact_manifest,
+            "artifact_registry": artifact_registry,
         });
         send_job(state, server_id, rollback_id, payload).await?;
         Ok(())
@@ -862,6 +936,7 @@ pub(crate) async fn insert_agent_job_in_transaction(
 
 fn required_protocol_version(job_type: &str, payload: &serde_json::Value) -> i32 {
     match job_type {
+        "build" | "release" => 6,
         "suspend_app" | "resume_app" | "stop_previous_deployment" => 4,
         "deploy"
             if payload
@@ -902,55 +977,7 @@ pub async fn job_signing_secret_for_server(
     }
 }
 
-#[cfg(test)]
-fn is_active_deployment_status(status: &str) -> bool {
-    ACTIVE_DEPLOYMENT_STATUSES.contains(&status)
-}
-
-fn route_key(app_id: Uuid) -> String {
-    format!("app-{app_id}")
-}
-
-fn rollback_supported_for_runtime(runtime_kind: &str) -> bool {
-    matches!(runtime_kind, "single" | "compose")
-}
-
-/// Which storage quota scope was exceeded, determining the user-facing message.
-#[derive(Debug, PartialEq)]
-enum StorageScope {
-    /// Account-wide cap: total footprint across all apps owned by the user.
-    Account,
-    /// Per-app cap: image + volumes for this one app.
-    PerApp,
-}
-
-/// Pure: returns the over-quota error message when `used_bytes >= limit_bytes`,
-/// `None` otherwise.  No I/O; extracts the decision from `create_and_send_deploy`
-/// so it can be unit-tested independently of the database.
-fn storage_over_quota_error(
-    used_bytes: i64,
-    limit_bytes: i64,
-    scope: StorageScope,
-) -> Option<String> {
-    if used_bytes < limit_bytes {
-        return None;
-    }
-    let limit_mb = limit_bytes / (1024 * 1024);
-    let used_mb = used_bytes / (1024 * 1024);
-    let msg = match scope {
-        StorageScope::Account => format!(
-            "Your projects are over the {limit_mb} MB account storage limit \
-             ({used_mb} MB used by their images + volumes). \
-             Remove a project, shrink an image, or upgrade your plan before deploying."
-        ),
-        StorageScope::PerApp => format!(
-            "This app is over its {limit_mb} MB storage limit \
-             ({used_mb} MB used by its image + volumes). \
-             Free space, shrink the image, or raise the limit before deploying."
-        ),
-    };
-    Some(msg)
-}
+include!("deploy/helpers.rs");
 
 #[cfg(test)]
 #[path = "deploy/tests.rs"]

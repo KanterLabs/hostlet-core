@@ -4,7 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// Current durable deployment-execution protocol spoken by Core API and agent.
-pub const DEPLOYMENT_PROTOCOL_VERSION: i32 = 4;
+pub const DEPLOYMENT_PROTOCOL_VERSION: i32 = 6;
 /// Maximum service topology retained from a deployment status report.
 ///
 /// This is deliberately independent from the much smaller runtime-log target

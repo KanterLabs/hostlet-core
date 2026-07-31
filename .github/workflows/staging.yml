@@ -96,9 +96,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: scripts/ci-self-hosted-deploy-e2e.sh
 
+  remote-build:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
+    runs-on: homelab-heavy
+    env:
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - run: scripts/ci-remote-build-e2e.sh
+
   images:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    needs: [secrets, rust, database, web, topology-e2e]
+    needs: [secrets, rust, database, web, topology-e2e, remote-build]
     runs-on: homelab-heavy
     steps:
       - name: Isolate docker credentials for this run

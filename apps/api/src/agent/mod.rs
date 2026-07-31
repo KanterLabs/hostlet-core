@@ -19,6 +19,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod auth;
+pub(crate) mod build_execution;
+pub mod build_fleet;
 mod messages;
 mod routes;
 mod socket;

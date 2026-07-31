@@ -1,0 +1,53 @@
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "commit": false,
+    "dedupe": true,
+    "gc": true,
+    "gcDelay": "15m",
+    "gcInterval": "1h",
+    "retention": {
+      "dryRun": false,
+      "delay": "24h",
+      "policies": [
+        {
+          "repositories": ["hostlet/apps/**"],
+          "deleteUntagged": true,
+          "keepTags": [
+            {
+              "patterns": ["deployment-.*"],
+              "mostRecentlyPushedCount": 3,
+              "pushedWithin": "168h"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "auth": {
+      "failDelay": 2,
+      "htpasswd": { "path": "/etc/zot/htpasswd" }
+    },
+    "accessControl": {
+      "repositories": {
+        "hostlet/apps/**": {
+          "policies": [
+            {
+              "users": ["hostlet-builder"],
+              "actions": ["read", "create", "update", "delete"]
+            },
+            {
+              "users": ["hostlet-runner"],
+              "actions": ["read"]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "log": { "level": "info" }
+}

@@ -194,7 +194,17 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
          compose_project=COALESCE($6,compose_project), \
          runtime_metadata=CASE WHEN $7::jsonb IS NULL THEN runtime_metadata ELSE $7::jsonb END, \
          finished_at=CASE WHEN $1 IN ('success','failed','rolled_back') THEN now() ELSE finished_at END \
-         WHERE id=$8 AND server_id=$9 AND status = ANY($10)",
+         WHERE id=$8
+           AND (
+             server_id=$9
+             OR EXISTS (
+               SELECT 1 FROM agent_jobs j
+               WHERE j.deployment_id=$8 AND j.server_id=$9 AND j.job_type='build'
+                 AND j.status IN ('claimed','running')
+                 AND $1 IN ('building','publishing','failed')
+             )
+           )
+           AND status = ANY($10)",
     )
     .bind(&status)
     .bind(msg.get("image_tag").and_then(|v| v.as_str()))
@@ -385,7 +395,13 @@ async fn handle_log(state: &AppState, server_id: Uuid, msg: &serde_json::Value) 
     let inserted = sqlx::query(
         "INSERT INTO deployment_logs (deployment_id,stream,line)
                      SELECT $1,$2,$3
-                     WHERE EXISTS (SELECT 1 FROM deployments WHERE id=$1 AND server_id=$4)
+                     WHERE EXISTS (
+                       SELECT 1 FROM deployments WHERE id=$1 AND server_id=$4
+                       UNION ALL
+                       SELECT 1 FROM agent_jobs
+                       WHERE deployment_id=$1 AND server_id=$4 AND job_type='build'
+                         AND status IN ('claimed','running')
+                     )
                        AND (SELECT count(*) FROM deployment_logs WHERE deployment_id=$1) < $5",
     )
     .bind(id)
@@ -666,7 +682,7 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
         "UPDATE agent_jobs
                  SET status=$1,
                      failure_summary=$2,
-                     payload_json=CASE WHEN $1 IN ('success','failed') THEN payload_json - 'env' - 'github_token' ELSE payload_json END,
+                     payload_json=CASE WHEN $1 IN ('success','failed') THEN payload_json - 'env' - 'github_token' - 'artifact_registry' ELSE payload_json END,
                      updated_at=now(),
                      lease_expires_at=CASE
                        WHEN $1 IN ('claimed','running') THEN now() + interval '5 minutes'
@@ -675,6 +691,7 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
                      END,
                      finished_at=CASE WHEN $1 IN ('success','failed') THEN now() ELSE finished_at END
                  WHERE id=$3 AND server_id=$4
+                   AND (job_type <> 'build' OR $1 IN ('claimed','running'))
                    AND status IN ('queued','claimed','running')
                  RETURNING job_type,app_id,deployment_id",
     )
