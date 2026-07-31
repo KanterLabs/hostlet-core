@@ -34,13 +34,15 @@ pub(crate) enum CapacityDecision {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct RuntimeDemand {
-    memory_mb: i64,
+    reserved_memory_mb: i64,
     services: i64,
 }
 
 impl std::ops::AddAssign for RuntimeDemand {
     fn add_assign(&mut self, rhs: Self) {
-        self.memory_mb = self.memory_mb.saturating_add(rhs.memory_mb);
+        self.reserved_memory_mb = self
+            .reserved_memory_mb
+            .saturating_add(rhs.reserved_memory_mb);
         self.services = self.services.saturating_add(rhs.services);
     }
 }
@@ -217,7 +219,10 @@ fn runtime_demand(runtime_config: &Value) -> RuntimeDemand {
         .saturating_add(add_ons)
         .saturating_add(generated_extra);
     RuntimeDemand {
-        memory_mb: explicit_memory.unwrap_or_else(|| {
+        // Admission accounting is intentionally independent from the Docker
+        // hard limit. A single service reserves 128 MiB of scheduler budget but
+        // may grow to its configured cgroup cap at runtime.
+        reserved_memory_mb: explicit_memory.unwrap_or_else(|| {
             128_i64.saturating_add(inferred_services.saturating_sub(1).saturating_mul(96))
         }),
         services: explicit_services.unwrap_or(inferred_services),
@@ -326,7 +331,7 @@ pub(crate) async fn capacity_decision_in_transaction(
     demand += candidate.demand;
     if budget
         .max_runtime_memory_mb
-        .is_some_and(|limit| demand.memory_mb > i64::from(limit))
+        .is_some_and(|limit| demand.reserved_memory_mb > i64::from(limit))
     {
         return Ok(CapacityDecision::Waiting("runtime_memory"));
     }
@@ -344,8 +349,10 @@ pub(crate) async fn capacity_decision_in_transaction(
     if let Some(snapshot) = budget.snapshot {
         if budget.min_available_memory_mb.is_some_and(|minimum| {
             snapshot.memory_available_mib
-                < u64::try_from(i64::from(minimum).saturating_add(candidate.demand.memory_mb))
-                    .unwrap_or(u64::MAX)
+                < u64::try_from(
+                    i64::from(minimum).saturating_add(candidate.demand.reserved_memory_mb),
+                )
+                .unwrap_or(u64::MAX)
         }) {
             return Ok(CapacityDecision::Waiting("live_memory"));
         }
@@ -527,6 +534,39 @@ async fn ensure_server_has_capacity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_runtime_demand_reserves_less_than_the_container_hard_cap() {
+        let demand = runtime_demand(&serde_json::json!({"memory_limit_mb": 512}));
+
+        assert_eq!(demand.reserved_memory_mb, 128);
+        assert_eq!(demand.services, 1);
+    }
+
+    #[test]
+    fn runtime_demand_adds_headroom_for_inferred_services() {
+        let demand = runtime_demand(&serde_json::json!({
+            "compose": {"addOns": [{}, {}]},
+            "generatedTopology": {}
+        }));
+
+        assert_eq!(demand.reserved_memory_mb, 416);
+        assert_eq!(demand.services, 4);
+    }
+
+    #[test]
+    fn runtime_demand_honors_explicit_capacity_reservations() {
+        let demand = runtime_demand(&serde_json::json!({
+            "capacity": {
+                "reservedMemoryMb": 64,
+                "reservedServiceCount": 3
+            },
+            "compose": {"addOns": [{}, {}]}
+        }));
+
+        assert_eq!(demand.reserved_memory_mb, 64);
+        assert_eq!(demand.services, 3);
+    }
 
     #[tokio::test]
     async fn db_select_app_runner_rejects_draining_server() {
