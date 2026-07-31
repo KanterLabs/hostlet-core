@@ -77,6 +77,25 @@ ensure_railpack() {
   export HOSTLET_RAILPACK_BIN="${HOSTLET_RAILPACK_INSTALL_DIR}/railpack"
 }
 
+docker_plugin_path() {
+  local plugin="$1"
+  local directory
+  for directory in \
+    "${DOCKER_CONFIG:-${HOME}/.docker}/cli-plugins" \
+    "${HOME}/.docker/cli-plugins" \
+    /usr/local/lib/docker/cli-plugins \
+    /usr/local/libexec/docker/cli-plugins \
+    /usr/lib/docker/cli-plugins \
+    /usr/libexec/docker/cli-plugins; do
+    if [ -x "${directory}/${plugin}" ]; then
+      printf '%s' "${directory}/${plugin}"
+      return 0
+    fi
+  done
+  echo "Docker CLI plugin is required for remote E2E: ${plugin}" >&2
+  return 1
+}
+
 make_fixture_repo() {
   local name="$1"
   local source="$2"
@@ -200,8 +219,13 @@ start_registry() {
 
 ensure_railpack
 install -m 0755 "$(command -v docker)" "${DOCKER_CLI}"
-install -m 0755 /usr/libexec/docker/cli-plugins/docker-buildx "${BUILDX_CLI}"
-install -m 0755 /usr/libexec/docker/cli-plugins/docker-compose "${COMPOSE_CLI}"
+install -m 0755 "$(docker_plugin_path docker-buildx)" "${BUILDX_CLI}"
+install -m 0755 "$(docker_plugin_path docker-compose)" "${COMPOSE_CLI}"
+AGENT_CLI_MOUNTS=(
+  -v "${DOCKER_CLI}:/usr/local/bin/docker:ro"
+  -v "${BUILDX_CLI}:/usr/libexec/docker/cli-plugins/docker-buildx:ro"
+  -v "${COMPOSE_CLI}:/usr/libexec/docker/cli-plugins/docker-compose:ro"
+)
 docker network create "${NETWORK}" >/dev/null
 start_postgres_container postgres:16-alpine
 wait_postgres_ready
@@ -293,9 +317,7 @@ AUTH_COOKIE="hostlet_unlock=${UNLOCK_COOKIE}; hostlet_session=$(signed_cookie "$
 
 docker run -d --name "${RUNNER_AGENT_CONTAINER}" --network "container:${RUNNER_DIND}" \
   -v "${AGENT_BINARY}:/usr/local/bin/hostlet-agent:ro" \
-  -v "${DOCKER_CLI}:/usr/local/bin/docker:ro" \
-  -v "${BUILDX_CLI}:/usr/libexec/docker/cli-plugins/docker-buildx:ro" \
-  -v "${COMPOSE_CLI}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
+  "${AGENT_CLI_MOUNTS[@]}" \
   -v "${HOSTLET_RAILPACK_BIN:-/usr/local/bin/railpack}:/usr/local/bin/railpack:ro" \
   -v "${TMP_DIR}:${TMP_DIR}" \
   -e DOCKER_HOST=tcp://127.0.0.1:2375 -e HOSTLET_API_URL="http://${BRIDGE_GATEWAY}:${API_PORT}" \
@@ -321,9 +343,7 @@ BUILDER_TOKEN="$(printf '%s' "${BUILDER}" | json_get agentToken)"
 BUILDER_SIGNING="$(printf '%s' "${BUILDER}" | json_get jobSigningSecret)"
 docker run -d --name "${BUILDER_AGENT_CONTAINER}" --network "container:${BUILDER_DIND}" \
   -v "${AGENT_BINARY}:/usr/local/bin/hostlet-agent:ro" \
-  -v "${DOCKER_CLI}:/usr/local/bin/docker:ro" \
-  -v "${BUILDX_CLI}:/usr/libexec/docker/cli-plugins/docker-buildx:ro" \
-  -v "${COMPOSE_CLI}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
+  "${AGENT_CLI_MOUNTS[@]}" \
   -v "${HOSTLET_RAILPACK_BIN:-/usr/local/bin/railpack}:/usr/local/bin/railpack:ro" \
   -v "${TMP_DIR}:${TMP_DIR}" \
   -e DOCKER_HOST=tcp://127.0.0.1:2375 -e HOSTLET_API_URL="http://${BRIDGE_GATEWAY}:${API_PORT}" \
