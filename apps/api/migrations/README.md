@@ -31,13 +31,13 @@ core directory at Docker build time):
 | 040 | core  | `040_apps_suspended_at.sql` |
 | 041 | cloud | `041_cloud_subscription_last_event_at.sql` |
 | 042 | cloud | `042_cloud_reserve_demo_subdomain.sql` |
+| 058 | cloud | `058_public_beta_entitlements_and_capacity.sql` |
+| 059 | core  | `059_remote_build_fleet.sql` |
 
 ## Next migration
 
-Core's next migration must start at **043 or higher** unless a lower unused
-number is intentionally coordinated with `hostlet-cloud`. Core already owns
-`040` and cloud owns `038`, `039`, `041`, and `042` (see above), so `043` is the
-next free version. Before picking a version number, check
+Core's next migration must start at **060 or higher** unless a lower unused
+number is intentionally coordinated with `hostlet-cloud`. Before picking a version number, check
 `hostlet-cloud/apps/api/migrations/` for newly reserved numbers and keep
 byte-identical duplicate migrations in sync.
 
