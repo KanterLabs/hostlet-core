@@ -21,6 +21,9 @@ RUNNER_LOG="${TMP_DIR}/runner.log"
 BUILDER_LOG="${TMP_DIR}/builder.log"
 COOKIE_JAR="${TMP_DIR}/cookies.txt"
 GIT_CONFIG_GLOBAL="${TMP_DIR}/gitconfig"
+DOCKER_CLI="${TMP_DIR}/docker-cli"
+BUILDX_CLI="${TMP_DIR}/docker-buildx"
+COMPOSE_CLI="${TMP_DIR}/docker-compose"
 API_PID=""
 RUNNER_PID=""
 BUILDER_PID=""
@@ -144,6 +147,7 @@ create_and_deploy() {
   local config="$4"
   local port="${5:-3000}"
   local health="${6:-/health}"
+  local probe="${7:-${health}}"
   local create create_response create_status app_id deploy deployment_id detail published
   echo "remote E2E: creating ${name}" >&2
   create_response="$(curl -sS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" \
@@ -168,7 +172,7 @@ JSON
   wait_deployment "${deployment_id}"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
   published="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
-  docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${published}${health}" >/dev/null
+  docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${published}${probe}" >/dev/null
   if [ -n "$(docker -H "${BUILDER_DOCKER_HOST}" ps -aq --filter "label=hostlet.app_id=${app_id}")" ]; then
     echo "builder daemon ran an application container for ${app_id}" >&2
     return 1
@@ -195,6 +199,9 @@ start_registry() {
 }
 
 ensure_railpack
+install -m 0755 "$(command -v docker)" "${DOCKER_CLI}"
+install -m 0755 /usr/libexec/docker/cli-plugins/docker-buildx "${BUILDX_CLI}"
+install -m 0755 /usr/libexec/docker/cli-plugins/docker-compose "${COMPOSE_CLI}"
 docker network create "${NETWORK}" >/dev/null
 start_postgres_container postgres:16-alpine
 wait_postgres_ready
@@ -286,9 +293,9 @@ AUTH_COOKIE="hostlet_unlock=${UNLOCK_COOKIE}; hostlet_session=$(signed_cookie "$
 
 docker run -d --name "${RUNNER_AGENT_CONTAINER}" --network "container:${RUNNER_DIND}" \
   -v "${AGENT_BINARY}:/usr/local/bin/hostlet-agent:ro" \
-  -v "$(command -v docker):/usr/local/bin/docker:ro" \
-  -v /usr/libexec/docker/cli-plugins/docker-buildx:/usr/libexec/docker/cli-plugins/docker-buildx:ro \
-  -v /usr/libexec/docker/cli-plugins/docker-compose:/usr/libexec/docker/cli-plugins/docker-compose:ro \
+  -v "${DOCKER_CLI}:/usr/local/bin/docker:ro" \
+  -v "${BUILDX_CLI}:/usr/libexec/docker/cli-plugins/docker-buildx:ro" \
+  -v "${COMPOSE_CLI}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
   -v "${HOSTLET_RAILPACK_BIN:-/usr/local/bin/railpack}:/usr/local/bin/railpack:ro" \
   -v "${TMP_DIR}:${TMP_DIR}" \
   -e DOCKER_HOST=tcp://127.0.0.1:2375 -e HOSTLET_API_URL="http://${BRIDGE_GATEWAY}:${API_PORT}" \
@@ -314,9 +321,9 @@ BUILDER_TOKEN="$(printf '%s' "${BUILDER}" | json_get agentToken)"
 BUILDER_SIGNING="$(printf '%s' "${BUILDER}" | json_get jobSigningSecret)"
 docker run -d --name "${BUILDER_AGENT_CONTAINER}" --network "container:${BUILDER_DIND}" \
   -v "${AGENT_BINARY}:/usr/local/bin/hostlet-agent:ro" \
-  -v "$(command -v docker):/usr/local/bin/docker:ro" \
-  -v /usr/libexec/docker/cli-plugins/docker-buildx:/usr/libexec/docker/cli-plugins/docker-buildx:ro \
-  -v /usr/libexec/docker/cli-plugins/docker-compose:/usr/libexec/docker/cli-plugins/docker-compose:ro \
+  -v "${DOCKER_CLI}:/usr/local/bin/docker:ro" \
+  -v "${BUILDX_CLI}:/usr/libexec/docker/cli-plugins/docker-buildx:ro" \
+  -v "${COMPOSE_CLI}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
   -v "${HOSTLET_RAILPACK_BIN:-/usr/local/bin/railpack}:/usr/local/bin/railpack:ro" \
   -v "${TMP_DIR}:${TMP_DIR}" \
   -e DOCKER_HOST=tcp://127.0.0.1:2375 -e HOSTLET_API_URL="http://${BRIDGE_GATEWAY}:${API_PORT}" \
@@ -336,7 +343,19 @@ docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${DOCKER_PORT}/" | grep
 create_and_deploy remote-railpack railpack single '{}' >/dev/null
 create_and_deploy remote-compose compose compose '{}' >/dev/null
 create_and_deploy remote-addons railpack single '{"compose":{"addOns":[{"key":"postgres"}]}}' >/dev/null
-create_and_deploy remote-topology topology compose '{"generatedTopology":{"schemaVersion":1,"mode":"auto","backendPathPrefixes":["/api","/socket.io"]}}' 80 / >/dev/null
+read -r TOPOLOGY_APP _ _ < <(create_and_deploy remote-topology topology compose \
+  '{"generatedTopology":{"schemaVersion":1,"mode":"auto","backendPathPrefixes":["/api","/socket.io"]}}' \
+  80 / /api/version)
+TOPOLOGY_DETAIL="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${TOPOLOGY_APP}")"
+read -r TOPOLOGY_FRONTEND_PORT TOPOLOGY_BACKEND_PORT < <(printf '%s' "${TOPOLOGY_DETAIL}" | python3 -c '
+import json, sys
+services={row["name"]: row for row in json.load(sys.stdin).get("services", [])}
+frontend, backend=sys.argv[1:]
+assert set(services) == {frontend, backend}, services
+print(services[frontend]["publishedPort"], services[backend]["publishedPort"])
+' '@hostlet-topology/client' '@hostlet-topology/server')
+docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${TOPOLOGY_FRONTEND_PORT}/" | grep -q patchwork-v1
+docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${TOPOLOGY_BACKEND_PORT}/api/version" | grep -q '^backend-v1$'
 
 expect_status 200 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${DOCKER_APP}"
 docker stop "${REGISTRY_CONTAINER}" >/dev/null
