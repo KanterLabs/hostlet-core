@@ -11,13 +11,7 @@ const INVENTORY_MAX_FILES: usize = 10_000;
 const INVENTORY_MAX_RELEVANT_FILES: usize = 1_024;
 const INVENTORY_MAX_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
-struct RunningService {
-    service: hostlet_contracts::InferredService,
-    image: String,
-    container: String,
-    published_port: u16,
-    runtime_metadata: Value,
-}
+include!("generated_topology/release.rs");
 
 pub(crate) async fn rollback_generated_topology(
     cfg: &Config,
@@ -502,7 +496,7 @@ pub(super) async fn deploy_generated_topology(
     Ok(())
 }
 
-fn selected_services(
+pub(crate) fn selected_services(
     plan: &hostlet_contracts::TopologyPlan,
     config: &GeneratedTopologyConfig,
 ) -> anyhow::Result<Vec<hostlet_contracts::InferredService>> {
@@ -531,7 +525,7 @@ fn selected_services(
     Ok(selected)
 }
 
-async fn configure_service_payload(
+pub(crate) async fn configure_service_payload(
     payload: &mut Value,
     service: &hostlet_contracts::InferredService,
     public_origin: &str,
@@ -637,7 +631,7 @@ async fn topology_failure(
     Err(reported_deployment_failure(failure.to_string()))
 }
 
-async fn log_inference_plan(
+pub(crate) async fn log_inference_plan(
     cfg: &Config,
     deployment_id: Uuid,
     plan: &hostlet_contracts::TopologyPlan,
@@ -694,7 +688,7 @@ async fn log_inference_plan(
     }
 }
 
-fn inference_receipt(
+pub(crate) fn inference_receipt(
     plan: &hostlet_contracts::TopologyPlan,
     services: &[hostlet_contracts::InferredService],
     config: &GeneratedTopologyConfig,
@@ -714,7 +708,7 @@ fn inference_receipt(
     })
 }
 
-async fn checkout_inventory(checkout: &Path) -> anyhow::Result<RepositoryInventory> {
+pub(crate) async fn checkout_inventory(checkout: &Path) -> anyhow::Result<RepositoryInventory> {
     let mut stack = vec![checkout.to_path_buf()];
     let mut files = Vec::new();
     let mut visited = 0usize;
@@ -818,7 +812,7 @@ fn lock_filename(path: &str) -> bool {
     )
 }
 
-async fn repair_pnpm_lock_metadata(
+pub(crate) async fn repair_pnpm_lock_metadata(
     checkout: &Path,
     inventory: &RepositoryInventory,
 ) -> anyhow::Result<Option<Value>> {

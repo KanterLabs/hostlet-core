@@ -262,6 +262,16 @@ pub(crate) fn buildx_args<'a>(
     ]
 }
 
+pub(crate) fn buildx_args_without_cache<'a>(
+    image: &'a str,
+    dockerfile: &'a str,
+    context: &'a str,
+) -> Vec<&'a str> {
+    vec![
+        "buildx", "build", "--load", "-f", dockerfile, "-t", image, context,
+    ]
+}
+
 pub(crate) fn docker_build_args<'a>(
     image: &'a str,
     dockerfile: &'a str,
@@ -275,6 +285,19 @@ pub(crate) async fn docker_buildx_available() -> bool {
         .await
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+pub(crate) async fn docker_buildx_supports_local_cache() -> bool {
+    command_output(
+        "docker",
+        &["buildx", "inspect", "--format", "{{.Driver}}"],
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .filter(|output| output.status.success())
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .is_some_and(|driver| driver.trim() != "docker")
 }
 
 pub(crate) async fn image_size_bytes(image: &str) -> anyhow::Result<i64> {

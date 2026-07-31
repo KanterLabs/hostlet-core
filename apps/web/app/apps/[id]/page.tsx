@@ -87,6 +87,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [newEnv, setNewEnv] = useState({ key: "", value: "" });
   const [resourceMessage, setResourceMessage] = useState("Waiting for a successful deploy.");
+  const [buildPools, setBuildPools] = useState<Array<{ id: string; name: string; enabled: boolean; qualificationStatus: string }>>([]);
 
   const refreshScreenshot = useCallback(async () => {
     try {
@@ -140,6 +141,9 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     api<Array<{ key: string }>>(`/api/apps/${id}/env`)
       .then((keys) => { if (active) setEnvKeys(keys); })
       .catch(() => { if (active) setEnvKeys([]); });
+    api<Array<{ id: string; name: string; enabled: boolean; qualificationStatus: string }>>("/api/build-pools")
+      .then((pools) => { if (active) setBuildPools(pools); })
+      .catch(() => { if (active) setBuildPools([]); });
     return () => { active = false; };
   }, [id, refreshApp, refreshScreenshot]);
 
@@ -432,6 +436,19 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   <ToggleCard checked={settings.public_exposure} onChange={(value) => setSettings({ ...settings, public_exposure: value })} icon={Globe2} label="Public URL" />
                   <ToggleCard checked={settings.auto_deploy} onChange={(value) => setSettings({ ...settings, auto_deploy: value })} icon={GitBranch} label="Auto redeploy on branch push" />
+                </div>
+                <div className="mt-4">
+                  <SelectField
+                    label="Build pool"
+                    value={app?.buildPoolId || ""}
+                    onChange={async (value) => {
+                      await api(`/api/apps/${id}/build-pool`, { method: "PUT", body: JSON.stringify({ buildPoolId: value || null }) });
+                      await refreshApp();
+                    }}
+                  >
+                    <option value="">Default build pool</option>
+                    {buildPools.filter((pool) => pool.enabled && pool.qualificationStatus !== "pending" && pool.qualificationStatus !== "failed").map((pool) => <option key={pool.id} value={pool.id}>{pool.name}</option>)}
+                  </SelectField>
                 </div>
                 <button className="button mt-4" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
               </Panel>

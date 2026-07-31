@@ -200,6 +200,7 @@ pub(crate) async fn init(root: &Path, force: bool) -> anyhow::Result<()> {
         println!("Existing .env backed up to {}", backup.display());
     }
 
+    ensure_registry_config(root, &mut env)?;
     write_env_file(&env_path, &env)?;
     println!("Wrote {}", env_path.display());
     println!("Open Hostlet after start: {}", env["PUBLIC_WEB_URL"]);
@@ -280,6 +281,7 @@ pub(crate) async fn configure(root: &Path) -> anyhow::Result<()> {
         AccessMode::CloudflareTunnel => configure_cloudflare(&theme, &mut env).await?,
     }
     let candidate = root.join(".env.candidate");
+    ensure_registry_config(root, &mut env)?;
     write_env_file(&candidate, &env)?;
     if !compose_config_with_env_ok(root, &candidate, mode == AccessMode::CloudflareTunnel) {
         let _ = fs::remove_file(&candidate);

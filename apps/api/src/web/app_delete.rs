@@ -62,7 +62,13 @@ async fn start_app_teardown_request(
         tracing::warn!(app_id = %id, domain = %domain, "public app deletion will require Cloudflare DNS cleanup but Cloudflare is not configured");
     }
     let containers = dedup_column(deployment_rows, "container_name");
-    let images = dedup_column(deployment_rows, "image_tag");
+    // Registry-backed deployments store digest-qualified artifact references in
+    // image_tag. Those are not locally managed `hostlet/` build tags and must
+    // not be sent to the agent's destructive image-removal allowlist.
+    let images = dedup_column(deployment_rows, "image_tag")
+        .into_iter()
+        .filter(|image| image.starts_with("hostlet/"))
+        .collect::<Vec<_>>();
     let server_id = app.get::<Uuid, _>("server_id");
     let payload = serde_json::json!({
         "type": "delete_app",

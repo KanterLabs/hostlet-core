@@ -278,7 +278,76 @@ pub(crate) fn default_env() -> BTreeMap<String, String> {
     set("LOCAL_AGENT_TOKEN", hex_secret(32));
     set("GITHUB_WEBHOOK_SECRET", hex_secret(32));
 
+    // The bundled registry is disposable artifact transport, not a backup.
+    // Separate identities keep app runners read-only.
+    set(
+        "HOSTLET_ARTIFACT_REGISTRY_URL",
+        "http://127.0.0.1:5000".into(),
+    );
+    set(
+        "HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME",
+        "hostlet-builder".into(),
+    );
+    set("HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD", hex_secret(32));
+    set(
+        "HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME",
+        "hostlet-runner".into(),
+    );
+    set("HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD", hex_secret(32));
+
     env
+}
+
+pub(crate) fn write_registry_auth(
+    root: &Path,
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let registry_dir = root.join(".hostlet/registry");
+    fs::create_dir_all(&registry_dir)?;
+    #[cfg(unix)]
+    fs::set_permissions(&registry_dir, fs::Permissions::from_mode(0o700))?;
+    let push_user = env
+        .get("HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME")
+        .context("missing registry push username")?;
+    let push_password = env
+        .get("HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD")
+        .context("missing registry push password")?;
+    let pull_user = env
+        .get("HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME")
+        .context("missing registry pull username")?;
+    let pull_password = env
+        .get("HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD")
+        .context("missing registry pull password")?;
+    let contents = format!(
+        "{push_user}:{}\n{pull_user}:{}\n",
+        bcrypt::hash(push_password, 12)?,
+        bcrypt::hash(pull_password, 12)?,
+    );
+    let path = registry_dir.join("htpasswd");
+    let mut file = secret_open_options().open(&path)?;
+    file.write_all(contents.as_bytes())?;
+    set_secret_file_permissions(&path)
+}
+
+pub(crate) fn ensure_registry_config(
+    root: &Path,
+    env: &mut BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    env.entry("HOSTLET_ARTIFACT_REGISTRY_URL".into())
+        .or_insert_with(|| "http://127.0.0.1:5000".into());
+    env.insert(
+        "HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME".into(),
+        "hostlet-builder".into(),
+    );
+    env.entry("HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD".into())
+        .or_insert_with(|| hex_secret(32));
+    env.insert(
+        "HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME".into(),
+        "hostlet-runner".into(),
+    );
+    env.entry("HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD".into())
+        .or_insert_with(|| hex_secret(32));
+    write_registry_auth(root, env)
 }
 
 pub(crate) fn write_env_file(path: &Path, env: &BTreeMap<String, String>) -> anyhow::Result<()> {
@@ -681,6 +750,21 @@ mod tests {
             env.get("POSTGRES_PASSWORD").map(String::as_str),
             Some("secret")
         );
+        let htpasswd = fs::read_to_string(root.join(".hostlet/registry/htpasswd")).unwrap();
+        let entries = htpasswd
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .collect::<BTreeMap<_, _>>();
+        assert!(bcrypt::verify(
+            env.get("HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD").unwrap(),
+            entries["hostlet-builder"]
+        )
+        .unwrap());
+        assert!(bcrypt::verify(
+            env.get("HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD").unwrap(),
+            entries["hostlet-runner"]
+        )
+        .unwrap());
         let _ = fs::remove_dir_all(&root);
     }
 }

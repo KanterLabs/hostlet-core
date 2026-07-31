@@ -24,7 +24,10 @@ pub fn agent_job_visibility_predicate(user_param: usize, cloud_param: usize) -> 
               ${cloud_param} = false
               AND j.app_id IS NULL
               AND j.deployment_id IS NULL
-              AND (s.user_id=${user_param} OR s.kind='local')
+              AND EXISTS (
+                SELECT 1 FROM servers s
+                WHERE s.id=j.server_id AND (s.user_id=${user_param} OR s.kind='local')
+              )
             )
           )
         "#
@@ -292,7 +295,7 @@ async fn fence_app_jobs_in_transaction(
                END,
                payload_json=CASE
                  WHEN status='queued' THEN '{}'::jsonb
-                 ELSE payload_json - 'env' - 'github_token'
+                 ELSE payload_json - 'env' - 'github_token' - 'artifact_registry'
                END,
                lease_expires_at=CASE WHEN status='queued' THEN NULL ELSE lease_expires_at END,
                finished_at=CASE WHEN status='queued' THEN now() ELSE finished_at END,
@@ -340,7 +343,6 @@ pub async fn retry_agent_job(
         r#"
         SELECT j.job_type, j.app_id, j.payload_json
         FROM agent_jobs j
-        JOIN servers s ON s.id = j.server_id
         WHERE j.id=$1
           {}
           AND j.status IN ('failed','expired','cancelled')
@@ -376,9 +378,7 @@ pub async fn retry_agent_job(
             lease_expires_at=NULL,
             finished_at=NULL,
             updated_at=now()
-        FROM servers s
         WHERE j.id=$1
-          AND s.id=j.server_id
           {}
           AND j.status IN ('failed','expired','cancelled')
           AND COALESCE(j.payload_json, '{{}}'::jsonb) <> '{{}}'::jsonb
@@ -424,7 +424,7 @@ pub async fn cancel_agent_job(
 }
 
 fn retry_creates_fresh_deployment(job_type: &str) -> bool {
-    matches!(job_type, "deploy" | "rollback")
+    matches!(job_type, "deploy" | "rollback" | "build" | "release")
 }
 
 /// Retries a `deploy`/`rollback` job by creating a fresh deployment instead of
@@ -481,12 +481,10 @@ fn cancel_agent_job_update_sql() -> String {
               cancel_requested_at=CASE WHEN j.status IN ('claimed','running') THEN now() ELSE j.cancel_requested_at END,
               failure_summary=CASE WHEN j.status='queued' THEN 'Cancelled by owner before the agent started work.' ELSE j.failure_summary END,
               last_error=CASE WHEN j.status='queued' THEN 'Cancelled by owner before the agent started work.' ELSE j.last_error END,
-              payload_json=CASE WHEN j.status='queued' THEN j.payload_json - 'env' - 'github_token' ELSE j.payload_json END,
+              payload_json=CASE WHEN j.status='queued' THEN j.payload_json - 'env' - 'github_token' - 'artifact_registry' ELSE j.payload_json END,
               finished_at=CASE WHEN j.status='queued' THEN now() ELSE j.finished_at END,
               updated_at=now()
-          FROM servers s
           WHERE j.id=$1
-            AND s.id=j.server_id
             {}
             AND j.status IN ('queued','claimed','running')
           RETURNING j.app_id,j.deployment_id,j.status
@@ -496,7 +494,7 @@ fn cancel_agent_job_update_sql() -> String {
               failure_summary='Cancelled by owner before the agent started work.',finished_at=now()
           FROM updated u
           WHERE u.status='cancelled' AND d.id=u.deployment_id
-            AND d.status = ANY(ARRAY['queued','running','building','starting','health_checking','routing'])
+            AND d.status = ANY(ARRAY['queued','queued_for_build','running','building','publishing','queued_for_release','pulling','starting','health_checking','routing'])
           RETURNING d.id
         )
         SELECT app_id,deployment_id FROM updated
@@ -576,13 +574,15 @@ mod tests {
     fn deploy_and_rollback_retries_create_fresh_deployments() {
         assert!(retry_creates_fresh_deployment("deploy"));
         assert!(retry_creates_fresh_deployment("rollback"));
+        assert!(retry_creates_fresh_deployment("build"));
+        assert!(retry_creates_fresh_deployment("release"));
         assert!(!retry_creates_fresh_deployment("health_check"));
     }
 
     #[test]
     fn cancel_scrubs_secret_payload_fields() {
         let sql = cancel_agent_job_update_sql();
-        assert!(sql.contains("j.payload_json - 'env' - 'github_token'"));
+        assert!(sql.contains("j.payload_json - 'env' - 'github_token' - 'artifact_registry'"));
         assert!(sql.contains("cancel_requested_at"));
     }
 }

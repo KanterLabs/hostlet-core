@@ -8,8 +8,12 @@ export { formatDuration } from "@/lib/time";
 
 export const DEPLOYMENT_STEPS = [
   "queued",
+  "queued_for_build",
   "running",
   "building",
+  "publishing",
+  "queued_for_release",
+  "pulling",
   "starting",
   "health_checking",
   "routing",
@@ -45,6 +49,9 @@ export function humanStatus(status: string) {
 export function statusHelp(status: string) {
   switch (status) {
     case "building": return "Hostlet is installing dependencies and building the container image.";
+    case "publishing": return "The builder is publishing an immutable image to the artifact registry.";
+    case "queued_for_release": return "The image is built and waiting for its app runner.";
+    case "pulling": return "The app runner is pulling the verified image digest.";
     case "starting": return "The new container is starting. The previous working version is preserved.";
     case "health_checking": return "Hostlet is waiting for the app to answer on the configured port and health path.";
     case "routing": return "The app passed health checks. Hostlet is making it reachable.";

@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 /// The exact `apps` columns a deploy job reads, in one place so the SELECT and
 /// the payload mapping cannot drift independently.
-pub(super) const DEPLOY_APP_COLUMNS: &str = "id,server_id,name,repo_full_name,branch,\
+pub(super) const DEPLOY_APP_COLUMNS: &str =
+    "id,server_id,build_pool_id,name,repo_full_name,branch,\
      container_port,health_path,domain,runtime_kind,hostlet_config_path,runtime_config,\
      packaging_strategy,root_directory,install_command,build_command,start_command,\
      memory_limit_mb,cpu_limit,suspended_at IS NOT NULL AS suspended";
@@ -22,6 +23,7 @@ pub(super) const DEPLOY_APP_COLUMNS: &str = "id,server_id,name,repo_full_name,br
 /// row) makes the column<->field mapping explicit and reviewable.
 pub(super) struct DeployApp {
     pub server_id: Uuid,
+    pub build_pool_id: Option<Uuid>,
     pub name: String,
     pub repo_full_name: String,
     pub branch: String,
@@ -45,6 +47,7 @@ impl DeployApp {
     pub(super) fn from_row(row: &sqlx::postgres::PgRow) -> Self {
         Self {
             server_id: row.get("server_id"),
+            build_pool_id: row.get("build_pool_id"),
             name: row.get("name"),
             repo_full_name: row.get("repo_full_name"),
             branch: row.get("branch"),

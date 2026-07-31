@@ -60,7 +60,7 @@ try {
           if (text.includes("/ws/logs/") && text.includes("ERR_CONNECTION_REFUSED")) return;
           errors.push(text);
         });
-        page.on("pageerror", (error) => errors.push(error.message));
+        page.on("pageerror", (error) => errors.push(error.stack || error.message));
         await installApiMocks(page);
         for (const [route, label] of routes) {
           await page.goto(`${baseUrl}${route}`, { waitUntil: "networkidle" });
@@ -250,6 +250,11 @@ async function installApiMocks(page) {
     if (path === "/api/apps") return json([app]);
     if (path === "/api/apps/smoke-app") return json(app);
     if (path === "/api/apps/smoke-app/env") return json([{ key: "APP_VERSION" }, { key: "DATABASE_URL" }]);
+    if (path === "/api/build-pools") return json([]);
+    if (path === "/api/builders") return json([]);
+    if (path === "/api/artifact-registry/status") {
+      return json({ configured: true, healthy: true });
+    }
     if (path === "/api/apps/smoke-app/resources") {
       return json({
         cpuPercent: "1.23%",
@@ -263,6 +268,9 @@ async function installApiMocks(page) {
     }
     if (path === "/api/apps/smoke-app/health") return json(app.health);
     if (path === "/api/apps/smoke-app/health/events") return json([]);
+    if (path === "/api/apps/smoke-app/runtime-logs") {
+      return json({ lines: [], unavailableServices: [], truncated: false, capturedAt: new Date().toISOString() });
+    }
     if (path === "/api/deployments/smoke-deployment") {
       return json({ id: "smoke-deployment", appId: "smoke-app", status: "success", commitSha: "1234567890abcdef", failure: null, runtimeMetadata: app.latestDeployment.runtimeMetadata });
     }

@@ -4,30 +4,30 @@ pub(crate) use cleanup::*;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct HostletManifest {
-    runtime: String,
-    compose: HostletComposeManifest,
+    pub(crate) runtime: String,
+    pub(crate) compose: HostletComposeManifest,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct HostletComposeManifest {
-    file: Option<String>,
-    web_service: String,
-    port: Option<u16>,
-    health_path: Option<String>,
+    pub(crate) file: Option<String>,
+    pub(crate) web_service: String,
+    pub(crate) port: Option<u16>,
+    pub(crate) health_path: Option<String>,
 }
 
 /// Resolved Hostlet Compose manifest plus the on-disk compose file it points at.
-struct ResolvedCompose<'a> {
+pub(crate) struct ResolvedCompose<'a> {
     /// Path reported back to the API as `hostletConfigPath` (or `"generated"`).
-    manifest_path: &'a str,
-    manifest: HostletManifest,
-    compose_file_name: String,
-    compose_file: PathBuf,
+    pub(crate) manifest_path: &'a str,
+    pub(crate) manifest: HostletManifest,
+    pub(crate) compose_file_name: String,
+    pub(crate) compose_file: PathBuf,
 }
 
 /// Builds the shared `docker compose -p <project> -f <compose> -f <override>`
 /// argument prefix, returning context-bearing errors for non-UTF-8 paths.
-fn compose_invocation<'a>(
+pub(crate) fn compose_invocation<'a>(
     project: &'a str,
     compose_file: &'a Path,
     override_file: &'a Path,
@@ -55,7 +55,7 @@ fn path_str(path: &Path) -> anyhow::Result<&str> {
 
 /// Reads the deploy payload (generated runtime or repo `hostlet.yml`) into a
 /// validated [`ResolvedCompose`].
-async fn resolve_compose_manifest<'a>(
+pub(crate) async fn resolve_compose_manifest<'a>(
     p: &'a Value,
     project_dir: &Path,
     build_dir: &Path,
@@ -152,6 +152,7 @@ pub(crate) async fn deploy_compose(
     fallback_health_path: &str,
     git_sync_duration_ms: u128,
     web_image: Option<&str>,
+    artifact_release: bool,
 ) -> anyhow::Result<()> {
     ensure_docker_compose().await?;
     let build_dir = cfg.workdir.join("builds").join(deployment_id.to_string());
@@ -173,7 +174,11 @@ pub(crate) async fn deploy_compose(
     let compose_text = remap_host_binds_to_named_volumes(&compose_text)?;
     tokio::fs::write(compose_file, &compose_text).await?;
     validate_compose_subset(&compose_text, web_service)?;
-    let backing_spec_hash = compose_backing_spec_hash(&cfg, &compose_text, web_service)?;
+    let backing_spec_source = p
+        .get("_hostlet_backing_spec_source")
+        .and_then(Value::as_str)
+        .unwrap_or(&compose_text);
+    let backing_spec_hash = compose_backing_spec_hash(&cfg, backing_spec_source, web_service)?;
     let expected_backing_spec_hash = p.get("expected_backing_spec_hash").and_then(Value::as_str);
     let approved_backing_spec_hash = p.get("approved_backing_spec_hash").and_then(Value::as_str);
     if expected_backing_spec_hash.is_some_and(|expected| expected != backing_spec_hash)
@@ -263,7 +268,11 @@ pub(crate) async fn deploy_compose(
             .map(|service| service.name)
             .collect::<Vec<_>>();
     if !backing_services.is_empty() {
-        let mut trailing = vec!["up", "-d", "--build"];
+        let mut trailing = if artifact_release {
+            vec!["up", "-d", "--no-build", "--pull", "never"]
+        } else {
+            vec!["up", "-d", "--build"]
+        };
         trailing.extend(backing_services.iter().map(String::as_str));
         run_log_in_dir_env(
             &cfg,
@@ -302,18 +311,26 @@ pub(crate) async fn deploy_compose(
         )
         .await?;
     }
+    let release_up = if artifact_release {
+        vec![
+            "up",
+            "-d",
+            "--no-build",
+            "--pull",
+            "never",
+            "--no-deps",
+            web_service,
+        ]
+    } else {
+        vec!["up", "-d", "--build", "--no-deps", web_service]
+    };
     run_log_in_dir_env(
         &cfg,
         deployment_id,
         project_dir,
         &compose_env_refs,
         "docker",
-        &compose_invocation(
-            &project,
-            compose_file,
-            &release_override_file,
-            &["up", "-d", "--build", "--no-deps", web_service],
-        )?,
+        &compose_invocation(&project, compose_file, &release_override_file, &release_up)?,
     )
     .await?;
     status(&cfg, deployment_id, "starting", None).await;
@@ -332,7 +349,8 @@ pub(crate) async fn deploy_compose(
     let runtime_metadata = json!({
         "runtime": "compose",
         "composeFile": compose_file_name,
-        "hostletConfigPath": manifest_path,
+        "hostletConfigPath": p.get("_hostlet_artifact_config_path")
+            .and_then(Value::as_str).unwrap_or(manifest_path),
         "webService": web_service,
         "targetPort": port,
         "healthPath": health_path,
@@ -491,13 +509,13 @@ pub(crate) async fn deploy_compose(
         route_generation,
         local_url.as_deref(),
         Some(&runtime_metadata),
-        false,
+        p.get("type").and_then(Value::as_str) == Some("rollback"),
     )
     .await?;
     Ok(())
 }
 
-fn compose_backing_spec_hash(
+pub(crate) fn compose_backing_spec_hash(
     cfg: &Config,
     compose_text: &str,
     web_service: &str,
@@ -516,7 +534,7 @@ fn compose_backing_spec_hash(
     ))
 }
 
-fn compose_interpolation_env(p: &Value) -> Vec<(String, String)> {
+pub(crate) fn compose_interpolation_env(p: &Value) -> Vec<(String, String)> {
     let mut compose_env = Vec::new();
     if let Some(map) = p.get("env").and_then(|v| v.as_object()) {
         for (key, value) in map {
@@ -529,10 +547,22 @@ fn compose_interpolation_env(p: &Value) -> Vec<(String, String)> {
 }
 
 pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
-    if p.pointer("/target_runtime_metadata/inferenceReceipt/schemaVersion")
+    let generated_topology = p
+        .pointer("/target_runtime_metadata/inferenceReceipt/schemaVersion")
         .and_then(Value::as_u64)
-        == Some(hostlet_contracts::GENERATED_TOPOLOGY_SCHEMA_VERSION as u64)
-    {
+        == Some(hostlet_contracts::GENERATED_TOPOLOGY_SCHEMA_VERSION as u64);
+    if stored_artifact_runtime_missing(&p, generated_topology).await {
+        let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
+        log(
+            &cfg,
+            deployment_id,
+            "stdout",
+            "Rollback containers are unavailable; re-releasing the stored OCI artifact.",
+        )
+        .await;
+        return crate::runtime::release_stored_artifact(cfg, p).await;
+    }
+    if generated_topology {
         return crate::runtime::rollback_generated_topology(&cfg, &p).await;
     }
     let deployment_id = Uuid::parse_str(p["deployment_id"].as_str().context("deployment_id")?)?;
@@ -633,6 +663,50 @@ pub(crate) async fn rollback(cfg: Config, p: Value) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn stored_artifact_runtime_missing(payload: &Value, generated_topology: bool) -> bool {
+    if payload
+        .pointer("/artifact_manifest/schemaVersion")
+        .and_then(Value::as_u64)
+        != Some(hostlet_contracts::BUILD_ARTIFACT_SCHEMA_VERSION as u64)
+        || payload.get("artifact_registry").is_none_or(Value::is_null)
+    {
+        return false;
+    }
+    let containers = if generated_topology {
+        payload
+            .get("target_services")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|service| service.get("containerName").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+    } else {
+        payload
+            .get("target_container")
+            .and_then(Value::as_str)
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    if containers.is_empty() {
+        return true;
+    }
+    for container in containers {
+        let Ok(output) = command_output(
+            "docker",
+            &["container", "inspect", container],
+            Duration::from_secs(30),
+        )
+        .await
+        else {
+            return true;
+        };
+        if !output.status.success() {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) async fn run_log(

@@ -44,7 +44,7 @@ export function webhookSummary(webhook?: Webhook | null) {
 }
 
 export function isActiveDeploy(status?: string | null) {
-  return !!status && ["queued", "running", "building", "starting", "health_checking", "routing"].includes(status);
+  return !!status && ["queued", "queued_for_build", "running", "building", "publishing", "queued_for_release", "pulling", "starting", "health_checking", "routing"].includes(status);
 }
 
 export function shortSha(sha?: string | null) {

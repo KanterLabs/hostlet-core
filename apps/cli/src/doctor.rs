@@ -13,6 +13,8 @@ pub(crate) const REQUIRED_ENV_KEYS: &[&str] = &[
     "HOSTLET_SETUP_TOKEN",
     "HOSTLET_ALLOWED_GITHUB_LOGINS",
     "GITHUB_CLIENT_ID",
+    "HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD",
+    "HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD",
 ];
 
 /// Emits the Docker and Docker Compose availability checks shared by both

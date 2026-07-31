@@ -2,12 +2,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
+mod artifacts;
 pub mod compose;
 pub mod crypto;
 mod inference;
 mod protocol;
 mod topology;
 mod validation;
+pub use artifacts::*;
 pub use inference::{
     compose_inspection, detect_start_command, dockerfile_inspection, gitea_inspection,
     infer_addons_from_compose, infer_dockerfile, infer_package_json, infer_package_manager,
@@ -341,8 +343,12 @@ string_status_enum! {
     /// `deployments` table and sent over the wire.
     pub enum DeploymentStatus {
         Queued => "queued",
+        QueuedForBuild => "queued_for_build",
         Running => "running",
         Building => "building",
+        Publishing => "publishing",
+        QueuedForRelease => "queued_for_release",
+        Pulling => "pulling",
         Starting => "starting",
         HealthChecking => "health_checking",
         Routing => "routing",

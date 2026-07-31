@@ -98,6 +98,10 @@ jobs:
       HOSTLET_WEB_IMAGE: ghcr.io/shanekanterman04/hostlet-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       HOSTLET_AGENT_IMAGE: ghcr.io/shanekanterman04/hostlet-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       HOSTLET_SCREENSHOTTER_IMAGE: ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME: hostlet-builder
+      HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD: ci-only-registry-push
+      HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME: hostlet-runner
+      HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD: ci-only-registry-pull
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

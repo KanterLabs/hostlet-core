@@ -6,6 +6,7 @@ import { WebhookNotice } from "@/components/WebhookNotice";
 import { useSettingsData } from "./settings-data";
 import {
   AccessSummarySection,
+  BuildFleetSection,
   ConnectionsSection,
   OperationsSection,
   ProductTourSection,
@@ -21,6 +22,10 @@ export default function Settings() {
     audit,
     cleanup,
     backup,
+    buildPools,
+    builders,
+    registry,
+    builderMessage,
     updateMessage,
     operationsMessage,
     busy,
@@ -29,6 +34,9 @@ export default function Settings() {
     runCleanup,
     retryJob,
     cancelJob,
+    createVmPool,
+    enrollBuilder,
+    setDefaultPool,
   } = useSettingsData();
 
   return (
@@ -43,6 +51,16 @@ export default function Settings() {
       <WebhookNotice className="mb-6" />
 
       <ConnectionsSection github={github} cloudflare={cloudflare} />
+
+      <BuildFleetSection
+        pools={buildPools}
+        builders={builders}
+        registry={registry}
+        message={builderMessage}
+        onCreateVmPool={createVmPool}
+        onEnrollBuilder={enrollBuilder}
+        onSetDefaultPool={setDefaultPool}
+      />
 
       <UpdatesSection
         version={version}

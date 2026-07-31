@@ -1,7 +1,7 @@
 "use client";
 
 import type { LucideIcon } from "lucide-react";
-import { Cloud, Compass, Download, GitBranch, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { Cloud, Compass, Download, GitBranch, KeyRound, Link2, RefreshCw, Server, ShieldCheck, Trash2 } from "lucide-react";
 import { DataList, DataRow, IconFrame, Notice, Panel, StatusPill, useTour } from "@/components/ui";
 import { GitHubDeviceFlow } from "@/components/GitHubDeviceFlow";
 import { formatTimestamp } from "@/lib/time";
@@ -9,12 +9,69 @@ import type {
   AgentJob,
   AuditEvent,
   BackupMetadata,
+  Builder,
+  BuildPool,
   CleanupPlan,
+  RegistryStatus,
   StatusMessage,
   StatusPayload,
   UpdatePayload,
   VersionPayload,
 } from "./settings-data";
+
+export function BuildFleetSection({
+  pools,
+  builders,
+  registry,
+  message,
+  onCreateVmPool,
+  onEnrollBuilder,
+  onSetDefaultPool,
+}: {
+  pools: BuildPool[];
+  builders: Builder[];
+  registry: RegistryStatus | null;
+  message: StatusMessage;
+  onCreateVmPool: () => void;
+  onEnrollBuilder: (poolId: string) => void;
+  onSetDefaultPool: (poolId: string) => void;
+}) {
+  return (
+    <Panel className="mt-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <IconFrame icon={Server} />
+          <div>
+            <h2 className="font-semibold">Build fleet</h2>
+            <p className="muted mt-1">Move image builds off app runners onto outbound-only builder VMs.</p>
+          </div>
+        </div>
+        <button className="button-secondary" onClick={onCreateVmPool}><Server size={16} />Add VM pool</button>
+      </div>
+      <div className="mt-5 grid gap-3 lg:grid-cols-2">
+        {pools.map((pool) => (
+          <div key={pool.id} className="rounded-xl border border-line p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div><div className="font-medium">{pool.name}</div><div className="muted text-sm">{pool.provider} · {pool.supportedPlatforms.join(", ")}</div></div>
+              <StatusPill status={pool.enabled ? (pool.qualificationStatus === "failed" ? "failed" : "connected") : "disabled"} label={pool.isDefault ? "default" : pool.qualificationStatus.replaceAll("_", " ")} />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {pool.provider === "vm" && <button className="button-secondary compact" onClick={() => onEnrollBuilder(pool.id)}>Copy install command</button>}
+              {!pool.isDefault && pool.enabled && pool.qualificationStatus !== "pending" && <button className="button-secondary compact" onClick={() => onSetDefaultPool(pool.id)}>Make default</button>}
+            </div>
+          </div>
+        ))}
+      </div>
+      <DataList className="mt-5 lg:grid-cols-2">
+        <DataRow label="Artifact registry" value={registry?.configured ? (registry.healthy ? "healthy" : "unreachable") : "not configured"} loading={!registry} />
+        <DataRow label="Enrolled builders" value={`${builders.length} total · ${builders.filter((builder) => builder.status === "online").length} online`} />
+      </DataList>
+      {builders.length > 0 && <div className="mt-4 grid gap-2">{builders.map((builder) => <div key={builder.id} className="flex items-center justify-between border-b border-line pb-2"><div><div className="font-medium">{builder.name}</div><div className="muted text-sm">{builder.buildPoolName || "unassigned"} · {builder.platforms.join(", ")} · {builder.maxConcurrentBuilds} slot(s) · {builder.universalBuilds ? "all runtimes" : "upgrade required"}</div></div><StatusPill status={builder.draining || !builder.universalBuilds ? "disabled" : builder.status} label={builder.draining ? "draining" : builder.universalBuilds ? builder.status : "upgrade required"} /></div>)}</div>}
+      {!registry?.healthy && <Notice tone="neutral" className="mt-3" description="The bundled zot registry is disposable. Set HOSTLET_ARTIFACT_REGISTRY_URL to a builder-reachable HTTPS endpoint before using remote pools." />}
+      {message.text && <Notice tone={message.tone} className="mt-3" description={message.text} />}
+    </Panel>
+  );
+}
 
 export function cleanupSummary(values: Record<string, number>) {
   const total = Object.values(values).reduce((sum, value) => sum + value, 0);

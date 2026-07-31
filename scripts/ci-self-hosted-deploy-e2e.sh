@@ -8,9 +8,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-lib.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/ci-metrics-lib.sh"
 # shellcheck source=scripts/ci-self-hosted-topology-e2e.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-topology-e2e.sh"
+# shellcheck source=scripts/ci-self-hosted-registry-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-self-hosted-registry-lib.sh"
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"
 POSTGRES_CONTAINER="hostlet-ci-self-deploy-postgres-${RUN_ID}"
+REGISTRY_CONTAINER="hostlet-ci-self-deploy-registry-${RUN_ID}"
 API_PID=""
 AGENT_PID=""
 API_PORT="${HOSTLET_SELF_DEPLOY_API_PORT:-$(pick_local_port)}"
@@ -69,6 +72,7 @@ cleanup() {
     wait "${API_PID}" >/dev/null 2>&1 || true
   fi
   docker rm -f "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
+  docker rm -f "${REGISTRY_CONTAINER}" >/dev/null 2>&1 || true
   if [ "${RAILPACK_BUILDKIT_PREEXISTED}" = "0" ]; then
     docker rm -f "${RAILPACK_BUILDKIT_CONTAINER}" >/dev/null 2>&1 || true
   fi
@@ -321,6 +325,7 @@ ensure_railpack
 start_postgres_container postgres:16-alpine
 wait_postgres_ready
 POSTGRES_PORT="$(discover_postgres_port)"
+start_test_artifact_registry
 
 make_fixture_repo "${APP_REPO_NAME}" "${ROOT}/scripts/fixtures/generated-apps/node"
 make_fixture_repo "${COMPOSE_REPO_NAME}" "${ROOT}/scripts/fixtures/generated-apps/compose"

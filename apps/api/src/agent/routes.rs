@@ -190,6 +190,7 @@ const RETRYABLE_EXPIRED_JOBS_PREDICATE: &str = "j.status IN ('claimed','running'
 
 /// SET clause that returns an expired job to the queue, clearing claim/lease state.
 const REQUEUE_JOB_SET_CLAUSE: &str = "SET status='queued',
+             server_id=CASE WHEN build_pool_id IS NOT NULL THEN NULL ELSE server_id END,
              claimed_by=NULL,
              claimed_at=NULL,
              claim_token=NULL,
@@ -229,6 +230,7 @@ async fn claim_next_queued_job(
         r#"
         UPDATE agent_jobs
         SET status='claimed',
+            server_id=COALESCE(server_id,$1),
             attempt=attempt + 1,
             claim_token=uuid_generate_v4(),
             claimed_by=$2,
@@ -239,7 +241,30 @@ async fn claim_next_queued_job(
         WHERE id = (
             SELECT id
             FROM agent_jobs j
-            WHERE j.server_id=$1
+            WHERE (
+                j.server_id=$1
+                OR (
+                  j.server_id IS NULL
+                  AND j.job_type='build'
+                  AND j.build_pool_id=(SELECT s.build_pool_id FROM servers s WHERE s.id=$1)
+                  AND (j.payload_json->>'required_platform') = ANY(
+                    SELECT unnest(s.platforms) FROM servers s WHERE s.id=$1
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM servers s
+                    WHERE s.id=$1
+                      AND s.status<>'revoked'
+                      AND NOT s.draining
+                      AND s.capabilities @> ARRAY['builder']::TEXT[]
+                      AND (
+                        SELECT COUNT(*) FROM agent_jobs active
+                        WHERE active.server_id=$1
+                          AND active.job_type='build'
+                          AND active.status IN ('claimed','running')
+                      ) < s.max_concurrent_builds
+                  )
+                )
+              )
               AND j.status='queued'
               AND j.available_at <= now()
               AND j.protocol_version <= $4
@@ -304,6 +329,28 @@ async fn claim_job_response(
     server_id: Uuid,
     row: sqlx::postgres::PgRow,
 ) -> axum::response::Response {
+    if row.get::<String, _>("job_type") == "build" {
+        if let Some(deployment_id) = row.get::<Option<Uuid>, _>("deployment_id") {
+            let _ = sqlx::query(
+                "UPDATE deployment_builds SET status='leased',waiting_reason=NULL,
+                        started_at=COALESCE(started_at,now()),updated_at=now()
+                 WHERE deployment_id=$1 AND status IN ('queued','retry_wait')",
+            )
+            .bind(deployment_id)
+            .execute(&state.db)
+            .await;
+            let _ = sqlx::query(
+                "UPDATE deployments SET status='building',last_heartbeat_at=now() WHERE id=$1",
+            )
+            .bind(deployment_id)
+            .execute(&state.db)
+            .await;
+            let _ = sqlx::query("UPDATE servers SET last_build_assigned_at=now() WHERE id=$1")
+                .bind(server_id)
+                .execute(&state.db)
+                .await;
+        }
+    }
     let mut payload = row.get::<serde_json::Value, _>("payload_json");
     if let Some(object) = payload.as_object_mut() {
         object.insert("job_id".into(), serde_json::json!(row.get::<Uuid, _>("id")));
@@ -386,37 +433,67 @@ pub async fn complete_job(
         Ok(tx) => tx,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let result = sqlx::query(
-        "UPDATE agent_jobs
-         SET status=$1,
-             failure_summary=$2,
-             last_error=$2,
-             result_json=$3,
-             payload_json=payload_json - 'env' - 'github_token',
-             lease_expires_at=NULL,
-             updated_at=now(),
-             finished_at=now()
-         WHERE id=$4 AND server_id=$5 AND status IN ('claimed','running')
-           AND ($6::uuid IS NULL OR claim_token=$6)
-         RETURNING job_type,deployment_id,app_id",
+    let selected = sqlx::query(
+        "SELECT job_type,deployment_id,app_id,payload_json
+         FROM agent_jobs
+         WHERE id=$1 AND server_id=$2 AND status IN ('claimed','running')
+           AND ($3::uuid IS NULL OR claim_token=$3)
+         FOR UPDATE",
     )
-    .bind(&request.status)
-    .bind(request.failure.as_deref())
-    .bind(request.result.unwrap_or_else(|| serde_json::json!({})))
     .bind(id)
     .bind(server_id)
     .bind(request.claim_token)
     .fetch_optional(&mut *tx)
     .await;
+    let row = match selected {
+        Ok(Some(row)) => row,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, job_id = %id, "failed to lock completed agent job");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let job_type = row.get::<String, _>("job_type");
+    let deployment_id = row.get::<Option<Uuid>, _>("deployment_id");
+    let app_id = row.get::<Option<Uuid>, _>("app_id");
+    let original_payload = row.get::<serde_json::Value, _>("payload_json");
+    let completion_result = request
+        .result
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if job_type == "build" && request.status == "success" {
+        if let Err(err) =
+            super::build_execution::validate_build_manifest(&original_payload, &completion_result)
+        {
+            return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+        }
+    }
 
-    match result {
-        Ok(Some(row)) => {
-            let job_type = row.get::<String, _>("job_type");
+    let updated = sqlx::query(
+        "UPDATE agent_jobs
+         SET status=$1,
+             failure_summary=$2,
+             last_error=$2,
+             result_json=$3,
+             payload_json=payload_json - 'env' - 'github_token' - 'artifact_registry',
+             lease_expires_at=NULL,
+             updated_at=now(),
+             finished_at=now()
+         WHERE id=$4",
+    )
+    .bind(&request.status)
+    .bind(request.failure.as_deref())
+    .bind(&completion_result)
+    .bind(id)
+    .execute(&mut *tx)
+    .await;
+    match updated {
+        Ok(_) => {
             if crate::browser_health::record_job_result(
                 &mut tx,
                 &job_type,
-                row.get::<Option<Uuid>, _>("app_id"),
-                row.get::<Option<Uuid>, _>("deployment_id"),
+                app_id,
+                deployment_id,
                 &request.status,
                 request.failure.as_deref(),
             )
@@ -425,22 +502,50 @@ pub async fn complete_job(
             {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
-            if let Some(deployment_id) = row.get::<Option<Uuid>, _>("deployment_id") {
+            if job_type == "build" && request.status == "success" {
+                let (Some(deployment_id), Some(app_id)) = (deployment_id, app_id) else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                if let Err(err) = super::build_execution::complete_successful_build(
+                    &state,
+                    &mut tx,
+                    deployment_id,
+                    app_id,
+                    &original_payload,
+                    &completion_result,
+                )
+                .await
+                {
+                    tracing::warn!(error = %err, job_id = %id, "failed to enqueue release job");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+            if let Some(deployment_id) = deployment_id {
                 if request.status != "success" {
                     let deployment_status = if request.status == "cancelled" {
                         "canceled"
                     } else {
                         "failed"
                     };
-                    if sqlx::query(
+                    if (job_type == "build"
+                        && super::build_execution::fail_build(
+                            &mut tx,
+                            deployment_id,
+                            &request.status,
+                            request.failure.as_deref(),
+                        )
+                        .await
+                        .is_err())
+                        || sqlx::query(
                         "UPDATE deployments SET status=$1,failure_summary=$2,
                                 failure_code=CASE WHEN $1='canceled' THEN 'cancelled_by_owner' ELSE failure_code END,
                                 finished_at=now()
-                         WHERE id=$3 AND server_id=$4 AND status = ANY($5)",
+                         WHERE id=$3 AND ($4='build' OR server_id=$5) AND status = ANY($6)",
                     )
                     .bind(deployment_status)
                     .bind(request.failure.as_deref())
                     .bind(deployment_id)
+                    .bind(&job_type)
                     .bind(server_id)
                     .bind(crate::deploy::ACTIVE_DEPLOYMENT_STATUSES)
                     .execute(&mut *tx)
@@ -478,7 +583,6 @@ pub async fn complete_job(
                 Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
         }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::warn!(error = %err, job_id = %id, "failed to complete agent job");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -505,7 +609,7 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
          SET status='failed',
              failure_summary=COALESCE(failure_summary, 'Agent job lease expired and retry limit was reached.'),
              last_error=COALESCE(last_error, 'Agent job lease expired and retry limit was reached.'),
-             payload_json=payload_json - 'env' - 'github_token',
+             payload_json=payload_json - 'env' - 'github_token' - 'artifact_registry',
              lease_expires_at=NULL,
              updated_at=now(),
              finished_at=now()
@@ -526,6 +630,19 @@ pub async fn recover_stale_agent_jobs(state: &AppState) -> anyhow::Result<u64> {
            AND EXISTS (SELECT 1 FROM agent_jobs j WHERE j.deployment_id=d.id AND j.status='failed')",
     )
     .bind(crate::deploy::ACTIVE_DEPLOYMENT_STATUSES)
+    .execute(&state.db)
+    .await?;
+    sqlx::query(
+        "UPDATE deployment_builds b
+         SET status='failed',failure_code=COALESCE(failure_code,'execution_lease_exhausted'),
+             failure_summary=COALESCE(failure_summary,'Builder recovery attempts were exhausted.'),
+             finished_at=now(),updated_at=now()
+         WHERE b.status NOT IN ('succeeded','failed','canceled')
+           AND EXISTS (
+             SELECT 1 FROM agent_jobs j
+             WHERE j.deployment_id=b.deployment_id AND j.job_type='build' AND j.status='failed'
+           )",
+    )
     .execute(&state.db)
     .await?;
     sqlx::query(
@@ -645,13 +762,13 @@ async fn reconcile_teardown_fenced_jobs(
     Ok(terminal_count)
 }
 
-/// Strips decrypted secrets (env map, GitHub token) from terminal jobs'
+/// Strips decrypted secrets (env map, GitHub token, registry credentials) from terminal jobs'
 /// payloads. Terminal transitions scrub inline; this sweep catches rows that
 /// reached a terminal state before the scrub existed or through a path that
 /// missed it.
 async fn scrub_terminal_job_payload_secrets(state: &AppState) -> anyhow::Result<u64> {
     Ok(sqlx::query(
-        "UPDATE agent_jobs\n         SET payload_json = payload_json - 'env' - 'github_token'\n         WHERE status IN ('success','failed','cancelled','expired')\n           AND (jsonb_exists(payload_json,'env') OR jsonb_exists(payload_json,'github_token'))",
+        "UPDATE agent_jobs\n         SET payload_json = payload_json - 'env' - 'github_token' - 'artifact_registry'\n         WHERE status IN ('success','failed','cancelled','expired')\n           AND (jsonb_exists(payload_json,'env') OR jsonb_exists(payload_json,'github_token') OR jsonb_exists(payload_json,'artifact_registry'))",
     )
     .execute(&state.db)
     .await?

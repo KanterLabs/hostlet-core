@@ -906,12 +906,22 @@ pub(crate) async fn ensure_docker_compose() -> anyhow::Result<()> {
 }
 
 pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
-        .user_agent("Hostlet-Agent")
-        .build()
-        .context("failed to build HTTP client")
+        .user_agent("Hostlet-Agent");
+    if let Some(path) = std::env::var_os("HOSTLET_EXTRA_CA_CERT_PATH") {
+        let bytes = std::fs::read(&path).with_context(|| {
+            format!(
+                "could not read HOSTLET_EXTRA_CA_CERT_PATH {}",
+                Path::new(&path).display()
+            )
+        })?;
+        let certificate = reqwest::Certificate::from_pem(&bytes)
+            .context("HOSTLET_EXTRA_CA_CERT_PATH is not a PEM certificate")?;
+        builder = builder.add_root_certificate(certificate);
+    }
+    builder.build().context("failed to build HTTP client")
 }
 
 pub(crate) use hostlet_contracts::valid_container_name;

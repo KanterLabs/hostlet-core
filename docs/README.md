@@ -9,6 +9,7 @@ have no written notes.
 ## Start Here
 
 - [Getting Started](getting-started.md): fastest path to a working self-hosted install.
+- [Remote Builders](remote-builders.md): off-host build pools and disposable OCI artifacts.
 - [Self-Hosting](self-hosting.md): setup, access modes, GitHub Device Flow, and production Compose.
 
 ## Using Hostlet

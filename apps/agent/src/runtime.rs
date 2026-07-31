@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod pipeline;
+mod remote_build;
 
 pub(crate) async fn rollback_generated_topology(
     cfg: &Config,
@@ -12,6 +13,11 @@ pub(crate) async fn rollback_generated_topology(
 }
 
 use pipeline::deploy;
+use remote_build::{build_artifact, release_artifact};
+
+pub(crate) async fn release_stored_artifact(cfg: Config, payload: Value) -> anyhow::Result<()> {
+    release_artifact(cfg, payload).await
+}
 
 const WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -64,6 +70,7 @@ pub(crate) struct Config {
     pub(crate) app_public_scheme: AppPublicScheme,
     pub(crate) health_host: String,
     pub(crate) local_router: Option<LocalRouter>,
+    pub(crate) max_concurrent_jobs: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +200,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         app_public_scheme,
         health_host: std::env::var("HOSTLET_HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
         local_router: local_router_config()?,
+        max_concurrent_jobs: std::env::var("HOSTLET_MAX_CONCURRENT_BUILDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| (1..=16).contains(value))
+            .unwrap_or(1),
     };
     tokio::fs::create_dir_all(&cfg.workdir).await?;
     log_recoverable_journals(&cfg).await?;
@@ -201,13 +213,19 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // across a WS drop/reconnect: the reconnected loop cannot claim a second job
     // while the old one holds the slot.
     let job_slot = Arc::new(AtomicBool::new(false));
+    let claim_slots = Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent_jobs));
     // Runtime log collection is independently single-flight and also outlives a
     // socket connection. An old collection therefore cannot overlap one started
     // immediately after reconnecting.
     let runtime_log_slot = Arc::new(AtomicBool::new(false));
     loop {
-        if let Err(err) =
-            connect_loop(cfg.clone(), job_slot.clone(), runtime_log_slot.clone()).await
+        if let Err(err) = connect_loop(
+            cfg.clone(),
+            job_slot.clone(),
+            claim_slots.clone(),
+            runtime_log_slot.clone(),
+        )
+        .await
         {
             tracing::warn!("agent disconnected: {err}");
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -218,6 +236,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 pub(crate) async fn connect_loop(
     cfg: Config,
     job_slot: Arc<AtomicBool>,
+    claim_slots: Arc<tokio::sync::Semaphore>,
     runtime_log_slot: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let ws_url = cfg
@@ -259,10 +278,10 @@ pub(crate) async fn connect_loop(
                 // Job execution only ever happens inside a spawned task, so every
                 // other select arm stays pollable during a multi-minute deploy.
                 // When the slot is held no second claim is attempted this tick.
-                if let Some(guard) = try_acquire(&job_slot) {
+                if let Ok(permit) = claim_slots.clone().try_acquire_owned() {
                     let cfg = cfg.clone();
                     tokio::spawn(async move {
-                        let _guard = guard;
+                        let _permit = permit;
                         claim_and_run_job(&cfg).await;
                     });
                 }
@@ -403,8 +422,10 @@ pub(crate) async fn claim_and_run_job(cfg: &Config) {
         }
     }
     match run_claimed_job_with_lease(cfg.clone(), job_id, claim_token, payload.clone()).await {
-        Ok(()) => {
-            if complete_claimed_job(cfg, job_id, claim_token, "success", None).await {
+        Ok(result) => {
+            if complete_claimed_job(cfg, job_id, claim_token, "success", None, result.as_ref())
+                .await
+            {
                 if let Some(deployment_id) = deployment_id {
                     finish_deployment_journal(cfg, deployment_id).await;
                 }
@@ -434,6 +455,7 @@ pub(crate) async fn claim_and_run_job(cfg: &Config) {
                 claim_token,
                 if cancelled { "cancelled" } else { "failed" },
                 Some(&message),
+                None,
             )
             .await
             {
@@ -451,7 +473,7 @@ pub(crate) async fn run_claimed_job_with_lease(
     job_id: Uuid,
     claim_token: Uuid,
     payload: Value,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Value>> {
     heartbeat_job(&cfg, job_id, claim_token, "running").await?;
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
     let renew_cfg = cfg.clone();
@@ -524,18 +546,55 @@ pub(crate) async fn complete_claimed_job(
     claim_token: Uuid,
     status: &str,
     failure: Option<&str>,
+    result: Option<&Value>,
 ) -> bool {
-    cfg.http
-        .post(format!("{}/api/agent/jobs/{id}/complete", cfg.api_url))
-        .header("x-hostlet-server-id", cfg.server_id.to_string())
-        .header("x-hostlet-agent-token", &cfg.agent_token)
-        .json(&json!({"status":status,"failure":failure,"claimToken":claim_token}))
-        .send()
-        .await
-        .is_ok_and(|response| {
-            response.status().is_success()
-                || (status == "success" && response.status() == reqwest::StatusCode::NOT_FOUND)
-        })
+    for attempt in 1..=4 {
+        let response = cfg
+            .http
+            .post(format!("{}/api/agent/jobs/{id}/complete", cfg.api_url))
+            .header("x-hostlet-server-id", cfg.server_id.to_string())
+            .header("x-hostlet-agent-token", &cfg.agent_token)
+            .json(&json!({
+                "status": status,
+                "failure": failure,
+                "result": result,
+                "claimToken": claim_token
+            }))
+            .send()
+            .await;
+        match response {
+            Ok(response)
+                if response.status().is_success()
+                    || (status == "success"
+                        && response.status() == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                return true;
+            }
+            Ok(response) => {
+                let response_status = response.status();
+                let retryable = response_status.is_server_error()
+                    || response_status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                let detail = response.text().await.unwrap_or_default();
+                tracing::warn!(
+                    %id,
+                    attempt,
+                    %response_status,
+                    detail = %redact(&detail),
+                    "agent job completion was rejected"
+                );
+                if !retryable {
+                    return false;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%id, attempt, error = %err, "agent job completion failed");
+            }
+        }
+        if attempt < 4 {
+            tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
+        }
+    }
+    false
 }
 
 pub(crate) async fn handle_ws_text(cfg: &Config, job_slot: &Arc<AtomicBool>, text: &str) {
@@ -580,7 +639,7 @@ pub(crate) async fn handle_ws_text(cfg: &Config, job_slot: &Arc<AtomicBool>, tex
     tokio::spawn(async move {
         let _guard = guard;
         match handle_job(cfg.clone(), payload.clone()).await {
-            Ok(()) => {
+            Ok(_) => {
                 if let Some(job_id) = job_id {
                     job_status(&cfg, job_id, "success", None).await;
                 }
@@ -614,26 +673,30 @@ async fn report_deployment_failure(cfg: &Config, payload: &Value, message: &str)
     status(cfg, deployment_id, "failed", Some(message)).await;
 }
 
-pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<()> {
+pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<Option<Value>> {
     match payload.get("type").and_then(|v| v.as_str()) {
-        Some("deploy") => deploy(cfg, payload).await,
-        Some("rollback") => rollback(cfg, payload).await,
-        Some("delete_app") => delete_app(cfg, payload).await,
+        Some("build") => build_artifact(cfg, payload).await.map(Some),
+        Some("release") => release_artifact(cfg, payload).await.map(|()| None),
+        Some("deploy") => deploy(cfg, payload).await.map(|()| None),
+        Some("rollback") => rollback(cfg, payload).await.map(|()| None),
+        Some("delete_app") => delete_app(cfg, payload).await.map(|()| None),
         Some("health_check") => {
             health_check_job(&cfg, &payload).await;
-            Ok(())
+            Ok(None)
         }
-        Some("capture_screenshot") => capture_screenshot_job(&cfg, &payload).await,
-        Some("browser_smoke") => capture_screenshot_job(&cfg, &payload).await,
+        Some("capture_screenshot") => capture_screenshot_job(&cfg, &payload).await.map(|()| None),
+        Some("browser_smoke") => capture_screenshot_job(&cfg, &payload).await.map(|()| None),
         Some("restart_container") => {
             restart_container_job(&cfg, &payload).await?;
-            Ok(())
+            Ok(None)
         }
-        Some("stop_container") => stop_container_job(&payload).await,
-        Some("suspend_app") | Some("stop_previous_deployment") => suspend_app_job(&payload).await,
-        Some("resume_app") => resume_app_job(&cfg, &payload).await,
-        Some("docker_cleanup") => docker_cleanup_job(&payload).await,
-        _ => Ok(()),
+        Some("stop_container") => stop_container_job(&payload).await.map(|()| None),
+        Some("suspend_app") | Some("stop_previous_deployment") => {
+            suspend_app_job(&payload).await.map(|()| None)
+        }
+        Some("resume_app") => resume_app_job(&cfg, &payload).await.map(|()| None),
+        Some("docker_cleanup") => docker_cleanup_job(&payload).await.map(|()| None),
+        _ => Ok(None),
     }
 }
 

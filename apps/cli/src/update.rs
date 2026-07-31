@@ -275,6 +275,7 @@ pub(crate) fn update_env_release_images(root: &Path, release: &ReleaseInfo) -> a
         env.insert(key, value);
     }
     env.insert("HOSTLET_IMAGE_TAG".into(), release.image_tag());
+    ensure_registry_config(root, &mut env)?;
     write_env_file(&env_path, &env)
 }
 

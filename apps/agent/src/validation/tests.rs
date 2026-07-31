@@ -102,6 +102,14 @@ fn buildx_args_use_local_cache_and_load() {
 }
 
 #[test]
+fn buildx_docker_driver_args_load_without_unsupported_cache_export() {
+    let args = buildx_args_without_cache("hostlet/app:test", "/tmp/Dockerfile", "/tmp/app");
+    assert!(args.contains(&"buildx"));
+    assert!(args.contains(&"--load"));
+    assert!(!args.contains(&"--cache-to"));
+}
+
+#[test]
 fn app_ports_bind_to_loopback_only() {
     assert_eq!(docker_port_map(3000), "127.0.0.1::3000");
     let override_yaml = compose_override_yaml(

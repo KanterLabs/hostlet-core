@@ -156,7 +156,7 @@ async fn change_reason(
             "UPDATE agent_jobs
              SET status='cancelled',
                  failure_summary='App was paused before this deployment started.',
-                 payload_json=payload_json - 'env' - 'github_token',
+                 payload_json=payload_json - 'env' - 'github_token' - 'artifact_registry',
                  updated_at=now(),finished_at=now()
              WHERE app_id=$1 AND job_type IN ('deploy','rollback') AND status='queued'
              RETURNING deployment_id",

@@ -23,7 +23,7 @@ export const DASHBOARD_POLL_INTERVAL_MS = 10000;
 export const RECENT_APPS_LIMIT = 5;
 
 // Deployment statuses that count as an in-flight ("active") deploy.
-const ACTIVE_DEPLOY_STATUSES = ["queued", "running", "building", "starting", "health_checking", "routing"];
+const ACTIVE_DEPLOY_STATUSES = ["queued", "queued_for_build", "running", "building", "publishing", "queued_for_release", "pulling", "starting", "health_checking", "routing"];
 
 export function isActive(status?: string | null) {
   return !!status && ACTIVE_DEPLOY_STATUSES.includes(status);

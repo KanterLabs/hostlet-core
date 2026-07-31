@@ -55,7 +55,7 @@ assert_contains "${STAGING_WORKFLOW}" 'bash scripts/ci-db-tests-selftest.sh'
 assert_contains "${STAGING_WORKFLOW}" 'bash scripts/ci-release-mainline-gate-selftest.sh'
 assert_contains "${STAGING_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
 assert_contains "${STAGING_WORKFLOW}" 'uses: ./.github/workflows/database-tests.yml'
-assert_contains "${STAGING_WORKFLOW}" 'needs: [secrets, rust, database, web, topology-e2e]'
+assert_contains "${STAGING_WORKFLOW}" 'needs: [secrets, rust, database, web, topology-e2e, remote-build]'
 assert_contains "${STAGING_WORKFLOW}" 'GHCR_PAT: ${{ secrets.GHCR_PAT }}'
 assert_contains "${STAGING_WORKFLOW}" 'repos/KanterLabs/hostlet-cloud/dispatches'
 assert_not_contains "${STAGING_WORKFLOW}" 'packages: write'
@@ -219,6 +219,7 @@ expected = {
         "rust": "homelab-heavy",
         "web": "homelab-heavy",
         "topology-e2e": "homelab-heavy",
+        "remote-build": "homelab-heavy",
         "images": "homelab-heavy",
         "notify-cloud": "homelab",
     },
@@ -239,6 +240,7 @@ expected = {
         "web": "homelab-heavy",
         "compose": "homelab",
         "docker": "homelab-heavy",
+        "remote-build": "homelab-heavy",
     },
     sys.argv[6]: {"prewarm": "homelab"},
     sys.argv[7]: {
@@ -275,7 +277,7 @@ same_repo_guard = (
     "&& github.event.label.name == 'homelab-ci-approved'"
 )
 approved_guards = workflow.count(same_repo_guard)
-if light_jobs != 3 or heavy_jobs != 3 or approved_guards != 5:
+if light_jobs != 3 or heavy_jobs != 4 or approved_guards != 6:
     raise SystemExit(
         "PR homelab CI must use canonical tiers behind same-repository approval: "
         f"light={light_jobs} heavy={heavy_jobs} guards={approved_guards}"

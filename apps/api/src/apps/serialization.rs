@@ -49,6 +49,7 @@ pub const APP_SELECT_BODY: &str = r#"
           a.cpu_limit,
           a.public_exposure,
           a.auto_deploy,
+          a.build_pool_id,
           a.suspended_at,
           a.created_at,
           s.id AS server_id,
@@ -252,6 +253,12 @@ pub fn base_app_json(r: sqlx::postgres::PgRow, include_server: bool) -> serde_js
             )
         }))
     });
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "buildPoolId".into(),
+            serde_json::json!(or_default::<Option<Uuid>>(&r, "build_pool_id", None)),
+        );
+    }
     apply_storage_footprint(
         &mut value,
         storage_volume_bytes,
