@@ -115,6 +115,15 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
                 )
             }),
         )
+        .route(
+            "/install-builder.sh",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/x-shellscript")],
+                    include_str!("../../../scripts/install-builder.sh"),
+                )
+            }),
+        )
         .route("/auth/github/device/start", post(auth::github_device_start))
         .route("/auth/github/device/poll", post(auth::github_device_poll))
         .route("/api/session", get(auth::session_status))
@@ -151,6 +160,41 @@ pub fn core_router(state: AppState) -> anyhow::Result<Router> {
         )
         .route("/api/servers/:id/install", get(web::server_install_command))
         .route("/api/agent/register", post(agent::register))
+        .route(
+            "/api/agent/builders/register",
+            post(agent::build_fleet::register_builder),
+        )
+        .route(
+            "/api/build-pools",
+            get(agent::build_fleet::list_build_pools).post(agent::build_fleet::create_build_pool),
+        )
+        .route(
+            "/api/build-pools/:id",
+            axum::routing::patch(agent::build_fleet::update_build_pool)
+                .delete(agent::build_fleet::delete_build_pool),
+        )
+        .route(
+            "/api/build-pools/:id/enrollments",
+            post(agent::build_fleet::create_builder_enrollment),
+        )
+        .route(
+            "/api/build-pools/:id/qualify",
+            post(agent::build_fleet::qualify_build_pool),
+        )
+        .route("/api/builders", get(agent::build_fleet::list_builders))
+        .route(
+            "/api/builders/:id",
+            axum::routing::patch(agent::build_fleet::update_builder)
+                .delete(agent::build_fleet::revoke_builder),
+        )
+        .route(
+            "/api/apps/:id/build-pool",
+            put(agent::build_fleet::set_app_build_pool),
+        )
+        .route(
+            "/api/artifact-registry/status",
+            get(agent::build_fleet::registry_status),
+        )
         .route("/api/agent/events", post(agent::event))
         .route("/api/agent/health-targets", get(agent::health_targets))
         .route(
@@ -306,6 +350,7 @@ fn is_machine_agent_path(path: &str) -> bool {
     matches!(
         path,
         "/api/agent/register"
+            | "/api/agent/builders/register"
             | "/api/agent/events"
             | "/api/agent/jobs/claim"
             | "/api/agent/screenshots"
@@ -388,6 +433,10 @@ mod tests {
         assert!(!requires_browser_origin(
             &Method::POST,
             "/api/agent/register"
+        ));
+        assert!(!requires_browser_origin(
+            &Method::POST,
+            "/api/agent/builders/register"
         ));
         assert!(!requires_browser_origin(
             &Method::POST,

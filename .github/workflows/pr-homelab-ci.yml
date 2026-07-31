@@ -116,6 +116,10 @@ jobs:
       HOSTLET_WEB_IMAGE: ghcr.io/shanekanterman04/hostlet-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       HOSTLET_AGENT_IMAGE: ghcr.io/shanekanterman04/hostlet-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       HOSTLET_SCREENSHOTTER_IMAGE: ghcr.io/shanekanterman04/hostlet-screenshotter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      HOSTLET_ARTIFACT_REGISTRY_PUSH_USERNAME: hostlet-builder
+      HOSTLET_ARTIFACT_REGISTRY_PUSH_PASSWORD: ci-only-registry-push
+      HOSTLET_ARTIFACT_REGISTRY_PULL_USERNAME: hostlet-runner
+      HOSTLET_ARTIFACT_REGISTRY_PULL_PASSWORD: ci-only-registry-pull
       DOCKER_GID: "998"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -141,3 +145,19 @@ jobs:
       - run: scripts/ci-docker-retry.sh docker build -f apps/api/Dockerfile -t hostlet-api-ci .
       - run: scripts/ci-docker-retry.sh docker build -f apps/agent/Dockerfile -t hostlet-agent-ci .
       - run: scripts/ci-screenshotter-smoke.sh
+
+  remote-build:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    runs-on: homelab-heavy
+    env:
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - run: scripts/ci-remote-build-e2e.sh

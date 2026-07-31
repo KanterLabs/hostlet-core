@@ -260,6 +260,7 @@ mod tests {
             app_public_scheme: crate::runtime::AppPublicScheme::Http,
             health_host: "127.0.0.1".into(),
             local_router: None,
+            max_concurrent_jobs: 1,
         }
     }
 

@@ -3,7 +3,9 @@
 }
 
 http://{$HOSTLET_LAN_BIND_ADDR:127.0.0.1}:{$HOSTLET_LAN_PORT:80} {
-	@api path /api/* /auth/* /webhooks/* /install-agent.sh /ws/* /health
+	@registry path /v2/*
+	reverse_proxy @registry 127.0.0.1:5000
+	@api path /api/* /auth/* /webhooks/* /install-agent.sh /install-builder.sh /ws/* /health
 	reverse_proxy @api 127.0.0.1:8080
 	reverse_proxy 127.0.0.1:3000
 }

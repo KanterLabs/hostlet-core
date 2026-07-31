@@ -281,7 +281,7 @@ pub async fn commit_activation(
         .await
         .is_err()
         || sqlx::query(
-            "UPDATE agent_jobs SET status='success',payload_json=payload_json-'env'-'github_token',
+            "UPDATE agent_jobs SET status='success',payload_json=payload_json-'env'-'github_token'-'artifact_registry',
                     lease_expires_at=NULL,updated_at=now(),finished_at=now() WHERE id=$1",
         )
         .bind(request.job_id)
