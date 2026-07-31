@@ -1,4 +1,4 @@
--- Remote build pools and disposable OCI artifact transport.  Existing installs
+-- Remote build pools and disposable OCI artifact transport. Existing installs
 -- retain a local default pool; remote builders are opt-in and never become app
 -- runners merely by enrolling.
 
