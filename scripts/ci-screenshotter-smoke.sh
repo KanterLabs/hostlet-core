@@ -6,7 +6,8 @@ IMAGE="${HOSTLET_SCREENSHOTTER_TEST_IMAGE:-hostlet-screenshotter-ci}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hostlet-screenshotter-smoke.XXXXXX")"
 SMOKE_CONTAINER="hostlet-screenshotter-smoke-$$"
 REDIRECT_CONTAINER="hostlet-screenshotter-redirect-$$"
-trap 'docker rm -f "${SMOKE_CONTAINER}" "${REDIRECT_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
+FIXTURE_CONTAINER="hostlet-screenshotter-fixture-$$"
+trap 'docker rm -f "${SMOKE_CONTAINER}" "${REDIRECT_CONTAINER}" "${FIXTURE_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
 
 if [ "${HOSTLET_SCREENSHOTTER_SKIP_BUILD:-0}" != "1" ]; then
   "${ROOT}/scripts/ci-docker-retry.sh" docker build -f "${ROOT}/apps/screenshotter/Dockerfile" -t "${IMAGE}" "${ROOT}"
@@ -102,6 +103,72 @@ if len(data) < 128 or not (data.startswith(b"RIFF") and data[8:12] == b"WEBP"):
 PY
 
 echo "screenshotter smoke passed"
+
+FIXTURE_PORT=""
+for port in 18090 18091 18092 18093 18094; do
+  docker rm -f "${FIXTURE_CONTAINER}" >/dev/null 2>&1 || true
+  if ! docker run -d --rm --network host --name "${FIXTURE_CONTAINER}" \
+    --entrypoint node \
+    "${IMAGE}" \
+    -e "require('http').createServer((req, res) => { if (req.url === '/challenge') { res.writeHead(403, { 'Content-Type': 'text/html', 'cf-mitigated': 'challenge' }); res.end('<!doctype html><title>Checking your browser</title>'); } else if (req.url === '/error') { res.writeHead(503, { 'Content-Type': 'text/html' }); res.end('<!doctype html><title>Unavailable</title>'); } else if (req.url === '/sparse') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<!doctype html><style>html,body{margin:0;height:100%;background:#123456}</style>'); } else { res.writeHead(404); res.end(); } }).listen(${port}, '127.0.0.1');" \
+    >"${TMP_DIR}/fixture-container" 2>"${TMP_DIR}/fixture-start.log"; then
+    continue
+  fi
+  if docker run --rm --network host --entrypoint node \
+    "${IMAGE}" \
+    -e "require('http').get('http://127.0.0.1:${port}/sparse', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1));" \
+    >/dev/null 2>&1; then
+    FIXTURE_PORT="${port}"
+    break
+  fi
+done
+
+if [ -z "${FIXTURE_PORT}" ]; then
+  echo "screenshotter fixture server did not start on a Chromium-safe port"
+  cat "${TMP_DIR}/fixture-start.log" 2>/dev/null || true
+  exit 1
+fi
+
+if docker run --rm --network host "${IMAGE}" \
+  "http://127.0.0.1:${FIXTURE_PORT}/challenge" /tmp/challenge.webp \
+  >"${TMP_DIR}/challenge.log" 2>&1; then
+  echo "screenshotter accepted a Cloudflare challenge response"
+  cat "${TMP_DIR}/challenge.log"
+  exit 1
+fi
+grep -q "cf-mitigated: challenge" "${TMP_DIR}/challenge.log"
+
+if docker run --rm --network host "${IMAGE}" \
+  "http://127.0.0.1:${FIXTURE_PORT}/error" /tmp/http-error.webp \
+  >"${TMP_DIR}/http-error.log" 2>&1; then
+  echo "screenshotter accepted an HTTP error response"
+  cat "${TMP_DIR}/http-error.log"
+  exit 1
+fi
+grep -q "navigation returned HTTP 503" "${TMP_DIR}/http-error.log"
+
+if ! docker run --rm --network host \
+  -e HOSTLET_SCREENSHOT_MIN_BYTES=100000 \
+  "${IMAGE}" "http://127.0.0.1:${FIXTURE_PORT}/sparse" /tmp/sparse-manual.webp \
+  >"${TMP_DIR}/sparse-manual.log" 2>&1; then
+  echo "manual capture rejected a sparse but visually ready page"
+  cat "${TMP_DIR}/sparse-manual.log"
+  exit 1
+fi
+grep -q "retaining the manual capture" "${TMP_DIR}/sparse-manual.log"
+
+if docker run --rm --network host \
+  -e HOSTLET_BROWSER_SMOKE=1 \
+  -e HOSTLET_SCREENSHOT_MIN_BYTES=100000 \
+  "${IMAGE}" "http://127.0.0.1:${FIXTURE_PORT}/sparse" /tmp/sparse-smoke.webp \
+  >"${TMP_DIR}/sparse-smoke.log" 2>&1; then
+  echo "browser smoke accepted a sparse page below the byte floor"
+  cat "${TMP_DIR}/sparse-smoke.log"
+  exit 1
+fi
+grep -q "blank or near-blank" "${TMP_DIR}/sparse-smoke.log"
+
+echo "screenshotter challenge and sparse-page regressions passed"
 
 BLANK_URL="$(python3 - <<'PY'
 from urllib.parse import quote

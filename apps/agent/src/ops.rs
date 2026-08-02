@@ -434,19 +434,29 @@ pub(crate) async fn resume_app_job(cfg: &Config, payload: &Value) -> anyhow::Res
 const SCREENSHOT_ERR_TIMEOUT: &str = "Timed out loading the page";
 const SCREENSHOT_ERR_BLOCKED: &str = "Blocked a private or loopback address";
 const SCREENSHOT_ERR_SITE: &str = "The site returned an error";
+const SCREENSHOT_ERR_CHALLENGE: &str = "The site's security check blocked capture";
 const SCREENSHOT_ERR_SERVICE: &str = "Screenshot service crashed";
 const SCREENSHOT_ERR_UPLOAD: &str = "Failed to upload the screenshot";
 const SCREENSHOT_ERR_RUNTIME: &str = "Browser check found a runtime error";
-const SCREENSHOT_ERR_BLANK: &str = "Browser check found a blank or incomplete page";
+const SCREENSHOT_ERR_BLANK: &str = "The page is blank or still loading";
 
 /// Classifies a screenshot-pipeline error into one of the reasons above by
 /// matching stable Docker/Playwright/SSRF-guard phrases in the whole error
 /// chain; unrecognized output falls back to a generic service crash.
 fn screenshot_failure_reason(err: &anyhow::Error) -> &'static str {
     let detail = format!("{err:#}").to_ascii_lowercase();
-    if detail.contains("uncaught page error") || detail.contains("critical same-origin resource") {
+    if detail.contains("cf-mitigated: challenge")
+        || detail.contains("cloudflare security challenge")
+    {
+        SCREENSHOT_ERR_CHALLENGE
+    } else if detail.contains("uncaught page error")
+        || detail.contains("critical same-origin resource")
+    {
         SCREENSHOT_ERR_RUNTIME
-    } else if detail.contains("blank or near-blank") {
+    } else if detail.contains("blank or near-blank")
+        || detail.contains("page remained blank")
+        || detail.contains("visual-readiness")
+    {
         SCREENSHOT_ERR_BLANK
     } else if detail.contains("private or local address")
         || detail.contains("public hostname")
@@ -457,7 +467,10 @@ fn screenshot_failure_reason(err: &anyhow::Error) -> &'static str {
         SCREENSHOT_ERR_BLOCKED
     } else if detail.contains("timeout") || detail.contains("timed out") {
         SCREENSHOT_ERR_TIMEOUT
-    } else if detail.contains("net::err") || detail.contains("too many redirects") {
+    } else if detail.contains("net::err")
+        || detail.contains("too many redirects")
+        || detail.contains("navigation returned http ")
+    {
         SCREENSHOT_ERR_SITE
     } else {
         SCREENSHOT_ERR_SERVICE

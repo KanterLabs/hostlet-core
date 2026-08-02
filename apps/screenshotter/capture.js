@@ -25,6 +25,8 @@ if (!["jpeg", "webp"].includes(outputFormat)) {
 const screenshotQuality = Number(process.env.HOSTLET_SCREENSHOT_QUALITY) || 82;
 const browserSmoke = process.env.HOSTLET_BROWSER_SMOKE === "1";
 const BROWSER_SMOKE_SKIP = "HOSTLET_BROWSER_SMOKE_SKIPPED_NON_HTML";
+const CLOUDFLARE_CHALLENGE_ERROR =
+  "capture rejected: Cloudflare security challenge (cf-mitigated: challenge)";
 
 function navigationContentType(navigation, url) {
   const responseContentType = navigation?.headers()["content-type"] || "";
@@ -250,11 +252,13 @@ async function captureWithSizeFloor(page, outputPath) {
   await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
   buffer = await captureScreenshot(page, outputPath);
   if (buffer.length < sizeFloorBytes) {
-    throw new Error(
-      `${browserSmoke ? "browser smoke rejected: page remained blank or near-blank; " : "capture rejected: "}` +
-        `screenshot buffer ${buffer.length} bytes is below the ` +
-        `${sizeFloorBytes} byte floor after retry`
-    );
+    const detail =
+      `screenshot buffer ${buffer.length} bytes is below the ` +
+      `${sizeFloorBytes} byte floor after retry`;
+    if (browserSmoke) {
+      throw new Error(`browser smoke rejected: page remained blank or near-blank; ${detail}`);
+    }
+    console.error(`capture warning: ${detail}; retaining the manual capture`);
   }
   return buffer;
 }
@@ -339,6 +343,14 @@ async function main() {
       await rejectBlockedRedirects(targetUrl, allowedOrigin, lookupCache);
     }
     const navigation = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    const navigationHeaders = navigation?.headers() || {};
+    if (navigationHeaders["cf-mitigated"]?.trim().toLowerCase() === "challenge") {
+      throw new Error(CLOUDFLARE_CHALLENGE_ERROR);
+    }
+    const navigationStatus = navigation?.status() || 0;
+    if (navigationStatus >= 400) {
+      throw new Error(`capture rejected: navigation returned HTTP ${navigationStatus}`);
+    }
     if (browserSmoke) {
       const contentType = navigationContentType(navigation, targetUrl);
       if (contentType && !contentType.toLowerCase().includes("text/html")) {

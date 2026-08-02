@@ -102,6 +102,14 @@ fn screenshot_failure_reason_maps_known_categories() {
             SCREENSHOT_ERR_SITE,
         ),
         (
+            "capture rejected: navigation returned HTTP 503",
+            SCREENSHOT_ERR_SITE,
+        ),
+        (
+            "capture rejected: Cloudflare security challenge (cf-mitigated: challenge)",
+            SCREENSHOT_ERR_CHALLENGE,
+        ),
+        (
             "too many redirects while validating screenshot target",
             SCREENSHOT_ERR_SITE,
         ),
@@ -119,6 +127,10 @@ fn screenshot_failure_reason_maps_known_categories() {
         ),
         (
             "browser smoke rejected: page remained blank or near-blank",
+            SCREENSHOT_ERR_BLANK,
+        ),
+        (
+            "capture rejected: page failed the visual-readiness probe after retry",
             SCREENSHOT_ERR_BLANK,
         ),
     ];
