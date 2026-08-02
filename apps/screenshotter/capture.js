@@ -1,8 +1,15 @@
 const fs = require("fs");
 const path = require("path");
-const dns = require("dns").promises;
 const net = require("net");
 const { chromium } = require("playwright-core");
+const {
+  HOP_BY_HOP_HEADERS,
+  internalRequest,
+  isBlockedUrl,
+  lookupPublicAddress,
+  publicRequest,
+  requestBody,
+} = require("./network");
 
 const [targetUrl, outputPath] = process.argv.slice(2);
 if (!targetUrl || !outputPath) {
@@ -27,6 +34,7 @@ const browserSmoke = process.env.HOSTLET_BROWSER_SMOKE === "1";
 const BROWSER_SMOKE_SKIP = "HOSTLET_BROWSER_SMOKE_SKIPPED_NON_HTML";
 const CLOUDFLARE_CHALLENGE_ERROR =
   "capture rejected: Cloudflare security challenge (cf-mitigated: challenge)";
+const MAX_NAVIGATION_REDIRECTS = 10;
 
 function navigationContentType(navigation, url) {
   const responseContentType = navigation?.headers()["content-type"] || "";
@@ -53,112 +61,317 @@ const MIN_BYTES_BASE_1X =
   Number(process.env.HOSTLET_SCREENSHOT_MIN_BYTES) || (outputFormat === "webp" ? 14000 : 35000);
 const sizeFloorBytes = MIN_BYTES_BASE_1X * deviceScaleFactor;
 
-// The capture target's own origin is always allowed because self-hosted apps
-// legitimately resolve to local addresses (split-horizon DNS, host-published
-// ports). Every OTHER request (redirect hops, subresources, fetches) must be
-// publicly routable, so any host resolving to a private/loopback/link-local/
-// CGNAT address is blocked. Unknown or unparseable input fails closed.
-function isBlockedIp(ip) {
-  const kind = net.isIP(ip);
-  if (kind === 4) {
-    const octets = ip.split(".").map(Number);
-    const [a, b] = octets;
-    if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    if (octets.every((part) => part === 255)) return true;
-    return false;
-  }
-  if (kind === 6) {
-    const lower = ip.toLowerCase();
-    const mapped = ipv4FromMappedIpv6(lower);
-    if (mapped) return isBlockedIp(mapped);
-    if (lower === "::" || lower === "::1") return true;
-    const firstGroup = lower.split(":")[0];
-    if (firstGroup.startsWith("fc") || firstGroup.startsWith("fd")) return true;
-    const firstHextet = parseInt(firstGroup, 16) || 0;
-    if ((firstHextet & 0xffc0) === 0xfe80) return true;
-    if (lower.startsWith("ff")) return true;
-    return false;
-  }
-  return true;
+function isRedirectStatus(status) {
+  return [300, 301, 302, 303, 307, 308].includes(status);
 }
 
-function ipv4FromMappedIpv6(ip) {
-  const dotted = /^(.*:)ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
-  if (dotted) return dotted[2];
-
-  const groups = expandIpv6(ip);
-  if (!groups) return null;
-  if (
-    groups.slice(0, 5).every((group) => group === 0) &&
-    groups[5] === 0xffff
-  ) {
-    const hi = groups[6];
-    const lo = groups[7];
-    return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+function parseRouterPort(target) {
+  const raw = process.env.HOSTLET_SCREENSHOT_ROUTER_PORT;
+  if (raw === undefined || raw === "") return null;
+  if (!target || (target.protocol !== "http:" && target.protocol !== "https:")) {
+    throw new Error("HOSTLET_SCREENSHOT_ROUTER_PORT requires an http(s) target URL");
   }
-  return null;
+  if (!/^\d{1,5}$/.test(raw)) {
+    throw new Error("HOSTLET_SCREENSHOT_ROUTER_PORT must be a TCP port from 1 to 65535");
+  }
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("HOSTLET_SCREENSHOT_ROUTER_PORT must be a TCP port from 1 to 65535");
+  }
+  if (!target.host || /[\r\n]/.test(target.host)) {
+    throw new Error("canonical target host is not valid for internal routing");
+  }
+  if (target.username || target.password) {
+    throw new Error("canonical target credentials are not supported with internal routing");
+  }
+  return {
+    port,
+    hostname: target.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, ""),
+    hostHeader: target.host,
+    canonicalOrigin: target.origin,
+    canonicalProtocol: target.protocol,
+  };
 }
 
-function expandIpv6(ip) {
-  if (ip.includes(".")) return null;
-  const parts = ip.split("::");
-  if (parts.length > 2) return null;
-  const left = parts[0] ? parts[0].split(":") : [];
-  const right = parts.length === 2 && parts[1] ? parts[1].split(":") : [];
-  if (parts.length === 1 && left.length !== 8) return null;
-  const missing = 8 - left.length - right.length;
-  if (missing < 0 || (parts.length === 1 && missing !== 0)) return null;
-  const rawGroups = [...left, ...Array(missing).fill("0"), ...right];
-  if (rawGroups.length !== 8) return null;
-  const groups = rawGroups.map((group) => {
-    if (!/^[0-9a-f]{1,4}$/.test(group)) return Number.NaN;
-    return parseInt(group, 16);
-  });
-  return groups.some(Number.isNaN) ? null : groups;
+function isCanonicalHostname(url, router) {
+  return (
+    router &&
+    url.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "") ===
+      router.hostname.replace(/\.$/, "")
+  );
 }
 
-async function isBlockedUrl(url, lookupCache) {
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  if (net.isIP(host)) {
-    return isBlockedIp(host);
+function isInternalRouterUrl(url, router) {
+  if (!isCanonicalHostname(url, router) || url.protocol !== "http:") return false;
+  return Number(url.port || 80) === router.port;
+}
+
+function internalUrlFor(url, router) {
+  if (!router || !isCanonicalHostname(url, router)) {
+    throw new Error("internal routing requested for a non-canonical host");
   }
-  let addresses = lookupCache.get(host);
-  if (!addresses) {
+  const hostname = net.isIP(router.hostname) === 6 ? `[${router.hostname}]` : router.hostname;
+  const internal = new URL(`http://${hostname}:${router.port}`);
+  internal.pathname = url.pathname;
+  internal.search = url.search;
+  return internal;
+}
+
+function normalizeInternalLocation(location, currentUrl, allowedOrigin, router) {
+  const next = new URL(location, currentUrl);
+  if (next.protocol !== "http:" && next.protocol !== "https:") {
+    throw new Error(`blocked redirect to unsupported protocol ${next.protocol}`);
+  }
+
+  // The router may expose either a relative Location or an absolute HTTP URL
+  // on its own listener port. Neither should leak the private listener URL to
+  // Chromium: the page must retain its canonical HTTPS origin.
+  if (isInternalRouterUrl(next, router)) {
+    const canonical = new URL(allowedOrigin);
+    canonical.pathname = next.pathname;
+    canonical.search = next.search;
+    canonical.hash = next.hash;
+    return canonical;
+  }
+  if (router && isCanonicalHostname(next, router) && next.origin !== allowedOrigin) {
+    throw new Error(
+      `blocked canonical-host redirect to ${next.origin}; only the canonical origin is allowed`
+    );
+  }
+  return next;
+}
+
+function locationHeader(headers) {
+  if (!headers) return null;
+  return headers.location || headers.Location || null;
+}
+
+function defaultCookiePath(pathname) {
+  if (!pathname || !pathname.startsWith("/") || pathname === "/") return "/";
+  const slash = pathname.lastIndexOf("/");
+  return slash <= 0 ? "/" : pathname.slice(0, slash);
+}
+
+function parseSetCookie(value, logicalUrl) {
+  const parts = String(value).split(";");
+  const first = parts.shift() || "";
+  const separator = first.indexOf("=");
+  if (separator <= 0) return null;
+  const name = first.slice(0, separator).trim();
+  const cookieValue = first.slice(separator + 1).trim();
+  if (!name || /[\x00-\x20(),\/:;<=>?@[\]{}]/.test(name)) return null;
+
+  const cookie = {
+    name,
+    value: cookieValue,
+    domain: logicalUrl.hostname,
+    path: defaultCookiePath(logicalUrl.pathname),
+  };
+  let maxAge = null;
+  for (const rawAttribute of parts) {
+    const [rawName, ...rawValue] = rawAttribute.trim().split("=");
+    const attribute = rawName.toLowerCase();
+    const attributeValue = rawValue.join("=").trim();
+    if (attribute === "domain" && attributeValue) {
+      const domain = attributeValue.replace(/^\./, "").toLowerCase();
+      const host = logicalUrl.hostname.toLowerCase();
+      if (host !== domain && !host.endsWith(`.${domain}`)) return null;
+      cookie.domain = attributeValue.toLowerCase();
+    } else if (attribute === "path" && attributeValue.startsWith("/")) {
+      cookie.path = attributeValue;
+    } else if (attribute === "secure") {
+      cookie.secure = true;
+    } else if (attribute === "httponly") {
+      cookie.httpOnly = true;
+    } else if (attribute === "samesite") {
+      const sameSite = attributeValue.toLowerCase();
+      if (sameSite === "strict") cookie.sameSite = "Strict";
+      else if (sameSite === "lax") cookie.sameSite = "Lax";
+      else if (sameSite === "none") cookie.sameSite = "None";
+    } else if (attribute === "max-age" && /^-?\d+$/.test(attributeValue)) {
+      maxAge = Number(attributeValue);
+    } else if (attribute === "expires" && attributeValue) {
+      const expires = Date.parse(attributeValue);
+      if (Number.isFinite(expires)) cookie.expires = Math.floor(expires / 1000);
+    }
+  }
+  if (maxAge !== null) cookie.expires = Math.floor(Date.now() / 1000) + maxAge;
+  return cookie;
+}
+
+async function applySetCookies(context, values, logicalUrl) {
+  const cookies = values
+    .map((value) => parseSetCookie(value, logicalUrl))
+    .filter((cookie) => cookie !== null);
+  if (cookies.length > 0) await context.addCookies(cookies);
+}
+
+// Requests fulfilled by the internal router never pass through Chromium's
+// network stack, so Chromium does not get a chance to construct the Cookie
+// header for a same-origin redirect hop. Rebuild it from the browser context
+// only after a canonical/same-site request has been established; cross-site
+// initiators retain their original browser-supplied header and never receive
+// synthesized credentials.
+async function headersWithBrowserCookies(context, url, requestHeaders = {}) {
+  const headers = { ...requestHeaders };
+  for (const name of Object.keys(headers)) {
+    if (name.toLowerCase() === "cookie") delete headers[name];
+  }
+  const cookies = await context.cookies(url.href);
+  if (cookies.length > 0) {
+    headers.cookie = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  }
+  return headers;
+}
+
+async function fetchInternalRoute(
+  route,
+  initialUrl,
+  allowedOrigin,
+  router,
+  lookupCache,
+  context
+) {
+  const request = route.request();
+  const initialHeaders = { ...request.headers() };
+  const initiatorOrigin = (() => {
     try {
-      addresses = await dns.lookup(host, { all: true, verbatim: true });
+      const frameUrl = request.frame()?.url();
+      if (frameUrl) return new URL(frameUrl).origin;
     } catch {
-      addresses = [];
+      // Detached frames and early navigation requests have no usable origin.
     }
-    lookupCache.set(host, addresses);
-  }
-  return addresses.length === 0 || addresses.some((entry) => isBlockedIp(entry.address));
-}
+    return null;
+  })();
+  const isNavigation =
+    typeof request.isNavigationRequest === "function" && request.isNavigationRequest();
+  const canRebuildRedirectCookies =
+    initialUrl.origin === allowedOrigin &&
+    (initiatorOrigin === allowedOrigin || (initiatorOrigin === null && isNavigation));
+  let current = initialUrl;
+  let method = request.method();
+  let postData = requestBody(request, initialHeaders);
+  let headers = { ...initialHeaders, host: router.hostHeader };
 
-async function rejectBlockedRedirects(startUrl, allowedOrigin, lookupCache) {
-  let current = new URL(startUrl);
-  for (let hop = 0; hop < 10; hop += 1) {
-    const response = await fetch(current, { redirect: "manual" });
-    if (response.status < 300 || response.status >= 400) {
-      return;
+  for (let hop = 0; hop < MAX_NAVIGATION_REDIRECTS; hop += 1) {
+    // Keep the first-hop Cookie header exactly as Chromium supplied it. For
+    // later canonical hops, context.cookies applies path/domain/expiry rules
+    // after any Set-Cookie response has been installed.
+    if (hop > 0 && canRebuildRedirectCookies) {
+      headers = await headersWithBrowserCookies(context, current, headers);
     }
-    const location = response.headers.get("location");
-    if (!location) {
-      throw new Error(`redirect from ${current.origin} did not include a Location header`);
+    const response = await internalRequest(current, router, {
+      method,
+      headers,
+      body: postData,
+    });
+    const location = locationHeader(response.headers);
+    if (!isRedirectStatus(response.status) || !location) {
+      if (canRebuildRedirectCookies) {
+        await applySetCookies(context, response.setCookies || [], current);
+      }
+      const responseHeaders = { ...response.headers };
+      delete responseHeaders["set-cookie"];
+      delete responseHeaders.connection;
+      delete responseHeaders["keep-alive"];
+      delete responseHeaders["transfer-encoding"];
+      delete responseHeaders.upgrade;
+      return {
+        status: response.status,
+        headers: responseHeaders,
+        body: response.body,
+      };
     }
-    const next = new URL(location, current);
-    if (next.protocol !== "http:" && next.protocol !== "https:") {
-      throw new Error(`blocked redirect to unsupported protocol ${next.protocol}`);
+
+    const next = normalizeInternalLocation(location, current, allowedOrigin, router);
+    if (next.origin !== allowedOrigin) {
+      if (await isBlockedUrl(next, lookupCache)) {
+        throw new Error(`blocked request to ${next.origin} (resolves to a private or local address)`);
+      }
+      // Intentional public cross-origin redirects retain their normal browser
+      // behavior, but the Location is still canonicalized if it came from the
+      // internal listener.
+      const responseHeaders = { ...response.headers, location: next.href };
+      delete responseHeaders["set-cookie"];
+      delete responseHeaders.connection;
+      delete responseHeaders["keep-alive"];
+      delete responseHeaders["transfer-encoding"];
+      delete responseHeaders.upgrade;
+      if (canRebuildRedirectCookies) {
+        await applySetCookies(context, response.setCookies || [], current);
+      }
+      return { status: response.status, headers: responseHeaders, body: response.body };
     }
-    if (next.origin !== allowedOrigin && (await isBlockedUrl(next, lookupCache))) {
-      throw new Error(`blocked request to ${next.origin} (resolves to a private or local address)`);
+
+    if (hop === MAX_NAVIGATION_REDIRECTS - 1) {
+      throw new Error(
+        `too many redirects while fetching canonical subresource (limit ${MAX_NAVIGATION_REDIRECTS})`
+      );
+    }
+    if (canRebuildRedirectCookies) {
+      await applySetCookies(context, response.setCookies || [], current);
+    }
+    if ([301, 302, 303].includes(response.status) && !["GET", "HEAD"].includes(method)) {
+      method = "GET";
+      postData = undefined;
+      headers = { ...headers };
+      delete headers["content-length"];
+      delete headers["content-type"];
     }
     current = next;
   }
-  throw new Error("too many redirects while validating screenshot target");
+  throw new Error("canonical subresource redirect resolution failed");
+}
+
+async function resolveNavigationTarget(startUrl, allowedOrigin, router, lookupCache, context) {
+  let current = new URL(startUrl);
+  for (let hop = 0; hop < MAX_NAVIGATION_REDIRECTS; hop += 1) {
+    let response;
+    if (router && current.origin === allowedOrigin) {
+      // The direct Node request is deliberately manual: redirect targets are
+      // validated one hop at a time and the canonical Host reaches Caddy.
+      response = await internalRequest(current, router, {
+        headers: await headersWithBrowserCookies(context, current),
+      });
+    } else if (current.origin !== allowedOrigin) {
+      const address = await lookupPublicAddress(current, lookupCache);
+      if (!address) {
+        throw new Error(
+          `blocked request to ${current.origin} (resolves to a private or local address)`
+        );
+      }
+      response = await publicRequest(current, address);
+    } else {
+      const publicResponse = await fetch(current, { redirect: "manual" });
+      response = {
+        status: publicResponse.status,
+        headers: Object.fromEntries(publicResponse.headers.entries()),
+        setCookies:
+          typeof publicResponse.headers.getSetCookie === "function"
+            ? publicResponse.headers.getSetCookie()
+            : [],
+      };
+    }
+    if (!isRedirectStatus(response.status)) return current.href;
+
+    await applySetCookies(context, response.setCookies || [], current);
+
+    const location = locationHeader(response.headers);
+    if (!location) {
+      throw new Error(`redirect from ${current.origin} did not include a Location header`);
+    }
+    const next = normalizeInternalLocation(location, current, allowedOrigin, router);
+    if (next.origin !== allowedOrigin) {
+      if (await isBlockedUrl(next, lookupCache)) {
+        throw new Error(`blocked request to ${next.origin} (resolves to a private or local address)`);
+      }
+      return next.href;
+    }
+    current = next;
+  }
+  throw new Error(
+    `too many redirects while validating screenshot target (limit ${MAX_NAVIGATION_REDIRECTS})`
+  );
 }
 
 // A capture is "visually ready" once authored CSS has plausibly applied and,
@@ -263,7 +476,27 @@ async function captureWithSizeFloor(page, outputPath) {
   return buffer;
 }
 
+function closeWebSocketRoute(websocket, code, reason) {
+  try {
+    const safeCode = Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : 1011;
+    return websocket.close({ code: safeCode, reason: String(reason || "internal WebSocket unavailable").slice(0, 123) });
+  } catch {
+    return Promise.resolve();
+  }
+}
+
 async function main() {
+  let target = null;
+  try {
+    const parsed = new URL(targetUrl);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") target = parsed;
+  } catch {
+    // Let page.goto report malformed targets with its normal diagnostic.
+  }
+  const allowedOrigin = target ? target.origin : null;
+  const router = parseRouterPort(target);
+  const lookupCache = new Map();
+
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   const browser = await chromium.launch({
     headless: true,
@@ -309,40 +542,108 @@ async function main() {
       });
     }
 
-    let allowedOrigin = null;
-    try {
-      const target = new URL(targetUrl);
-      if (target.protocol === "http:" || target.protocol === "https:") {
-        allowedOrigin = target.origin;
-      }
-    } catch {
-      allowedOrigin = null;
-    }
-
-    const lookupCache = new Map();
     await context.route("**/*", async (route) => {
       try {
         const url = new URL(route.request().url());
         if (url.protocol !== "http:" && url.protocol !== "https:") {
           return route.continue();
         }
+        if (router && allowedOrigin && isCanonicalHostname(url, router) && url.origin !== allowedOrigin) {
+          throw new Error(
+            `blocked canonical-host request to ${url.href}; only the canonical origin may reach Chromium`
+          );
+        }
+        if (router && allowedOrigin && url.origin === allowedOrigin) {
+          const internalResponse = await fetchInternalRoute(
+            route,
+            url,
+            allowedOrigin,
+            router,
+            lookupCache,
+            context
+          );
+          return route.fulfill(internalResponse);
+        }
         if (url.origin === allowedOrigin) {
           return route.continue();
         }
-        if (await isBlockedUrl(url, lookupCache)) {
-          console.error(`blocked request to ${url.origin} (resolves to a private or local address)`);
-          return route.abort("blockedbyclient");
+        const address = await lookupPublicAddress(url, lookupCache);
+        if (!address) {
+          throw new Error(
+            `blocked request to ${url.origin} (resolves to a private or local address)`
+          );
         }
-        return route.continue();
-      } catch {
+        const request = route.request();
+        const body = requestBody(request, request.headers());
+        const response = await publicRequest(url, address, {
+          method: request.method(),
+          headers: request.headers(),
+          body,
+        });
+        const responseHeaders = { ...response.headers };
+        for (const name of HOP_BY_HOP_HEADERS) delete responseHeaders[name];
+        return route.fulfill({
+          status: response.status,
+          headers: responseHeaders,
+          body: response.body,
+        });
+      } catch (error) {
+        // In particular, do not route.continue() after an internal router
+        // failure: that would turn a transient private-router outage into an
+        // unintended public-edge request.
+        if (router) {
+          console.error(`internal canonical request blocked: ${error.message || error}`);
+        }
         return route.abort("blockedbyclient");
       }
     });
 
-    if (allowedOrigin) {
-      await rejectBlockedRedirects(targetUrl, allowedOrigin, lookupCache);
+    if (router && typeof context.routeWebSocket !== "function") {
+      throw new Error(
+        "canonical WSS internal forwarding unavailable: Playwright WebSocket routing is not supported"
+      );
     }
-    const navigation = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    if (typeof context.routeWebSocket === "function") {
+      await context.routeWebSocket("**/*", async (websocket) => {
+        try {
+          if (router) {
+            // WebSocketRoute exposes neither the browser handshake Origin nor
+            // the resolved peer address. Any synthetic proxy would risk
+            // granting canonical cookies/origin to an attacker iframe, and
+            // connectToServer would re-resolve DNS. Keep router-mode captures
+            // fail-closed until Playwright exposes those request semantics.
+            return closeWebSocketRoute(
+              websocket,
+              1008,
+              "WebSocket capture is disabled while internal routing is enabled"
+            );
+          }
+          const url = new URL(websocket.url());
+          if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+            console.error(`blocked WebSocket request to unsupported protocol ${url.protocol}`);
+            return closeWebSocketRoute(websocket, 1002, "unsupported WebSocket protocol");
+          }
+          const websocketOrigin = url.protocol === "wss:" ? "https:" : "http:";
+          const httpUrl = new URL(`${websocketOrigin}//${url.host}${url.pathname}${url.search}`);
+          if (httpUrl.origin !== allowedOrigin && (await isBlockedUrl(httpUrl, lookupCache))) {
+            console.error(`blocked request to ${url.origin} (resolves to a private or local address)`);
+            return closeWebSocketRoute(websocket, 1008, "private or local WebSocket origin blocked");
+          }
+          websocket.connectToServer();
+        } catch (error) {
+          console.error(`blocked WebSocket request: ${error.message || error}`);
+          return closeWebSocketRoute(websocket, 1008, "WebSocket request blocked");
+        }
+      });
+    }
+
+    const navigationUrl = allowedOrigin
+      ? await resolveNavigationTarget(targetUrl, allowedOrigin, router, lookupCache, context)
+      : targetUrl;
+    const navigation = await page.goto(navigationUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 15000,
+    });
     const navigationHeaders = navigation?.headers() || {};
     if (navigationHeaders["cf-mitigated"]?.trim().toLowerCase() === "challenge") {
       throw new Error(CLOUDFLARE_CHALLENGE_ERROR);
@@ -352,7 +653,7 @@ async function main() {
       throw new Error(`capture rejected: navigation returned HTTP ${navigationStatus}`);
     }
     if (browserSmoke) {
-      const contentType = navigationContentType(navigation, targetUrl);
+      const contentType = navigationContentType(navigation, navigationUrl);
       if (contentType && !contentType.toLowerCase().includes("text/html")) {
         console.log(`${BROWSER_SMOKE_SKIP} ${contentType}`);
         return;

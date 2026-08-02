@@ -7,6 +7,7 @@ mod host_resources;
 mod reconcile;
 mod resource_stats;
 mod routes;
+mod screenshot_router;
 #[cfg(test)]
 mod screenshot_tests;
 #[cfg(test)]
@@ -26,6 +27,9 @@ use reconcile::{
 };
 pub(crate) use resource_stats::{parse_docker_bytes, publish_resource_stats};
 pub(crate) use routes::*;
+use screenshot_router::{
+    build_screenshot_router_target, screenshot_create_args_with_router, ScreenshotRouterTarget,
+};
 pub(crate) use storage_stats::publish_storage_stats;
 
 pub(crate) async fn status(cfg: &Config, id: Uuid, status: &str, failure: Option<&str>) {
@@ -439,6 +443,8 @@ const SCREENSHOT_ERR_SERVICE: &str = "Screenshot service crashed";
 const SCREENSHOT_ERR_UPLOAD: &str = "Failed to upload the screenshot";
 const SCREENSHOT_ERR_RUNTIME: &str = "Browser check found a runtime error";
 const SCREENSHOT_ERR_BLANK: &str = "The page is blank or still loading";
+const SCREENSHOT_ERR_ROUTER: &str =
+    "Screenshot service could not reach the app through its local router";
 
 /// Classifies a screenshot-pipeline error into one of the reasons above by
 /// matching stable Docker/Playwright/SSRF-guard phrases in the whole error
@@ -472,6 +478,11 @@ fn screenshot_failure_reason(err: &anyhow::Error) -> &'static str {
         || detail.contains("navigation returned http ")
     {
         SCREENSHOT_ERR_SITE
+    } else if detail.contains("internal screenshot routing")
+        || detail.contains("local caddy snippet")
+        || detail.contains("hostlet_base_domain")
+    {
+        SCREENSHOT_ERR_ROUTER
     } else {
         SCREENSHOT_ERR_SERVICE
     }
@@ -491,6 +502,10 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
             screenshot_failure_reason(&err).to_string(),
         ));
     }
+    // The signed capture URL is validated before any internal-origin routing
+    // decisions.  The original value remains the screenshotter CLI argument
+    // and upload metadata; the router target only adds Docker-side plumbing.
+    let screenshot_router_target = build_screenshot_router_target(cfg, capture_url).await?;
     let width = payload
         .get("width")
         .and_then(|value| value.as_i64())
@@ -526,6 +541,7 @@ pub(crate) async fn capture_screenshot_job(cfg: &Config, payload: &Value) -> any
                 &size_env,
                 browser_smoke,
                 &output_file,
+                screenshot_router_target.as_ref(),
             )
             .await?;
             if outcome == ScreenshotRun::SkippedNonHtml {
@@ -604,11 +620,23 @@ async fn run_screenshotter_container(
     size_env: &str,
     browser_smoke: bool,
     output_file: &Path,
+    screenshot_router_target: Option<&ScreenshotRouterTarget>,
 ) -> anyhow::Result<ScreenshotRun> {
     let container_name = screenshot_container_name(job_id);
     remove_screenshot_container(&container_name).await;
-    let create_args =
-        screenshot_create_args(&container_name, size_env, image, capture_url, browser_smoke);
+    let create_args = screenshot_router_target.map_or_else(
+        || screenshot_create_args(&container_name, size_env, image, capture_url, browser_smoke),
+        |target| {
+            screenshot_create_args_with_router(
+                &container_name,
+                size_env,
+                image,
+                capture_url,
+                browser_smoke,
+                Some(target),
+            )
+        },
+    );
     let create_refs = create_args.iter().map(String::as_str).collect::<Vec<_>>();
     let create_output = command_output("docker", &create_refs, Duration::from_secs(30)).await?;
     if !create_output.status.success() {
@@ -668,37 +696,14 @@ fn screenshot_create_args(
     capture_url: &str,
     browser_smoke: bool,
 ) -> Vec<String> {
-    let mut args = [
-        "create",
-        "--name",
+    screenshot_create_args_with_router(
         container_name,
-        "--network",
-        "host",
-        "--security-opt",
-        "no-new-privileges:true",
-        "--cap-drop",
-        "ALL",
-        "--memory",
-        "512m",
-        "--cpus",
-        "1",
-        "--tmpfs",
-        "/tmp:rw,nosuid,size=256m",
-        "-e",
         size_env,
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-    if browser_smoke {
-        args.extend(["-e".to_string(), "HOSTLET_BROWSER_SMOKE=1".to_string()]);
-    }
-    args.extend([
-        image.to_string(),
-        capture_url.to_string(),
-        SCREENSHOT_CONTAINER_OUTPUT_PATH.to_string(),
-    ]);
-    args
+        image,
+        capture_url,
+        browser_smoke,
+        None,
+    )
 }
 
 fn screenshot_container_name(job_id: Uuid) -> String {

@@ -7,7 +7,8 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hostlet-screenshotter-smoke.XXXXXX")"
 SMOKE_CONTAINER="hostlet-screenshotter-smoke-$$"
 REDIRECT_CONTAINER="hostlet-screenshotter-redirect-$$"
 FIXTURE_CONTAINER="hostlet-screenshotter-fixture-$$"
-trap 'docker rm -f "${SMOKE_CONTAINER}" "${REDIRECT_CONTAINER}" "${FIXTURE_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
+ROUTER_CONTAINER="hostlet-screenshotter-router-$$"
+trap 'docker rm -f "${SMOKE_CONTAINER}" "${REDIRECT_CONTAINER}" "${FIXTURE_CONTAINER}" "${ROUTER_CONTAINER}" >/dev/null 2>&1 || true; rm -rf "${TMP_DIR}"' EXIT
 
 if [ "${HOSTLET_SCREENSHOTTER_SKIP_BUILD:-0}" != "1" ]; then
   "${ROOT}/scripts/ci-docker-retry.sh" docker build -f "${ROOT}/apps/screenshotter/Dockerfile" -t "${IMAGE}" "${ROOT}"
@@ -215,6 +216,220 @@ fi
 grep -q "HOSTLET_BROWSER_SMOKE_SKIPPED_NON_HTML" "${TMP_DIR}/non-html.log"
 
 echo "browser smoke readiness regressions passed"
+
+# Router-origin integration fixture. The screenshotter receives the public
+# canonical HTTPS URL (edge port) but must serve every canonical request from
+# the private HTTP router port, with the canonical Host preserved. The edge
+# listener intentionally returns 500 and records hits so a public-edge fallback
+# is detectable.
+ROUTER_INTERNAL_PORT=""
+ROUTER_EDGE_PORT=""
+for edge_port in 18110 18112 18114 18116 18118; do
+  router_port=$((edge_port + 1))
+  docker rm -f "${ROUTER_CONTAINER}" >/dev/null 2>&1 || true
+  if ! docker run -d --rm --network host --name "${ROUTER_CONTAINER}" \
+    --entrypoint node \
+    "${IMAGE}" \
+    -e "const http=require('http'); const edge=${edge_port}; const internal=${router_port}; const expectedHost='canonical.test:'+edge; const state={internal:0,edge:0,badHost:0,badPost:0,paths:[]}; const handler=(req,res)=>{ const isEdge=req.socket.localPort===edge; if(isEdge) state.edge++; else state.internal++; state.paths.push((isEdge?'edge':'internal')+':'+req.url); if(!isEdge && req.url!=='/stats' && req.headers.host!==expectedHost) state.badHost++; if(isEdge){res.writeHead(500,{'Content-Type':'text/html'}); return res.end('<!doctype html><title>public edge hit</title>');} if(req.url==='/redirect'){res.writeHead(302,{Location:'http://canonical.test:'+internal+'/final'}); return res.end();} if(req.url==='/final'){res.writeHead(200,{'Content-Type':'text/html'}); return res.end('<!doctype html><style>html,body{margin:0;min-height:720px;background:linear-gradient(135deg,#052e16,#0ea5e9);color:#fff;font:32px Arial,sans-serif}main{padding:72px}img{display:block;width:560px;height:180px;margin-top:30px;border:8px solid #fff;image-rendering:pixelated}#api{margin-top:20px}</style><main><h1>Canonical router fixture</h1><p>canonical origin and Host routing</p><img src=\"https://canonical.test:'+edge+'/asset-redirect\"><div id=api>loading</div><div id=post>loading</div><script>if(location.origin!==\"https://canonical.test:'+edge+'\") throw new Error(\"canonical origin lost\"); fetch(\"https://canonical.test:'+edge+'/api/data\").then(r=>r.json()).then(v=>{document.querySelector(\"#api\").textContent=v.value}); fetch(\"https://canonical.test:'+edge+'/api/echo\",{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({probe:true})}).then(r=>r.json()).then(v=>{document.querySelector(\"#post\").textContent=v.value})</script></main>');} if(req.url==='/asset-redirect'){res.writeHead(302,{Location:'http://canonical.test:'+internal+'/asset.png'}); return res.end();} if(req.url==='/asset.png'){res.writeHead(200,{'Content-Type':'image/png'}); return res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1ZkAAAAASUVORK5CYII=','base64'));} if(req.url==='/api/data'){res.writeHead(200,{'Content-Type':'application/json'}); return res.end(JSON.stringify({value:'absolute HTTPS API served internally'}));} if(req.url==='/api/echo'){let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{if(req.method!=='POST'||body!=='{\"probe\":true}')state.badPost++;res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({value:'POST body served internally'}))});return;} if(req.url==='/ssrf'){res.writeHead(302,{Location:'http://127.0.0.1:18109/private'}); return res.end();} if(req.url==='/fail'){res.writeHead(503,{'Content-Type':'text/html'}); return res.end('<!doctype html><title>internal failure</title>');} if(req.url==='/stats'){res.writeHead(200,{'Content-Type':'application/json'}); return res.end(JSON.stringify(state));} res.writeHead(404); res.end(); }; http.createServer(handler).listen(edge,'127.0.0.1'); http.createServer(handler).listen(internal,'127.0.0.1');" \
+    >"${TMP_DIR}/router-container" 2>"${TMP_DIR}/router-start.log"; then
+    continue
+  fi
+  if docker run --rm --network host --add-host canonical.test:127.0.0.1 --entrypoint node \
+    "${IMAGE}" \
+    -e "require('http').get('http://127.0.0.1:${router_port}/stats',(res)=>process.exit(res.statusCode===200?0:1)).on('error',()=>process.exit(1));" \
+    >/dev/null 2>&1; then
+    ROUTER_INTERNAL_PORT="${router_port}"
+    ROUTER_EDGE_PORT="${edge_port}"
+    break
+  fi
+done
+
+if [ -z "${ROUTER_INTERNAL_PORT}" ]; then
+  echo "screenshotter router fixture server did not start on a Chromium-safe port"
+  cat "${TMP_DIR}/router-start.log" 2>/dev/null || true
+  exit 1
+fi
+
+ROUTER_TARGET="https://canonical.test:${ROUTER_EDGE_PORT}/redirect"
+ROUTER_RUN_ARGS=(--rm --network host --add-host canonical.test:127.0.0.1 \
+  -e HOSTLET_BROWSER_SMOKE=1 -e HOSTLET_SCREENSHOT_MIN_BYTES=1000 \
+  -e "HOSTLET_SCREENSHOT_ROUTER_PORT=${ROUTER_INTERNAL_PORT}")
+
+if ! docker run "${ROUTER_RUN_ARGS[@]}" "${IMAGE}" "${ROUTER_TARGET}" /tmp/router.webp \
+  >"${TMP_DIR}/router-success.log" 2>&1; then
+  echo "screenshotter internal-origin router capture failed"
+  cat "${TMP_DIR}/router-success.log"
+  exit 1
+fi
+
+if docker run "${ROUTER_RUN_ARGS[@]}" "${IMAGE}" \
+  "https://canonical.test:${ROUTER_EDGE_PORT}/fail" /tmp/router-fail.webp \
+  >"${TMP_DIR}/router-failure.log" 2>&1; then
+  echo "screenshotter accepted an internal router HTTP 503"
+  cat "${TMP_DIR}/router-failure.log"
+  exit 1
+fi
+grep -q "navigation returned HTTP 503" "${TMP_DIR}/router-failure.log"
+
+# A failed capture must not poison routing state; the canonical page succeeds
+# again, and the edge remains untouched throughout every attempt.
+if ! docker run "${ROUTER_RUN_ARGS[@]}" "${IMAGE}" \
+  "https://canonical.test:${ROUTER_EDGE_PORT}/final" /tmp/router-recovery.webp \
+  >"${TMP_DIR}/router-recovery.log" 2>&1; then
+  echo "screenshotter internal-origin router did not recover after a failed capture"
+  cat "${TMP_DIR}/router-recovery.log"
+  exit 1
+fi
+
+if docker run "${ROUTER_RUN_ARGS[@]}" "${IMAGE}" \
+  "https://canonical.test:${ROUTER_EDGE_PORT}/ssrf" /tmp/router-ssrf.webp \
+  >"${TMP_DIR}/router-ssrf.log" 2>&1; then
+  echo "screenshotter followed an internal-origin SSRF redirect"
+  cat "${TMP_DIR}/router-ssrf.log"
+  exit 1
+fi
+grep -q "blocked request to" "${TMP_DIR}/router-ssrf.log"
+
+ROUTER_STATS="$(docker run --rm --network host --add-host canonical.test:127.0.0.1 --entrypoint node \
+  "${IMAGE}" \
+  -e "require('http').get('http://127.0.0.1:${ROUTER_INTERNAL_PORT}/stats',(res)=>{let d='';res.on('data',(x)=>d+=x);res.on('end',()=>process.stdout.write(d))}).on('error',()=>process.exit(1));")"
+python3 - "${ROUTER_STATS}" <<'PY'
+import json
+import sys
+
+stats = json.loads(sys.argv[1])
+if stats.get("edge") != 0:
+    raise SystemExit(f"router fixture observed public-edge hits: {stats}")
+if stats.get("badHost") != 0:
+    raise SystemExit(f"router fixture observed invalid Host routing: {stats}")
+if stats.get("badPost") != 0:
+    raise SystemExit(f"router fixture lost the canonical POST method or body: {stats}")
+if not any(path.endswith(":/asset-redirect") for path in stats.get("paths", [])):
+    raise SystemExit(f"router fixture did not receive absolute HTTPS asset: {stats}")
+if not any(path.endswith(":/api/data") for path in stats.get("paths", [])):
+    raise SystemExit(f"router fixture did not receive absolute HTTPS API call: {stats}")
+if not any(path.endswith(":/api/echo") for path in stats.get("paths", [])):
+    raise SystemExit(f"router fixture did not receive canonical HTTPS POST: {stats}")
+PY
+
+echo "screenshotter internal-origin router, Host, redirect, SSRF, edge-isolation, and recovery regressions passed"
+
+# Redirect Set-Cookie values from the private router must be visible on the
+# next canonical redirect request, with browser URL/path/Secure matching.
+COOKIE_EDGE_PORT=18130
+COOKIE_ROUTER_PORT=18131
+docker rm -f "${ROUTER_CONTAINER}" >/dev/null 2>&1 || true
+docker run -d --rm --network host --name "${ROUTER_CONTAINER}" \
+  --entrypoint node \
+  "${IMAGE}" \
+  -e "const http=require('http'); const edge=${COOKIE_EDGE_PORT}; const internal=${COOKIE_ROUTER_PORT}; const expectedHost='cookie.test:'+edge; const state={badCookie:0,edge:0}; const handler=(req,res)=>{if(req.socket.localPort===edge)state.edge++; if(req.url==='/stats'){res.writeHead(200,{'Content-Type':'application/json'}); return res.end(JSON.stringify(state));} if(req.socket.localPort===edge){res.writeHead(500); return res.end('edge');} if(req.url==='/redirect'){res.writeHead(302,{Location:'http://cookie.test:'+internal+'/final','Set-Cookie':'redirect_cookie=ready; Path=/; Secure; SameSite=Lax'}); return res.end();} if(req.url==='/final'){if(!String(req.headers.cookie||'').includes('redirect_cookie=ready'))state.badCookie++; res.writeHead(200,{'Content-Type':'text/html'}); return res.end('<!doctype html><style>html,body{margin:0;min-height:720px;background:linear-gradient(135deg,#082f49,#22d3ee);color:#fff;font:32px Arial}main{padding:72px}</style><main><h1>Redirect cookie fixture</h1><p>cookie replay</p></main>');} res.writeHead(404); res.end();}; http.createServer(handler).listen(edge,'127.0.0.1'); http.createServer(handler).listen(internal,'127.0.0.1');" \
+  >"${TMP_DIR}/router-cookie-container" 2>"${TMP_DIR}/router-cookie-start.log"
+COOKIE_RUN_ARGS=(--rm --network host --add-host cookie.test:127.0.0.1 \
+  -e HOSTLET_BROWSER_SMOKE=1 -e HOSTLET_SCREENSHOT_MIN_BYTES=1000 \
+  -e "HOSTLET_SCREENSHOT_ROUTER_PORT=${COOKIE_ROUTER_PORT}")
+if ! docker run "${COOKIE_RUN_ARGS[@]}" "${IMAGE}" \
+  "https://cookie.test:${COOKIE_EDGE_PORT}/redirect" /tmp/router-cookie.webp \
+  >"${TMP_DIR}/router-cookie.log" 2>&1; then
+  echo "screenshotter internal redirect-cookie capture failed"
+  cat "${TMP_DIR}/router-cookie.log"
+  exit 1
+fi
+COOKIE_STATS="$(docker run --rm --network host --add-host cookie.test:127.0.0.1 --entrypoint node "${IMAGE}" \
+  -e "require('http').get('http://127.0.0.1:${COOKIE_ROUTER_PORT}/stats',(res)=>{let d='';res.on('data',(x)=>d+=x);res.on('end',()=>process.stdout.write(d))}).on('error',()=>process.exit(1));")"
+python3 - "${COOKIE_STATS}" <<'PY'
+import json
+import sys
+
+stats = json.loads(sys.argv[1])
+if stats.get("badCookie") != 0 or stats.get("edge") != 0:
+    raise SystemExit(f"redirect cookie was not replayed internally: {stats}")
+PY
+echo "screenshotter internal redirect-cookie replay regression passed"
+
+# WebSocketRoute does not expose the browser handshake Origin or resolved peer
+# address, so router-mode WebSockets intentionally fail closed. Keep the old
+# forwarding fixture disabled until Playwright exposes those semantics.
+if false; then
+docker rm -f "${ROUTER_CONTAINER}" >/dev/null 2>&1 || true
+docker run -d --rm --network host --name "${ROUTER_CONTAINER}" \
+  --entrypoint node \
+  "${IMAGE}" \
+  -e "const http=require('http'); const net=require('net'); const {WebSocketServer}=require('ws'); const edge=${ROUTER_EDGE_PORT}; const internal=${ROUTER_INTERNAL_PORT}; const expectedHost='canonical.test:'+edge; const expectedOrigin='https://'+expectedHost; const state={edge:0,ws:0,badHost:0,badWs:0}; const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1ZkAAAAASUVORK5CYII='; const server=http.createServer((req,res)=>{ if(req.url==='/stats'){res.writeHead(200,{'Content-Type':'application/json'}); return res.end(JSON.stringify(state));} if(req.headers.host!==expectedHost) state.badHost++; res.writeHead(200,{'Content-Type':'text/html'}); res.end('<!doctype html><style>html,body{margin:0;min-height:720px;background:linear-gradient(135deg,#172554,#7e22ce);color:white;font:32px Arial}main{padding:72px}img{width:320px;height:180px;image-rendering:pixelated}</style><main><h1>Internal WebSocket proof</h1><div id=status>connecting</div><img id=proof><script>document.cookie=\"router_cookie=ready; Secure; SameSite=Lax; Path=/\"; const socket=new WebSocket(\"wss://canonical.test:'+edge+'/ws\",\"hostlet-v1\"); socket.onopen=()=>socket.send(\"ping\"); socket.onmessage=event=>{if(event.data!==\"pong\")throw new Error(\"bad websocket response\");document.querySelector(\"#status\").textContent=\"connected\";document.querySelector(\"#proof\").src=\"data:image/png;base64,'+png+'\"}</script></main>'); }); const wss=new WebSocketServer({noServer:true}); server.on('upgrade',(req,socket,head)=>{ const protocol=req.headers['sec-websocket-protocol']||''; const cookie=req.headers.cookie||''; if(req.headers.host!==expectedHost||req.headers.origin!==expectedOrigin||protocol!=='hostlet-v1'||!cookie.includes('router_cookie=ready'))state.badWs++; wss.handleUpgrade(req,socket,head,ws=>{state.ws++;ws.on('message',message=>{if(message.toString()==='ping')ws.send('pong')})})}); server.listen(internal,'127.0.0.1'); net.createServer(socket=>{state.edge++;socket.destroy()}).listen(edge,'127.0.0.1');" \
+  >"${TMP_DIR}/router-ws-container" 2>"${TMP_DIR}/router-ws-start.log"
+
+for _ in 1 2 3 4 5; do
+  if docker run --rm --network host --entrypoint node "${IMAGE}" \
+    -e "require('http').get('http://127.0.0.1:${ROUTER_INTERNAL_PORT}/stats',(res)=>process.exit(res.statusCode===200?0:1)).on('error',()=>process.exit(1));" \
+    >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+if ! docker run "${ROUTER_RUN_ARGS[@]}" "${IMAGE}" \
+  "https://canonical.test:${ROUTER_EDGE_PORT}/" /tmp/router-ws.webp \
+  >"${TMP_DIR}/router-ws.log" 2>&1; then
+  echo "screenshotter canonical WebSocket forwarding failed"
+  cat "${TMP_DIR}/router-ws.log"
+  exit 1
+fi
+
+ROUTER_WS_STATS="$(docker run --rm --network host --entrypoint node "${IMAGE}" \
+  -e "require('http').get('http://127.0.0.1:${ROUTER_INTERNAL_PORT}/stats',(res)=>{let d='';res.on('data',(x)=>d+=x);res.on('end',()=>process.stdout.write(d))}).on('error',()=>process.exit(1));")"
+python3 - "${ROUTER_WS_STATS}" <<'PY'
+import json
+import sys
+
+stats = json.loads(sys.argv[1])
+if stats.get("badHost") != 0 or stats.get("badWs") != 0:
+    raise SystemExit(f"WebSocket fixture lost Host, Origin, cookie, or subprotocol: {stats}")
+if stats.get("ws", 0) < 1:
+    raise SystemExit(f"WebSocket fixture was not reached: {stats}")
+PY
+
+echo "screenshotter canonical WebSocket origin, cookie, subprotocol, and DNS-pinned routing regression passed"
+fi
+echo "screenshotter router-mode WebSocket fail-closed regression policy applied"
+
+# Exercise that policy: a canonical WSS request must be closed by Playwright
+# before Chromium reaches either the public-edge socket or the internal HTTP
+# router. The page handles the expected socket error and remains capturable.
+WS_EDGE_PORT=18140
+WS_ROUTER_PORT=18141
+docker rm -f "${ROUTER_CONTAINER}" >/dev/null 2>&1 || true
+docker run -d --rm --network host --name "${ROUTER_CONTAINER}" \
+  --entrypoint node \
+  "${IMAGE}" \
+  -e "const http=require('http');const state={edge:0,edgeUpgrade:0,routerUpgrade:0};const host='canonical-ws.test:'+${WS_EDGE_PORT};const handler=(req,res)=>{if(req.url==='/stats'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(state));}if(req.headers.host!==host){res.writeHead(400);return res.end('bad host');}res.writeHead(200,{'Content-Type':'text/html'});res.end('<!doctype html><style>html,body{margin:0;min-height:720px;background:#172554;color:#fff;font:32px Arial}main{padding:72px}</style><main><h1>WebSocket fail closed</h1><p id=status>waiting</p><script>const ws=new WebSocket(\"ws://'+host+'/ws\");ws.onerror=()=>document.querySelector(\"#status\").textContent=\"blocked safely\"</script></main>')};const router=http.createServer(handler);router.on('upgrade',(_req,socket)=>{state.routerUpgrade++;socket.destroy()});router.listen(${WS_ROUTER_PORT},'127.0.0.1');const edge=http.createServer((_req,res)=>{state.edge++;res.writeHead(500);res.end('edge')});edge.on('upgrade',(_req,socket)=>{state.edgeUpgrade++;socket.destroy()});edge.listen(${WS_EDGE_PORT},'127.0.0.1');" \
+  >"${TMP_DIR}/router-ws-block-container" 2>"${TMP_DIR}/router-ws-block-start.log"
+for _ in 1 2 3 4 5; do
+  if docker run --rm --network host --entrypoint node "${IMAGE}" \
+    -e "require('http').get('http://127.0.0.1:${WS_ROUTER_PORT}/stats',(res)=>process.exit(res.statusCode===200?0:1)).on('error',()=>process.exit(1));" \
+    >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if ! docker run --rm --network host --add-host canonical-ws.test:127.0.0.1 \
+  -e HOSTLET_BROWSER_SMOKE=1 -e HOSTLET_SCREENSHOT_MIN_BYTES=1000 \
+  -e "HOSTLET_SCREENSHOT_ROUTER_PORT=${WS_ROUTER_PORT}" \
+  "${IMAGE}" "http://canonical-ws.test:${WS_EDGE_PORT}/" /tmp/router-ws-block.webp \
+  >"${TMP_DIR}/router-ws-block.log" 2>&1; then
+  echo "screenshotter failed while blocking a router-mode WebSocket"
+  cat "${TMP_DIR}/router-ws-block.log"
+  exit 1
+fi
+WS_BLOCK_STATS="$(docker run --rm --network host --entrypoint node "${IMAGE}" \
+  -e "require('http').get('http://127.0.0.1:${WS_ROUTER_PORT}/stats',(res)=>{let d='';res.on('data',x=>d+=x);res.on('end',()=>process.stdout.write(d))}).on('error',()=>process.exit(1));")"
+python3 - "${WS_BLOCK_STATS}" <<'PY'
+import json
+import sys
+
+stats = json.loads(sys.argv[1])
+if stats.get("edge") != 0 or stats.get("edgeUpgrade") != 0 or stats.get("routerUpgrade") != 0:
+    raise SystemExit(f"router-mode WebSocket completed a handshake: {stats}")
+PY
+echo "screenshotter router-mode WebSocket fail-closed handshake regression passed"
 
 run_redirect_block_test() {
   local label="$1"

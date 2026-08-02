@@ -41,6 +41,97 @@ pub(crate) fn local_router_config() -> anyhow::Result<Option<LocalRouter>> {
     }))
 }
 
+/// Parse the optional screenshot-router configuration.
+///
+/// A blank or missing `HOSTLET_SCREENSHOT_ROUTER_PORT` deliberately means
+/// "disabled" so existing self-hosted installations retain their exact
+/// screenshot behavior.  Once the port is opted into, every prerequisite is
+/// required; silently falling back to the public capture path would defeat
+/// the purpose of the internal-origin route and could hide a bad deployment.
+pub(crate) fn screenshot_router_config(
+    port_value: Option<&str>,
+    base_domain_value: Option<&str>,
+    local_mode: bool,
+    local_router: Option<&LocalRouter>,
+) -> anyhow::Result<Option<(u16, String)>> {
+    let Some(port_value) = port_value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if !local_mode {
+        bail!("HOSTLET_SCREENSHOT_ROUTER_PORT requires HOSTLET_LOCAL_MODE=true");
+    }
+    if local_router.is_none() {
+        bail!("HOSTLET_SCREENSHOT_ROUTER_PORT requires HOSTLET_LOCAL_ROUTER=caddy");
+    }
+    let port = port_value.parse::<u16>().with_context(|| {
+        format!(
+            "HOSTLET_SCREENSHOT_ROUTER_PORT must be an integer from 1 to 65535, got {port_value}"
+        )
+    })?;
+    if port == 0 {
+        bail!("HOSTLET_SCREENSHOT_ROUTER_PORT must be from 1 to 65535");
+    }
+    let base_domain = base_domain_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("HOSTLET_BASE_DOMAIN is required when HOSTLET_SCREENSHOT_ROUTER_PORT is set")
+        .and_then(validate_base_domain)?;
+    Ok(Some((port, base_domain)))
+}
+
+/// Validate and canonicalize a DNS base domain used by the local Caddy
+/// router.  The route target validator relies on this canonical form when it
+/// checks that a capture host is exactly one label below the base domain.
+pub(crate) fn validate_base_domain(value: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("HOSTLET_BASE_DOMAIN cannot be empty");
+    }
+    if value.ends_with('.') {
+        bail!("HOSTLET_BASE_DOMAIN must not have a trailing dot");
+    }
+    if !value.is_ascii() {
+        bail!("HOSTLET_BASE_DOMAIN must be an ASCII hostname");
+    }
+    if value.len() > 253 {
+        bail!("HOSTLET_BASE_DOMAIN is too long");
+    }
+    let canonical = value.to_ascii_lowercase();
+    if !canonical.contains('.') {
+        bail!("HOSTLET_BASE_DOMAIN must contain at least two hostname labels");
+    }
+    if canonical.parse::<std::net::IpAddr>().is_ok() {
+        bail!("HOSTLET_BASE_DOMAIN must be a hostname, not an IP address");
+    }
+    validate_hostname_labels(&canonical, "HOSTLET_BASE_DOMAIN")?;
+    Ok(canonical)
+}
+
+/// Validate a hostname label sequence without resolving DNS.  DNS names used
+/// for screenshot routing are intentionally restricted to the portable ASCII
+/// hostname grammar so the value is safe to place in Docker's `--add-host`
+/// argument and cannot inject another option.
+pub(crate) fn validate_hostname_labels(value: &str, field: &str) -> anyhow::Result<()> {
+    if value.len() > 253 {
+        bail!("{field} is too long");
+    }
+    for label in value.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            bail!("{field} contains an invalid hostname label");
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            bail!("{field} contains an invalid hostname label");
+        }
+        if !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            bail!("{field} must contain only ASCII letters, digits, hyphens, and dots");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn compose_project_name(app_id: Uuid) -> String {
     format!("hostlet-app-{}", app_id.simple())
 }

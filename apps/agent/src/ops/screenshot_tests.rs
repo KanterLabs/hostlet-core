@@ -1,3 +1,6 @@
+use super::capture_url::{
+    validate_capture_url, validate_internal_capture_url, verify_local_caddy_route,
+};
 use super::*;
 
 #[test]
@@ -41,6 +44,37 @@ fn validate_capture_url_rejects_private_and_local_targets() {
 }
 
 #[test]
+fn internal_capture_url_requires_one_canonical_https_tenant_label() {
+    assert_eq!(
+        validate_internal_capture_url("https://TENANT.example.com/", "example.com").unwrap(),
+        "tenant.example.com"
+    );
+    assert_eq!(
+        validate_internal_capture_url("https://tenant.example.com:443/path", "example.com")
+            .unwrap(),
+        "tenant.example.com"
+    );
+
+    for value in [
+        "http://tenant.example.com/",
+        "https://example.com/",
+        "https://nested.tenant.example.com/",
+        "https://user:password@tenant.example.com/",
+        "https://@tenant.example.com/",
+        "https://tenant.example.com:8443/",
+        "https://127.0.0.1/",
+        "https://tenant.example.com./",
+        "https://tenant.other.example.com/",
+        "https://tenant.example.com.evil/",
+    ] {
+        assert!(
+            validate_internal_capture_url(value, "example.com").is_err(),
+            "expected internal route rejection for {value}"
+        );
+    }
+}
+
+#[test]
 fn screenshot_create_args_use_container_copy_path_without_host_bind() {
     let args = screenshot_create_args(
         "hostlet-screenshot-job",
@@ -58,6 +92,10 @@ fn screenshot_create_args_use_container_copy_path_without_host_bind() {
     assert!(args
         .iter()
         .any(|arg| arg == SCREENSHOT_CONTAINER_OUTPUT_PATH));
+    assert!(!args.iter().any(|arg| arg == "--add-host"));
+    assert!(!args
+        .iter()
+        .any(|arg| arg == "HOSTLET_SCREENSHOT_ROUTER_PORT=8081"));
     assert!(SCREENSHOT_CONTAINER_OUTPUT_PATH.ends_with(".webp"));
     assert_eq!(SCREENSHOT_CONTENT_TYPE, "image/webp");
     assert!(!SCREENSHOT_CONTAINER_OUTPUT_PATH.starts_with("/tmp/"));
@@ -75,6 +113,66 @@ fn browser_smoke_create_args_enable_runtime_probe() {
     assert!(args
         .windows(2)
         .any(|pair| pair == ["-e", "HOSTLET_BROWSER_SMOKE=1"]));
+}
+
+#[test]
+fn screenshot_router_args_add_only_the_validated_host_and_port() {
+    let target = ScreenshotRouterTarget {
+        host: "tenant.example.com".into(),
+        port: 8081,
+    };
+    let args = screenshot_create_args_with_router(
+        "hostlet-router-job",
+        "HOSTLET_SCREENSHOT_SIZE=1280x720",
+        "local/hostlet-screenshotter:test",
+        "https://TENANT.example.com/?signed=1",
+        false,
+        Some(&target),
+    );
+
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--add-host", "tenant.example.com:127.0.0.1"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["-e", "HOSTLET_SCREENSHOT_ROUTER_PORT=8081"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--security-opt", "no-new-privileges:true"]));
+    assert!(args.windows(2).any(|pair| pair == ["--cap-drop", "ALL"]));
+    assert_eq!(
+        args.last().map(String::as_str),
+        Some("/app/hostlet-screenshot.webp")
+    );
+    assert!(args
+        .iter()
+        .any(|arg| arg == "https://TENANT.example.com/?signed=1"));
+}
+
+#[tokio::test]
+async fn local_caddy_route_verification_requires_an_exact_domain_comment() {
+    let dir = std::env::temp_dir().join(format!("hostlet-screenshot-router-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(
+        dir.join("other.caddy"),
+        "# hostlet-domain: tenant.example.com.evil\n",
+    )
+    .await
+    .unwrap();
+    assert!(verify_local_caddy_route(&dir, "tenant.example.com")
+        .await
+        .is_err());
+
+    tokio::fs::write(
+        dir.join("tenant.caddy"),
+        "# hostlet-domain: tenant.example.com\nreverse_proxy 127.0.0.1:3000\n",
+    )
+    .await
+    .unwrap();
+    assert!(verify_local_caddy_route(&dir, "tenant.example.com")
+        .await
+        .is_ok());
+    let _ = tokio::fs::remove_dir_all(&dir).await;
 }
 
 #[test]
@@ -132,6 +230,14 @@ fn screenshot_failure_reason_maps_known_categories() {
         (
             "capture rejected: page failed the visual-readiness probe after retry",
             SCREENSHOT_ERR_BLANK,
+        ),
+        (
+            "internal screenshot routing target validation failed: capture_url must not include userinfo",
+            SCREENSHOT_ERR_ROUTER,
+        ),
+        (
+            "no installed local Caddy snippet matches # hostlet-domain: tenant.example.com",
+            SCREENSHOT_ERR_ROUTER,
         ),
     ];
     for (message, expected) in cases {
