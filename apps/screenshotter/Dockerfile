@@ -15,7 +15,7 @@ RUN groupadd -r pwuser && useradd -r -g pwuser -m pwuser \
   && npm cache clean --force \
   && chown -R pwuser:pwuser /app
 
-COPY --chown=pwuser:pwuser apps/screenshotter/capture.js /app/capture.js
+COPY --chown=pwuser:pwuser apps/screenshotter/capture.js apps/screenshotter/network.js /app/
 
 USER pwuser
 

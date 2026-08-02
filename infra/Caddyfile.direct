@@ -12,3 +12,10 @@
 		respond "not found" 404
 	}
 }
+
+http://*.{$HOSTLET_APPS_HOST:localhost} {
+	route {
+		import /var/lib/hostlet/caddy/*.caddy
+		respond "not found" 404
+	}
+}

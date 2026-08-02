@@ -70,6 +70,7 @@ pub(crate) struct Config {
     pub(crate) app_public_scheme: AppPublicScheme,
     pub(crate) health_host: String,
     pub(crate) local_router: Option<LocalRouter>,
+    pub(crate) screenshot_router: Option<ScreenshotRouterConfig>,
     pub(crate) max_concurrent_jobs: usize,
 }
 
@@ -117,6 +118,12 @@ impl AppPublicScheme {
 pub(crate) struct LocalRouter {
     pub(crate) snippets_dir: PathBuf,
     pub(crate) reload_command: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ScreenshotRouterConfig {
+    pub(crate) port: u16,
+    pub(crate) base_domain: String,
 }
 
 #[derive(Debug)]
@@ -187,24 +194,43 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         std::env::var("HOSTLET_APP_PUBLIC_SCHEME").ok().as_deref(),
         local_mode,
     )?;
+    let api_url = env("HOSTLET_API_URL")?;
+    let http = http_client()?;
+    let server_id = env("HOSTLET_SERVER_ID")?.parse()?;
+    let agent_token = env("HOSTLET_AGENT_TOKEN")?;
+    let job_signing_secret = env("HOSTLET_JOB_SIGNING_SECRET")?;
+    let workdir = PathBuf::from(
+        std::env::var("HOSTLET_WORKDIR").unwrap_or_else(|_| "/var/lib/hostlet".into()),
+    );
+    let health_host = std::env::var("HOSTLET_HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let local_router = local_router_config()?;
+    let screenshot_router = screenshot_router_config(
+        std::env::var("HOSTLET_SCREENSHOT_ROUTER_PORT")
+            .ok()
+            .as_deref(),
+        std::env::var("HOSTLET_BASE_DOMAIN").ok().as_deref(),
+        local_mode,
+        local_router.as_ref(),
+    )?
+    .map(|(port, base_domain)| ScreenshotRouterConfig { port, base_domain });
+    let max_concurrent_jobs = std::env::var("HOSTLET_MAX_CONCURRENT_BUILDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| (1..=16).contains(value))
+        .unwrap_or(1);
     let cfg = Config {
-        api_url: env("HOSTLET_API_URL")?,
-        http: http_client()?,
-        server_id: env("HOSTLET_SERVER_ID")?.parse()?,
-        agent_token: env("HOSTLET_AGENT_TOKEN")?,
-        job_signing_secret: env("HOSTLET_JOB_SIGNING_SECRET")?,
-        workdir: PathBuf::from(
-            std::env::var("HOSTLET_WORKDIR").unwrap_or_else(|_| "/var/lib/hostlet".into()),
-        ),
+        api_url,
+        http,
+        server_id,
+        agent_token,
+        job_signing_secret,
+        workdir,
         local_mode,
         app_public_scheme,
-        health_host: std::env::var("HOSTLET_HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
-        local_router: local_router_config()?,
-        max_concurrent_jobs: std::env::var("HOSTLET_MAX_CONCURRENT_BUILDS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|value| (1..=16).contains(value))
-            .unwrap_or(1),
+        health_host,
+        local_router,
+        screenshot_router,
+        max_concurrent_jobs,
     };
     tokio::fs::create_dir_all(&cfg.workdir).await?;
     log_recoverable_journals(&cfg).await?;

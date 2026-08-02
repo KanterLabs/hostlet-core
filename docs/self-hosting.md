@@ -33,6 +33,21 @@ PUBLIC_WEBHOOK_URL=https://hostlet.example.com
 
 These modes describe access to Hostlet itself. Apps are private by default and are exposed per app through Hostlet routing controls.
 
+### Optional Internal Screenshot Routing
+
+Internal screenshot routing is disabled by default. To let the local agent
+capture apps through Caddy, set `HOSTLET_SCREENSHOT_ROUTER_PORT` to the HTTP
+port used by the app router and set `HOSTLET_BASE_DOMAIN` to the shared base
+domain for app hostnames:
+
+- Cloudflare Tunnel mode: `18080` (`Caddyfile.tunnel`).
+- Direct public mode: `80` (`Caddyfile.direct`); use the internal HTTP router
+  port, not the public HTTPS port `443`.
+
+Leave `HOSTLET_SCREENSHOT_ROUTER_PORT` blank unless this routing is configured.
+LAN mode is unsupported for internal screenshots because `Caddyfile.lan` does
+not import the per-app snippets that the agent writes.
+
 ## Network Ports
 
 The image-only Compose file keeps the API on `127.0.0.1:8080` and the web UI on

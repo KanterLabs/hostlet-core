@@ -73,6 +73,90 @@ fn rejects_bad_job_signature() {
     assert!(!verify_signature("secret", b"{}", "sha256=bad"));
 }
 
+fn test_local_router() -> LocalRouter {
+    LocalRouter {
+        snippets_dir: PathBuf::from("/tmp/hostlet-caddy"),
+        reload_command: vec!["caddy".into(), "reload".into()],
+    }
+}
+
+#[test]
+fn screenshot_router_config_is_disabled_for_missing_or_blank_port() {
+    let router = test_local_router();
+    assert_eq!(
+        screenshot_router_config(None, None, true, Some(&router)).unwrap(),
+        None
+    );
+    assert_eq!(
+        screenshot_router_config(Some("  "), Some("example.com"), true, Some(&router)).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn screenshot_router_config_requires_all_valid_local_prerequisites() {
+    let router = test_local_router();
+    for (port, base, local_mode, local_router, expected) in [
+        (
+            Some("8081"),
+            Some("example.com"),
+            false,
+            Some(&router),
+            "HOSTLET_LOCAL_MODE",
+        ),
+        (
+            Some("8081"),
+            Some("example.com"),
+            true,
+            None,
+            "HOSTLET_LOCAL_ROUTER",
+        ),
+        (
+            Some("8081"),
+            None,
+            true,
+            Some(&router),
+            "HOSTLET_BASE_DOMAIN",
+        ),
+        (
+            Some("nope"),
+            Some("example.com"),
+            true,
+            Some(&router),
+            "HOSTLET_SCREENSHOT_ROUTER_PORT",
+        ),
+        (
+            Some("0"),
+            Some("example.com"),
+            true,
+            Some(&router),
+            "HOSTLET_SCREENSHOT_ROUTER_PORT",
+        ),
+        (
+            Some("8081"),
+            Some("127.0.0.1"),
+            true,
+            Some(&router),
+            "HOSTLET_BASE_DOMAIN",
+        ),
+    ] {
+        let error = screenshot_router_config(port, base, local_mode, local_router).unwrap_err();
+        assert!(
+            error.to_string().contains(expected),
+            "{error:#} did not mention {expected}"
+        );
+    }
+}
+
+#[test]
+fn screenshot_router_config_canonicalizes_base_domain() {
+    let router = test_local_router();
+    assert_eq!(
+        screenshot_router_config(Some("8081"), Some("EXAMPLE.COM"), true, Some(&router)).unwrap(),
+        Some((8081, "example.com".into()))
+    );
+}
+
 #[test]
 fn packaging_strategy_defaults_to_auto() {
     assert!(matches!(
