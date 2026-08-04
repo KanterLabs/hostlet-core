@@ -39,6 +39,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     needs: [release-source]
     runs-on: homelab-heavy
+    env:
+      CARGO_BUILD_JOBS: "8"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -61,9 +63,8 @@ jobs:
       id-token: write
       attestations: write
     env:
-      # Cap cargo parallelism (release build is the most expensive cargo
-      # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
-      CARGO_BUILD_JOBS: "4"
+      # The release build owns the isolated 8-CPU heavy runner.
+      CARGO_BUILD_JOBS: "8"
       HOSTLET_MAX_GLIBC_VERSION: "2.39"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

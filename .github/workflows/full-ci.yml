@@ -52,6 +52,8 @@ jobs:
   full-self-hosted-deploy:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: homelab-heavy
+    env:
+      CARGO_BUILD_JOBS: "8"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -69,9 +71,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: homelab-heavy
     env:
-      # Cap cargo parallelism (release build is the most expensive cargo
-      # invocation in CI; see 2026-06-10 runner-VM crash-loop incident).
-      CARGO_BUILD_JOBS: "4"
+      # The release build owns the isolated 8-CPU heavy runner.
+      CARGO_BUILD_JOBS: "8"
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
       PUBLIC_WEB_URL: http://localhost:3000

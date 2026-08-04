@@ -87,10 +87,10 @@ assert_contains "${PR_WORKFLOW}" 'persist-credentials: false'
 assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner.sh'
 assert_contains "${CI_WORKFLOW}" 'node --version && pnpm --version'
-assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
-assert_contains "${RELEASE_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
-assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
-assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "4"'
+assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
+assert_contains "${RELEASE_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
+assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
+assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
 assert_contains "${STAGING_DEPLOYABILITY}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
 assert_contains "${FULL_CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
 assert_contains "${PREWARM_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
@@ -100,6 +100,7 @@ assert_not_contains "${ACTIONLINT_CONFIG}" 'hostlet-core-v2'
 assert_contains "${FULL_CI_WORKFLOW}" "group: full-ci-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${STAGING_DEPLOYABILITY}" "group: deployability-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${DATABASE_WORKFLOW}" 'runs-on: homelab-heavy'
+assert_contains "${DATABASE_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
 assert_contains "${DATABASE_WORKFLOW}" 'timeout-minutes: 20'
 assert_contains "${DATABASE_WORKFLOW}" 'HOSTLET_DB_TEST_REQUIRED: "1"'
 assert_contains "${DATABASE_WORKFLOW}" 'image: postgres:16-alpine@sha256:'
@@ -225,7 +226,7 @@ expected = {
     },
     sys.argv[3]: {
         "generated-apps": "homelab-heavy",
-        "self-hosted-api": "homelab-heavy",
+        "self-hosted-api": "homelab",
         "patchwork-canary": "homelab-heavy",
     },
     sys.argv[4]: {
