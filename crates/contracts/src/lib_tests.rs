@@ -46,6 +46,44 @@ fn agent_events_keep_existing_type_tags() {
 }
 
 #[test]
+fn host_resource_snapshot_cpu_fields_are_optional_and_camelcase() {
+    let legacy = serde_json::json!({
+        "memoryTotalMib": 1024,
+        "memoryAvailableMib": 512,
+        "swapUsedMib": 0,
+        "diskTotalMib": 2048,
+        "diskFreeMib": 1024,
+        "loadOne": 0.5,
+        "loadFive": 0.25,
+        "loadFifteen": 0.125,
+        "runningContainers": 1
+    });
+    let snapshot = serde_json::from_value::<HostResourceSnapshot>(legacy).unwrap();
+    assert_eq!(snapshot.cpu_utilization_percent, None);
+    assert_eq!(snapshot.logical_cpu_count, None);
+    let legacy_wire = serde_json::to_value(&snapshot).unwrap();
+    assert!(legacy_wire.get("cpuUtilizationPercent").is_none());
+    assert!(legacy_wire.get("logicalCpuCount").is_none());
+
+    let snapshot = HostResourceSnapshot {
+        memory_total_mib: 1024,
+        memory_available_mib: 512,
+        swap_used_mib: 0,
+        disk_total_mib: 2048,
+        disk_free_mib: 1024,
+        load_one: 0.5,
+        load_five: 0.25,
+        load_fifteen: 0.125,
+        running_containers: 1,
+        cpu_utilization_percent: Some(37.5),
+        logical_cpu_count: Some(8),
+    };
+    let value = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(value["cpuUtilizationPercent"], 37.5);
+    assert_eq!(value["logicalCpuCount"], 8);
+}
+
+#[test]
 fn storage_stats_event_uses_camelcase_and_round_trips() {
     let event = AgentEvent::StorageStats(StorageStatsEvent {
         app_id: Uuid::from_u128(1),

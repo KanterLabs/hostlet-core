@@ -21,7 +21,7 @@ use health::{
     failed_health_probe, health_status_event, health_target_from_payload, health_targets,
     probe_health_target, single_probe_health_event, HealthProbeResult, HealthTarget,
 };
-pub(crate) use host_resources::collect_host_resource_snapshot;
+pub(crate) use host_resources::{collect_host_resource_snapshot, HostResourceSampler};
 use reconcile::{
     container_actual_from_state, decide_reconcile, ContainerActual, ReconcileDecision,
 };

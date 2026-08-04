@@ -122,6 +122,12 @@ fn valid_host_resource_snapshot(snapshot: &hostlet_contracts::HostResourceSnapsh
         && snapshot.load_one.is_finite()
         && snapshot.load_five.is_finite()
         && snapshot.load_fifteen.is_finite()
+        && snapshot
+            .cpu_utilization_percent
+            .is_none_or(|value| value.is_finite() && (0.0..=100.0).contains(&value))
+        && snapshot
+            .logical_cpu_count
+            .is_none_or(|count| (1..=hostlet_contracts::MAX_LOGICAL_CPU_COUNT).contains(&count))
 }
 
 /// Return the agent-reported top-level `container_name` only when it is a managed
@@ -841,5 +847,50 @@ mod tests {
         );
         // A missing field also stays None (COALESCE keeps the existing value).
         assert_eq!(deployment_container_name(&serde_json::json!({}), id), None);
+    }
+
+    fn valid_snapshot() -> hostlet_contracts::HostResourceSnapshot {
+        hostlet_contracts::HostResourceSnapshot {
+            memory_total_mib: 1_024,
+            memory_available_mib: 512,
+            swap_used_mib: 0,
+            disk_total_mib: 10_240,
+            disk_free_mib: 5_120,
+            load_one: 0.5,
+            load_five: 0.25,
+            load_fifteen: 0.125,
+            running_containers: 1,
+            cpu_utilization_percent: None,
+            logical_cpu_count: None,
+        }
+    }
+
+    #[test]
+    fn host_resource_snapshot_accepts_optional_bounded_cpu_telemetry() {
+        let mut snapshot = valid_snapshot();
+        snapshot.cpu_utilization_percent = Some(42.5);
+        snapshot.logical_cpu_count = Some(8);
+        assert!(valid_host_resource_snapshot(&snapshot));
+
+        snapshot.cpu_utilization_percent = None;
+        snapshot.logical_cpu_count = None;
+        assert!(valid_host_resource_snapshot(&snapshot));
+    }
+
+    #[test]
+    fn host_resource_snapshot_rejects_invalid_cpu_telemetry() {
+        let mut snapshot = valid_snapshot();
+        snapshot.cpu_utilization_percent = Some(f64::NAN);
+        assert!(!valid_host_resource_snapshot(&snapshot));
+
+        snapshot.cpu_utilization_percent = Some(100.1);
+        assert!(!valid_host_resource_snapshot(&snapshot));
+
+        snapshot.cpu_utilization_percent = Some(50.0);
+        snapshot.logical_cpu_count = Some(0);
+        assert!(!valid_host_resource_snapshot(&snapshot));
+
+        snapshot.logical_cpu_count = Some(hostlet_contracts::MAX_LOGICAL_CPU_COUNT + 1);
+        assert!(!valid_host_resource_snapshot(&snapshot));
     }
 }
