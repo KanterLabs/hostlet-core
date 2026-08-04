@@ -81,6 +81,8 @@ pub struct AgentJobHeartbeatReceipt {
     pub lease_expires_at: String,
 }
 
+pub const MAX_LOGICAL_CPU_COUNT: u32 = 4_096;
+
 /// Bounded host-level telemetry attached to the agent's websocket heartbeat.
 /// It contains capacity facts only—never process arguments, environment
 /// values, paths, or tenant identifiers.
@@ -96,6 +98,14 @@ pub struct HostResourceSnapshot {
     pub load_five: f64,
     pub load_fifteen: f64,
     pub running_containers: u32,
+    /// Host CPU utilization calculated from successive `/proc/stat` samples.
+    /// `None` is expected for an agent's first heartbeat and older agents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_utilization_percent: Option<f64>,
+    /// Number of logical CPUs visible to the agent. Optional for rolling
+    /// upgrades where the agent has not yet started reporting this fact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_cpu_count: Option<u32>,
 }
 
 /// Runtime facts durably prepared by the agent before a route can be changed.

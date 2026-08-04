@@ -277,6 +277,7 @@ pub(crate) async fn connect_loop(
         .insert("x-hostlet-agent-token", cfg.agent_token.parse()?);
     let (mut ws, _) = connect_async(req).await?;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    let mut host_resource_sampler = HostResourceSampler::default();
     let mut job_claim = tokio::time::interval(Duration::from_secs(3));
     let mut resource_stats = tokio::time::interval(Duration::from_secs(5));
     let mut storage_stats = tokio::time::interval(Duration::from_secs(60));
@@ -288,7 +289,7 @@ pub(crate) async fn connect_loop(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                let resources = match collect_host_resource_snapshot().await {
+                let resources = match collect_host_resource_snapshot(&mut host_resource_sampler).await {
                     Ok(snapshot) => Some(snapshot),
                     Err(err) => {
                         tracing::warn!(error = %err, "failed to collect host resource snapshot");
