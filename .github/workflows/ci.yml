@@ -28,10 +28,8 @@ jobs:
   rust:
     runs-on: homelab-heavy
     env:
-      # Cap cargo parallelism: several workflows from both repos land on one
-      # 24-vCPU/48GiB CI VM; uncapped workspace builds stacking up OOM'd the
-      # hypervisor and hard-reset the box (2026-06-10 crash-loop incident).
-      CARGO_BUILD_JOBS: "4"
+      # This full workspace check owns the isolated 8-CPU heavy runner.
+      CARGO_BUILD_JOBS: "8"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: scripts/ci-verify-runner.sh

@@ -45,7 +45,9 @@ jobs:
 
   self-hosted-api:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: homelab-heavy
+    runs-on: homelab
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -62,7 +64,7 @@ jobs:
     continue-on-error: true
     runs-on: homelab-heavy
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "8"
       HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"
       HOSTLET_TOPOLOGY_CANARY_REPO: ShaneKanterman04/patchwork-pirates
       HOSTLET_TOPOLOGY_CANARY_SHA: fae18d0fab8bc5586a33af598fa4371a06f51576
