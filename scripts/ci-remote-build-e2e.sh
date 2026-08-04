@@ -14,6 +14,7 @@ RUNNER_DIND="hostlet-ci-remote-runner-dind-${RUN_ID}"
 BUILDER_DIND="hostlet-ci-remote-builder-dind-${RUN_ID}"
 RUNNER_AGENT_CONTAINER="hostlet-ci-remote-runner-agent-${RUN_ID}"
 BUILDER_AGENT_CONTAINER="hostlet-ci-remote-builder-agent-${RUN_ID}"
+AGENT_RUNTIME_IMAGE="buildpack-deps:trixie-scm@sha256:07554a82a7a29ce00a048e0b29d18f454b5721b41940d43ee3be1ef59d55b114"
 NETWORK="hostlet-ci-remote-${RUN_ID}"
 API_PORT="$(pick_local_port)"
 API_LOG="${TMP_DIR}/api.log"
@@ -142,7 +143,9 @@ wait_deployment() {
 wait_agent() {
   local endpoint="$1"
   local id="$2"
-  for _ in $(seq 1 120); do
+  # Keep a bounded cushion for cold nested-Docker networking and websocket
+  # registration on ephemeral runners.
+  for _ in $(seq 1 300); do
     if curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}${endpoint}" | \
       python3 -c 'import json,sys; rows=json.load(sys.stdin); target=sys.argv[1]; raise SystemExit(0 if any(str(row.get("id")) == target and row.get("status") == "online" for row in rows) else 1)' "${id}"; then
       return
@@ -226,6 +229,8 @@ AGENT_CLI_MOUNTS=(
   -v "${BUILDX_CLI}:/usr/libexec/docker/cli-plugins/docker-buildx:ro"
   -v "${COMPOSE_CLI}:/usr/libexec/docker/cli-plugins/docker-compose:ro"
 )
+# This pinned glibc runtime already includes Git and CA roots. Installing those
+# packages inside each agent raced the registration deadline on fresh runners.
 docker network create "${NETWORK}" >/dev/null
 start_postgres_container postgres:16-alpine
 wait_postgres_ready
@@ -326,8 +331,8 @@ docker run -d --name "${RUNNER_AGENT_CONTAINER}" --network "container:${RUNNER_D
   -e HOSTLET_LOCAL_MODE=true -e HOSTLET_HEALTH_HOST=127.0.0.1 -e HOSTLET_LOCAL_ROUTER=caddy \
   -e HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR="${TMP_DIR}/caddy" -e HOSTLET_LOCAL_ROUTER_RELOAD=true \
   -e HOSTLET_EXTRA_CA_CERT_PATH="${TMP_DIR}/ca.crt" -e SSL_CERT_FILE="${TMP_DIR}/ca.crt" \
-  -e GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL}" ubuntu:24.04 \
-  sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends ca-certificates git >/dev/null && exec hostlet-agent' >/dev/null
+  -e GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL}" "${AGENT_RUNTIME_IMAGE}" \
+  hostlet-agent >/dev/null
 wait_agent /api/servers 00000000-0000-0000-0000-000000000001
 
 POOL="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" \
@@ -354,8 +359,7 @@ docker run -d --name "${BUILDER_AGENT_CONTAINER}" --network "container:${BUILDER
   -e HOSTLET_EXTRA_CA_CERT_PATH="${TMP_DIR}/ca.crt" -e SSL_CERT_FILE="${TMP_DIR}/ca.crt" \
   -e HOSTLET_RAILPACK_BUILDKIT_PRIVILEGED=true -e HOSTLET_RAILPACK_BUILDKIT_CONTAINER="remote-buildkit-${RUN_ID}" \
   -e HOSTLET_RAILPACK_BIN=/usr/local/bin/railpack -e GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL}" \
-  ubuntu:24.04 \
-  sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends ca-certificates git >/dev/null && exec hostlet-agent' >/dev/null
+  "${AGENT_RUNTIME_IMAGE}" hostlet-agent >/dev/null
 wait_agent /api/builders "${BUILDER_ID}"
 
 read -r DOCKER_APP DOCKER_DEPLOY DOCKER_PORT < <(create_and_deploy remote-dockerfile dockerfile single '{}')
