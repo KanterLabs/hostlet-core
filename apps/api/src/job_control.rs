@@ -45,6 +45,64 @@ pub struct AuditEventInput<'a> {
     pub metadata: serde_json::Value,
 }
 
+/// Identifies the principal responsible for a job-control action.
+///
+/// Job visibility and audit attribution are intentionally separate: an
+/// operator may act on an owner's job while the audit record must continue to
+/// name the operator rather than the owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobAuditActor<'a> {
+    pub actor_type: &'a str,
+    pub actor_id: Option<&'a str>,
+}
+
+impl<'a> JobAuditActor<'a> {
+    pub const fn new(actor_type: &'a str, actor_id: Option<&'a str>) -> Self {
+        Self {
+            actor_type,
+            actor_id,
+        }
+    }
+
+    pub const fn owner() -> Self {
+        Self::new("owner", None)
+    }
+}
+
+/// The ownership scope used to locate a job for a recovery operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentJobVisibility {
+    pub user_id: Uuid,
+    pub cloud_mode: bool,
+}
+
+/// Input for an interactive agent job. Unlike deployments, these jobs are
+/// directly enqueued without creating a new deployment record.
+pub struct InteractiveAgentJob<'a> {
+    pub server_id: Uuid,
+    pub app_id: Uuid,
+    pub deployment_id: Option<Uuid>,
+    pub job_type: &'a str,
+    pub payload: serde_json::Value,
+}
+
+/// The outcome of a retry attempt. `Rejected` represents a valid request that
+/// cannot currently create a replacement deployment (for example, because no
+/// prior deployment is available for rollback).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentJobRetryOutcome {
+    Retried,
+    NotFound,
+    Rejected(String),
+}
+
+/// The outcome of a cancellation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentJobCancelOutcome {
+    Cancelled,
+    NotFound,
+}
+
 /// Records a structured audit event into the `audit_events` table.
 pub async fn record_audit_event(state: &AppState, event: AuditEventInput<'_>) {
     let _ = sqlx::query(
@@ -73,42 +131,86 @@ pub async fn enqueue_interactive_agent_job(
     job_type: &str,
     payload: serde_json::Value,
 ) -> axum::response::Response {
-    match deploy::enqueue_agent_job(
+    match enqueue_interactive_agent_job_for_actor(
         state,
-        server_id,
-        Some(app_id),
-        deployment_id,
-        job_type,
-        payload,
-        20,
+        JobAuditActor::owner(),
+        InteractiveAgentJob {
+            server_id,
+            app_id,
+            deployment_id,
+            job_type,
+            payload,
+        },
     )
     .await
     {
-        Ok(job_id) => {
-            record_audit_event(
-                state,
-                AuditEventInput {
-                    actor_type: "owner",
-                    actor_id: None,
-                    event_type: &format!("{job_type}_requested"),
-                    app_id: Some(app_id),
-                    deployment_id,
-                    job_id: Some(job_id),
-                    metadata: serde_json::json!({}),
-                },
-            )
-            .await;
-            (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({"jobId": job_id})),
-            )
-                .into_response()
-        }
+        Ok(job_id) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"jobId": job_id})),
+        )
+            .into_response(),
         Err(err) => {
             tracing::warn!(error = %err, app_id = %app_id, job_type, "failed to enqueue agent job");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// Enqueues an interactive job and records the request audit event in the
+/// same transaction. Callers provide the audit actor explicitly so privileged
+/// recovery paths never attribute an operator action to the app owner.
+pub async fn enqueue_interactive_agent_job_for_actor(
+    state: &AppState,
+    actor: JobAuditActor<'_>,
+    job: InteractiveAgentJob<'_>,
+) -> anyhow::Result<Uuid> {
+    let mut transaction = state.db.begin().await?;
+    // Keep the same teardown fence protocol as deploy::enqueue_agent_job.
+    // The app row lock serializes this enqueue with start_app_teardown.
+    let queue_priority_offset = sqlx::query_scalar::<_, i32>(
+        "SELECT queue_priority_offset FROM apps WHERE id=$1 FOR KEY SHARE",
+    )
+    .bind(job.app_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
+    let deletion_fenced = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+           SELECT 1 FROM agent_jobs
+           WHERE app_id=$1
+             AND job_type='delete_app'
+             AND (
+               status IN ('queued','claimed','running','success')
+               OR payload_json->>'teardown_fence'='true'
+             )
+         )",
+    )
+    .bind(job.app_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    anyhow::ensure!(!deletion_fenced, "app deletion is in progress");
+
+    let job_id = deploy::insert_agent_job_in_transaction(
+        &mut transaction,
+        job.server_id,
+        Some(job.app_id),
+        job.deployment_id,
+        job.job_type,
+        job.payload,
+        20 + queue_priority_offset,
+    )
+    .await?;
+    record_agent_job_audit_event_in_transaction(
+        &mut transaction,
+        actor,
+        &format!("{}_requested", job.job_type),
+        Some(job.app_id),
+        job.deployment_id,
+        Some(job_id),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(job_id)
 }
 
 /// Marks an agent job as failed with the given summary message.
@@ -339,6 +441,38 @@ pub async fn retry_agent_job(
     id: Uuid,
     cloud_mode: bool,
 ) -> axum::response::Response {
+    match retry_agent_job_for_actor(
+        state,
+        AgentJobVisibility {
+            user_id,
+            cloud_mode,
+        },
+        id,
+        JobAuditActor::owner(),
+    )
+    .await
+    {
+        Ok(AgentJobRetryOutcome::Retried) => StatusCode::NO_CONTENT.into_response(),
+        Ok(AgentJobRetryOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(AgentJobRetryOutcome::Rejected(reason)) => {
+            (StatusCode::BAD_REQUEST, reason).into_response()
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, job_id = %id, "failed to retry agent job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Retries a terminal job within `visibility` and attributes the recovery to
+/// `actor`. The owner scope is used solely for authorization; it is never
+/// inferred as the actor for the resulting audit event.
+pub async fn retry_agent_job_for_actor(
+    state: &AppState,
+    visibility: AgentJobVisibility,
+    id: Uuid,
+    actor: JobAuditActor<'_>,
+) -> anyhow::Result<AgentJobRetryOutcome> {
     let select = format!(
         r#"
         SELECT j.job_type, j.app_id, j.payload_json
@@ -351,21 +485,18 @@ pub async fn retry_agent_job(
     );
     let row = match sqlx::query(&select)
         .bind(id)
-        .bind(user_id)
-        .bind(cloud_mode)
+        .bind(visibility.user_id)
+        .bind(visibility.cloud_mode)
         .fetch_optional(&state.db)
         .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, job_id = %id, "failed to load agent job for retry");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+        Ok(None) => return Ok(AgentJobRetryOutcome::NotFound),
+        Err(err) => return Err(err.into()),
     };
     let job_type = row.get::<String, _>("job_type");
     if retry_creates_fresh_deployment(&job_type) {
-        return retry_deployment_job(state, user_id, id, &job_type, &row).await;
+        return retry_deployment_job_for_actor(state, visibility, id, &job_type, &row, actor).await;
     }
     let update = format!(
         r#"
@@ -386,19 +517,21 @@ pub async fn retry_agent_job(
         "#,
         agent_job_visibility_predicate(2, 3)
     );
-    run_job_mutation(
+    match run_job_mutation_for_actor(
         state,
         id,
-        user_id,
-        cloud_mode,
+        visibility,
         &update,
-        JobMutationOutcome {
+        JobMutationAudit {
             event_type: "agent_job_retried",
-            failure_log: "failed to retry agent job",
-            success: StatusCode::NO_CONTENT,
+            actor,
         },
     )
-    .await
+    .await?
+    {
+        JobMutationOutcome::Mutated => Ok(AgentJobRetryOutcome::Retried),
+        JobMutationOutcome::NotFound => Ok(AgentJobRetryOutcome::NotFound),
+    }
 }
 
 pub async fn cancel_agent_job(
@@ -407,20 +540,50 @@ pub async fn cancel_agent_job(
     id: Uuid,
     cloud_mode: bool,
 ) -> axum::response::Response {
-    let update = cancel_agent_job_update_sql();
-    run_job_mutation(
+    match cancel_agent_job_for_actor(
         state,
-        id,
-        user_id,
-        cloud_mode,
-        &update,
-        JobMutationOutcome {
-            event_type: "agent_job_cancelled",
-            failure_log: "failed to cancel agent job",
-            success: StatusCode::NO_CONTENT,
+        AgentJobVisibility {
+            user_id,
+            cloud_mode,
         },
+        id,
+        JobAuditActor::owner(),
     )
     .await
+    {
+        Ok(AgentJobCancelOutcome::Cancelled) => StatusCode::NO_CONTENT.into_response(),
+        Ok(AgentJobCancelOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, job_id = %id, "failed to cancel agent job");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Cancels a queued or active job within `visibility`, recording the supplied
+/// actor atomically with the mutation.
+pub async fn cancel_agent_job_for_actor(
+    state: &AppState,
+    visibility: AgentJobVisibility,
+    id: Uuid,
+    actor: JobAuditActor<'_>,
+) -> anyhow::Result<AgentJobCancelOutcome> {
+    let update = cancel_agent_job_update_sql(actor);
+    match run_job_mutation_for_actor(
+        state,
+        id,
+        visibility,
+        &update,
+        JobMutationAudit {
+            event_type: "agent_job_cancelled",
+            actor,
+        },
+    )
+    .await?
+    {
+        JobMutationOutcome::Mutated => Ok(AgentJobCancelOutcome::Cancelled),
+        JobMutationOutcome::NotFound => Ok(AgentJobCancelOutcome::NotFound),
+    }
 }
 
 fn retry_creates_fresh_deployment(job_type: &str) -> bool {
@@ -431,22 +594,21 @@ fn retry_creates_fresh_deployment(job_type: &str) -> bool {
 /// requeuing the original row. The stored secrets were scrubbed on the terminal
 /// transition, and the original deployment row is already terminal, so a reused
 /// run's reports would not update the right deployment.
-async fn retry_deployment_job(
+async fn retry_deployment_job_for_actor(
     state: &AppState,
-    user_id: Uuid,
+    visibility: AgentJobVisibility,
     id: Uuid,
     job_type: &str,
     row: &sqlx::postgres::PgRow,
-) -> axum::response::Response {
+    actor: JobAuditActor<'_>,
+) -> anyhow::Result<AgentJobRetryOutcome> {
     let Some(app_id) = row.get::<Option<Uuid>, _>("app_id") else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "job no longer has an app to retry against",
-        )
-            .into_response();
+        return Ok(AgentJobRetryOutcome::Rejected(
+            "job no longer has an app to retry against".into(),
+        ));
     };
     let result = if job_type == "rollback" {
-        deploy::create_and_send_rollback(state, user_id, app_id).await
+        deploy::create_and_send_rollback(state, visibility.user_id, app_id).await
     } else {
         let payload = row.get::<Option<serde_json::Value>, _>("payload_json");
         let commit_sha = payload
@@ -454,33 +616,47 @@ async fn retry_deployment_job(
             .and_then(|payload| payload.get("commit_sha"))
             .and_then(|value| value.as_str())
             .unwrap_or("HEAD");
-        deploy::create_and_send_deploy(state, user_id, app_id, commit_sha).await
+        deploy::create_and_send_deploy(state, visibility.user_id, app_id, commit_sha).await
     };
     match result {
         Ok(new_deployment_id) => {
             record_agent_job_audit_event(
                 state,
+                actor,
                 "agent_job_retried",
                 Some(app_id),
                 Some(new_deployment_id),
                 Some(id),
             )
             .await;
-            StatusCode::NO_CONTENT.into_response()
+            Ok(AgentJobRetryOutcome::Retried)
         }
-        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+        Err(err) => Ok(AgentJobRetryOutcome::Rejected(err.to_string())),
     }
 }
 
-fn cancel_agent_job_update_sql() -> String {
+fn cancel_agent_job_update_sql(actor: JobAuditActor<'_>) -> String {
+    // These are fixed SQL literals selected from actor type, never caller
+    // supplied text interpolated into the query.
+    let (summary, failure_code) = if actor.actor_type == "owner" {
+        (
+            "Cancelled by owner before the agent started work.",
+            "cancelled_by_owner",
+        )
+    } else {
+        (
+            "Cancelled by requester before the agent started work.",
+            "cancelled_by_requester",
+        )
+    };
     format!(
         r#"
         WITH updated AS (
           UPDATE agent_jobs j
           SET status=CASE WHEN j.status='queued' THEN 'cancelled' ELSE j.status END,
               cancel_requested_at=CASE WHEN j.status IN ('claimed','running') THEN now() ELSE j.cancel_requested_at END,
-              failure_summary=CASE WHEN j.status='queued' THEN 'Cancelled by owner before the agent started work.' ELSE j.failure_summary END,
-              last_error=CASE WHEN j.status='queued' THEN 'Cancelled by owner before the agent started work.' ELSE j.last_error END,
+              failure_summary=CASE WHEN j.status='queued' THEN '{summary}' ELSE j.failure_summary END,
+              last_error=CASE WHEN j.status='queued' THEN '{summary}' ELSE j.last_error END,
               payload_json=CASE WHEN j.status='queued' THEN j.payload_json - 'env' - 'github_token' - 'artifact_registry' ELSE j.payload_json END,
               finished_at=CASE WHEN j.status='queued' THEN now() ELSE j.finished_at END,
               updated_at=now()
@@ -490,8 +666,8 @@ fn cancel_agent_job_update_sql() -> String {
           RETURNING j.app_id,j.deployment_id,j.status
         ), cancelled_deployment AS (
           UPDATE deployments d
-          SET status='canceled',failure_code='cancelled_by_owner',
-              failure_summary='Cancelled by owner before the agent started work.',finished_at=now()
+          SET status='canceled',failure_code='{failure_code}',
+              failure_summary='{summary}',finished_at=now()
           FROM updated u
           WHERE u.status='cancelled' AND d.id=u.deployment_id
             AND d.status = ANY(ARRAY['queued','queued_for_build','running','building','publishing','queued_for_release','pulling','starting','health_checking','routing'])
@@ -503,48 +679,50 @@ fn cancel_agent_job_update_sql() -> String {
     )
 }
 
-struct JobMutationOutcome {
+struct JobMutationAudit<'a> {
     event_type: &'static str,
-    failure_log: &'static str,
-    success: StatusCode,
+    actor: JobAuditActor<'a>,
 }
 
-async fn run_job_mutation(
+enum JobMutationOutcome {
+    Mutated,
+    NotFound,
+}
+
+async fn run_job_mutation_for_actor(
     state: &AppState,
     id: Uuid,
-    user_id: Uuid,
-    cloud_mode: bool,
+    visibility: AgentJobVisibility,
     update_sql: &str,
-    outcome: JobMutationOutcome,
-) -> axum::response::Response {
-    let result = sqlx::query(update_sql)
+    audit: JobMutationAudit<'_>,
+) -> anyhow::Result<JobMutationOutcome> {
+    let mut transaction = state.db.begin().await?;
+    let row = sqlx::query(update_sql)
         .bind(id)
-        .bind(user_id)
-        .bind(cloud_mode)
-        .fetch_optional(&state.db)
-        .await;
-    match result {
-        Ok(Some(row)) => {
-            record_agent_job_audit_event(
-                state,
-                outcome.event_type,
-                row.get::<Option<Uuid>, _>("app_id"),
-                row.get::<Option<Uuid>, _>("deployment_id"),
-                Some(id),
-            )
-            .await;
-            outcome.success.into_response()
-        }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, job_id = %id, message = outcome.failure_log);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+        .bind(visibility.user_id)
+        .bind(visibility.cloud_mode)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(row) = row else {
+        transaction.commit().await?;
+        return Ok(JobMutationOutcome::NotFound);
+    };
+    record_agent_job_audit_event_in_transaction(
+        &mut transaction,
+        audit.actor,
+        audit.event_type,
+        row.get::<Option<Uuid>, _>("app_id"),
+        row.get::<Option<Uuid>, _>("deployment_id"),
+        Some(id),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(JobMutationOutcome::Mutated)
 }
 
 async fn record_agent_job_audit_event(
     state: &AppState,
+    actor: JobAuditActor<'_>,
     event_type: &str,
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
@@ -553,8 +731,10 @@ async fn record_agent_job_audit_event(
     let result = sqlx::query(
         "INSERT INTO audit_events
            (actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
-         VALUES ('owner',NULL,$1,$2,$3,$4,'{}'::jsonb)",
+         VALUES ($1,$2,$3,$4,$5,$6,'{}'::jsonb)",
     )
+    .bind(actor.actor_type)
+    .bind(actor.actor_id)
     .bind(event_type)
     .bind(app_id)
     .bind(deployment_id)
@@ -564,6 +744,30 @@ async fn record_agent_job_audit_event(
     if let Err(err) = result {
         tracing::warn!(error = %err, event_type, "failed to record agent job audit event");
     }
+}
+
+async fn record_agent_job_audit_event_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: JobAuditActor<'_>,
+    event_type: &str,
+    app_id: Option<Uuid>,
+    deployment_id: Option<Uuid>,
+    job_id: Option<Uuid>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO audit_events
+           (actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
+         VALUES ($1,$2,$3,$4,$5,$6,'{}'::jsonb)",
+    )
+    .bind(actor.actor_type)
+    .bind(actor.actor_id)
+    .bind(event_type)
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(job_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -580,9 +784,32 @@ mod tests {
     }
 
     #[test]
-    fn cancel_scrubs_secret_payload_fields() {
-        let sql = cancel_agent_job_update_sql();
-        assert!(sql.contains("j.payload_json - 'env' - 'github_token' - 'artifact_registry'"));
-        assert!(sql.contains("cancel_requested_at"));
+    fn cancel_sql_uses_actor_accurate_fixed_messages() {
+        let owner_sql = cancel_agent_job_update_sql(JobAuditActor::owner());
+        assert!(owner_sql.contains("Cancelled by owner before the agent started work."));
+        assert!(owner_sql.contains("failure_code='cancelled_by_owner'"));
+        assert!(owner_sql.contains("j.payload_json - 'env' - 'github_token' - 'artifact_registry'"));
+        assert!(owner_sql.contains("cancel_requested_at"));
+
+        let operator_sql =
+            cancel_agent_job_update_sql(JobAuditActor::new("operator", Some("admin-123")));
+        assert!(operator_sql.contains("Cancelled by requester before the agent started work."));
+        assert!(operator_sql.contains("failure_code='cancelled_by_requester'"));
+        assert!(!operator_sql.contains("Cancelled by owner"));
+        assert!(!operator_sql.contains("cancelled_by_owner"));
+    }
+
+    #[test]
+    fn audit_actor_keeps_operator_identity_separate_from_owner_scope() {
+        let actor = JobAuditActor::new("operator", Some("admin-123"));
+        let visibility = AgentJobVisibility {
+            user_id: Uuid::nil(),
+            cloud_mode: true,
+        };
+
+        assert_eq!(actor.actor_type, "operator");
+        assert_eq!(actor.actor_id, Some("admin-123"));
+        assert_ne!(actor.actor_type, "owner");
+        assert!(visibility.cloud_mode);
     }
 }
