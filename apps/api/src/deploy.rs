@@ -254,6 +254,18 @@ pub async fn deployment_logs(
         Ok(context) => context,
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
+    let deployment = sqlx::query(
+        "SELECT 1 FROM deployments d JOIN apps a ON a.id=d.app_id WHERE d.id=$1 AND a.user_id=$2",
+    )
+    .bind(id)
+    .bind(context.user_id)
+    .fetch_optional(&state.db)
+    .await;
+    match deployment {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
     let rows = sqlx::query("SELECT l.stream,l.line,l.created_at FROM deployment_logs l JOIN deployments d ON d.id=l.deployment_id JOIN apps a ON a.id=d.app_id WHERE l.deployment_id=$1 AND a.user_id=$2 ORDER BY l.created_at ASC LIMIT 1000")
         .bind(id).bind(context.user_id).fetch_all(&state.db).await;
     match rows {
