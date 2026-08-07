@@ -1,8 +1,15 @@
 use super::{
-    deployment_queue_status, is_active_deployment_status, required_protocol_version,
-    rollback_supported_for_runtime, route_key, storage_over_quota_error, StorageScope,
+    deployment_logs, deployment_queue_status, is_active_deployment_status,
+    required_protocol_version, rollback_supported_for_runtime, route_key, storage_over_quota_error,
+    StorageScope,
 };
 use crate::state::AppState;
+use axum::{
+    body::to_bytes,
+    extract::{Path, State},
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use uuid::Uuid;
 
 const TEST_SERVER_ID: Uuid = Uuid::from_u128(1);
@@ -115,7 +122,7 @@ async fn db_deployment_queue_reports_deploys_ahead() {
         return;
     };
     reset_deploy_db(&state).await;
-    let user_id = insert_user(&state).await;
+    let user_id = insert_user(&state, 9601, "deploy-queue-user").await;
     let first_app_id = insert_app(&state, user_id, "queue-first").await;
     let target_app_id = insert_app(&state, user_id, "queue-target").await;
     let first_deployment_id = insert_deployment(&state, first_app_id, "running").await;
@@ -152,7 +159,7 @@ async fn db_deployment_queue_without_job_falls_back_to_status() {
         return;
     };
     reset_deploy_db(&state).await;
-    let user_id = insert_user(&state).await;
+    let user_id = insert_user(&state, 9601, "deploy-queue-user").await;
     let app_id = insert_app(&state, user_id, "queue-no-job").await;
     let deployment_id = insert_deployment(&state, app_id, "building").await;
 
@@ -162,6 +169,49 @@ async fn db_deployment_queue_without_job_falls_back_to_status() {
     assert_eq!(queue.deploys_ahead, 0);
     assert_eq!(queue.position, None);
     assert_eq!(queue.updated_at, None);
+}
+
+#[tokio::test]
+async fn db_deployment_logs_are_visible_only_to_the_owner() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_deploy_db(&state).await;
+    let owner_id = insert_user(&state, 9601, "deployment-log-owner").await;
+    let other_user_id = insert_user(&state, 9602, "deployment-log-other").await;
+    let app_id = insert_app(&state, owner_id, "deployment-logs").await;
+    let populated_id = insert_deployment(&state, app_id, "success").await;
+    let empty_id = insert_deployment(&state, app_id, "success").await;
+    insert_deployment_log(&state, populated_id, "stdout", "owned log line").await;
+
+    let unauthenticated =
+        deployment_logs(State(state.clone()), HeaderMap::new(), Path(populated_id))
+            .await
+            .into_response();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, body) = request_deployment_logs(&state, owner_id, empty_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!([])
+    );
+
+    let (status, body) = request_deployment_logs(&state, owner_id, populated_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!([{"stream": "stdout", "line": "owned log line"}])
+    );
+
+    let cross_owner = request_deployment_logs(&state, other_user_id, populated_id).await;
+    let nonexistent = request_deployment_logs(&state, owner_id, Uuid::new_v4()).await;
+    assert_eq!(cross_owner, nonexistent);
+    assert_eq!(cross_owner.0, StatusCode::NOT_FOUND);
+
+    state.db.close().await;
+    let database_failure = request_deployment_logs(&state, owner_id, populated_id).await;
+    assert_eq!(database_failure.0, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 async fn reset_deploy_db(state: &AppState) {
@@ -177,13 +227,13 @@ async fn reset_deploy_db(state: &AppState) {
         .unwrap();
 }
 
-async fn insert_user(state: &AppState) -> Uuid {
-    sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO users (github_id, login) VALUES (9601,'deploy-queue-user') RETURNING id",
-    )
-    .fetch_one(&state.db)
-    .await
-    .unwrap()
+async fn insert_user(state: &AppState, github_id: i64, login: &str) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>("INSERT INTO users (github_id,login) VALUES ($1,$2) RETURNING id")
+        .bind(github_id)
+        .bind(login)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
 }
 
 async fn insert_app(state: &AppState, user_id: Uuid, name: &str) -> Uuid {
@@ -214,6 +264,39 @@ async fn insert_deployment(state: &AppState, app_id: Uuid, status: &str) -> Uuid
     .fetch_one(&state.db)
     .await
     .unwrap()
+}
+
+async fn insert_deployment_log(state: &AppState, deployment_id: Uuid, stream: &str, line: &str) {
+    sqlx::query("INSERT INTO deployment_logs (deployment_id,stream,line) VALUES ($1,$2,$3)")
+        .bind(deployment_id)
+        .bind(stream)
+        .bind(line)
+        .execute(&state.db)
+        .await
+        .unwrap();
+}
+
+async fn request_deployment_logs(
+    state: &AppState,
+    user_id: Uuid,
+    deployment_id: Uuid,
+) -> (StatusCode, Vec<u8>) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        crate::auth::test_session_cookie_header(state, user_id)
+            .parse()
+            .unwrap(),
+    );
+    let response = deployment_logs(State(state.clone()), headers, Path(deployment_id))
+        .await
+        .into_response();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, body)
 }
 
 async fn insert_deploy_job(
