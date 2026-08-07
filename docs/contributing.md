@@ -38,14 +38,44 @@ Use narrower checks for small docs-only changes, but always run link and secret 
 
 ## Release Expectations
 
-Published releases are tagged `vX.Y.Z`. GitHub-generated notes categorize
-merged pull requests as features, fixes, or other changes. They are a change
-summary, not proof that migration or rollback considerations are absent.
-Release operators should add explicit breaking, configuration, migration, and
-rollback guidance when applicable; the `hostlet-release.json` migration flags
-remain the machine-readable source used by the updater.
+Releases start by finalizing `X.Y.Z` on `staging`, with the same version in
+`apps/cli/Cargo.toml`, `apps/api/Cargo.toml`, and `apps/agent/Cargo.toml`. Select
+the exact staging SHA and successful staging run for the
+`.github/workflows/release-candidate.yml` workflow. That workflow runs
+release-only checks, builds the Linux x86_64 CLI once, captures the four
+existing immutable staging image digests (API, web, agent, and screenshotter),
+and seals candidate proof with the CLI, SBOM, and provenance evidence. Those
+artifacts are ready before publication and are never rebuilt during tagging.
 
-The release publishes:
+Prepare the release PR from that exact staging head:
+
+```bash
+scripts/prepare-release-pr.sh X.Y.Z
+```
+
+The script verifies the version on `origin/staging`, rejects an existing release
+tag, and creates or reuses `release-candidate/vX.Y.Z` only when the branch head
+and pull-request head/base SHAs are exact. Do not merge until the release
+candidate gate is successful.
+
+The normal publication path is `hostlet release prepare`, followed by
+`hostlet release promote`; use `hostlet release resume` to continue an
+interrupted promotion. Publication is time-bounded and validates the sealed
+candidate before aliasing the existing four image digests to `vX.Y.Z` and
+uploading the identical stored CLI, checksum, SBOM, provenance, and candidate
+receipt assets. It writes `hostlet-release.json` from that evidence; normal
+publication performs no rebuild. The release tag and publication target are the
+merged `main` commit, and publication requires its tree to equal the certified
+candidate tree. Manual `git tag` and `git push --tags` releases are unsupported.
+
+GitHub-generated notes categorize merged pull requests as features, fixes, or
+other changes. They are a change summary, not proof that migration or rollback
+considerations are absent. Release operators should add explicit breaking,
+configuration, migration, and rollback guidance when applicable; the
+`hostlet-release.json` migration flags remain the machine-readable source used
+by the updater.
+
+The published release contains:
 
 - Linux x86_64 CLI binary and checksum
 - `hostlet-release.json`

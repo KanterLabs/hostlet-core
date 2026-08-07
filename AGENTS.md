@@ -11,11 +11,22 @@ production‑only deployment detail **out of this repo** — it is public. See `
   builds and pushes the moving `hostlet-{api,web,agent,screenshotter}:staging` and immutable
   `:sha-<commit>` images to GHCR, then rings the downstream Hostlet Cloud staging deploy
   (a `repository_dispatch`). So a push to `staging` updates the Cloud staging environment.
-- **`main` is the release branch.** Releases are git tags `vX.Y.Z` (`release.yml`). The tag
-  **must match** the `version` in `apps/cli/Cargo.toml`, `apps/api/Cargo.toml`, and
-  `apps/agent/Cargo.toml` — bump all three before tagging or the release fails. Releases
-  publish `hostlet-{api,web,agent,screenshotter}:vX.Y.Z` (+sha) and the GitHub release with
-  `hostlet-release.json`.
+- **`staging` is also the release source.** Finalize `X.Y.Z` on `staging` with matching
+  versions in `apps/cli/Cargo.toml`, `apps/api/Cargo.toml`, and `apps/agent/Cargo.toml`.
+  Select the exact staging SHA and successful staging run for
+  `.github/workflows/release-candidate.yml`: it runs the candidate checks, builds the CLI
+  once, reads the four existing immutable staging image digests, and seals the candidate
+  proof with the CLI, SBOM, and provenance evidence.
+- **`main` is the publication branch.** `scripts/prepare-release-pr.sh X.Y.Z` prepares
+  `release-candidate/vX.Y.Z` from the exact `origin/staging` SHA and only reuses or creates
+  a pull request when its head and `main` base identities are exact. Do not merge until the
+  release-candidate gate passes. The normal operator path is `hostlet release prepare`,
+  `hostlet release promote`, then `hostlet release resume` when an interrupted promotion
+  needs continuing. Timed publication validates the sealed candidate, aliases the existing
+  four image digests, and uploads the identical stored candidate assets; it does not rebuild
+  them. The release tag and publication target are the merged `main` commit, whose tree must
+  equal the certified candidate tree. Manual `git tag` or `git push --tags` releases are
+  unsupported.
 - **Downstream:** Hostlet Cloud consumes this repo as a git submodule — its `staging` branch
   tracks core `staging`; its `main` pins a core `vX.Y.Z` tag. Don't rewrite public history;
   don't force‑push shared branches.
@@ -83,7 +94,7 @@ CARGO_TARGET_DIR=/tmp/hostlet-target cargo test --workspace
 pnpm --dir apps/web lint && pnpm --dir apps/web build
 ```
 
-Workflows: `.github/workflows/{ci,staging,release,full-ci}.yml`. Never add secrets or private
+Workflows: `.github/workflows/{ci,staging,release-candidate,release,full-ci}.yml`. Never add secrets or private
 operational data (IPs, hosts, credentials) to tracked files.
 
 > A push to `staging` is a deploy: it publishes `:staging` images and rings the downstream
