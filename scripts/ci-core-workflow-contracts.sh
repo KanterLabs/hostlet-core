@@ -6,6 +6,9 @@ STAGING_WORKFLOW="${ROOT}/.github/workflows/staging.yml"
 SELF_HOSTED_LIB="${ROOT}/scripts/ci-self-hosted-lib.sh"
 CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 PR_WORKFLOW="${ROOT}/.github/workflows/pr-homelab-ci.yml"
+STAGING_PR_WORKFLOW="${ROOT}/.github/workflows/staging-pr.yml"
+STAGING_PR_GATE="${ROOT}/scripts/ci-staging-pr-gate.py"
+STAGING_PR_GATE_SELFTEST="${ROOT}/scripts/ci-staging-pr-gate-selftest.py"
 STAGING_DEPLOYABILITY="${ROOT}/.github/workflows/deployability.yml"
 FULL_CI_WORKFLOW="${ROOT}/.github/workflows/full-ci.yml"
 RELEASE_WORKFLOW="${ROOT}/.github/workflows/release.yml"
@@ -57,7 +60,20 @@ assert_contains "${STAGING_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
 assert_contains "${STAGING_WORKFLOW}" 'uses: ./.github/workflows/database-tests.yml'
 assert_contains "${STAGING_WORKFLOW}" 'needs: [secrets, rust, database, web, topology-e2e, remote-build]'
 assert_contains "${STAGING_WORKFLOW}" 'GHCR_PAT: ${{ secrets.GHCR_PAT }}'
-assert_contains "${STAGING_WORKFLOW}" 'repos/KanterLabs/hostlet-cloud/dispatches'
+assert_contains "${STAGING_WORKFLOW}" 'pin-cloud-staging:'
+assert_contains "${STAGING_WORKFLOW}" 'needs: [images]'
+assert_contains "${STAGING_WORKFLOW}" 'repository: KanterLabs/hostlet-cloud'
+assert_contains "${STAGING_WORKFLOW}" 'ref: staging'
+assert_contains "${STAGING_WORKFLOW}" 'token: ${{ secrets.CLOUD_DISPATCH_PAT }}'
+assert_contains "${STAGING_WORKFLOW}" 'GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_PAT }}'
+assert_contains "${STAGING_WORKFLOW}" 'path: hostlet-cloud'
+assert_contains "${STAGING_WORKFLOW}" 'working-directory: hostlet-cloud'
+assert_contains "${STAGING_WORKFLOW}" 'scripts/update-core-staging-pin.sh "${GITHUB_SHA}"'
+assert_not_contains "${STAGING_WORKFLOW}" 'repository_dispatch'
+assert_not_contains "${STAGING_WORKFLOW}" '/dispatches'
+assert_not_contains "${STAGING_WORKFLOW}" 'core-staging-updated'
+assert_not_contains "${STAGING_WORKFLOW}" 'core-drift-reviewed'
+assert_not_contains "${STAGING_WORKFLOW}" 'auto-merge'
 assert_not_contains "${STAGING_WORKFLOW}" 'packages: write'
 assert_not_contains "${STAGING_WORKFLOW}" 'actions/checkout@v4'
 assert_not_contains "${STAGING_WORKFLOW}" 'dtolnay/rust-toolchain@stable'
@@ -85,6 +101,35 @@ assert_contains "${PR_WORKFLOW}" "homelab-ci-approved"
 assert_contains "${PR_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
 assert_contains "${PR_WORKFLOW}" 'persist-credentials: false'
 assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
+assert_contains "${STAGING_PR_WORKFLOW}" 'pull_request:'
+assert_not_contains "${STAGING_PR_WORKFLOW}" 'pull_request_target:'
+assert_contains "${STAGING_PR_WORKFLOW}" '`pull_request` YAML is PR-controlled'
+assert_contains "${STAGING_PR_WORKFLOW}" 'writers who can label are staging deploy admins'
+assert_contains "${STAGING_PR_WORKFLOW}" 'fork PRs fail the same-repo'
+assert_contains "${STAGING_PR_WORKFLOW}" 'not eliminate this boundary without default-branch workflow ownership'
+assert_contains "${STAGING_PR_WORKFLOW}" 'the evaluator is not present on its base SHA yet'
+assert_contains "${STAGING_PR_WORKFLOW}" 'HOSTLET_STAGING_PR_APPROVAL_LABEL: staging-homelab-ci-approved'
+assert_contains "${STAGING_PR_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
+assert_contains "${STAGING_PR_WORKFLOW}" 'group: staging-pr-${{ github.event.pull_request.number }}'
+assert_contains "${STAGING_PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
+assert_contains "${STAGING_PR_WORKFLOW}" 'persist-credentials: false'
+assert_contains "${STAGING_PR_GATE}" 'REVOCATION_DEPENDENCY = "revoke-approval-on-update"'
+assert_contains "${STAGING_PR_GATE}" 'unexpected = sorted(set(payload) - {*DEPENDENCIES, REVOCATION_DEPENDENCY})'
+assert_contains "${STAGING_PR_GATE}" 'if result != "success"'
+assert_contains "${STAGING_PR_GATE}" 'event_base = require_sha(required_env(environment, "EVENT_BASE_SHA"), "event base")'
+assert_contains "${STAGING_PR_GATE}" 'live_base = require_sha(nested(pull, "base", "sha"), "live pull-request base")'
+assert_contains "${STAGING_PR_GATE}" 'if live_base != event_base:'
+assert_contains "${STAGING_PR_GATE}" 'return validate_live_pull(fetch_live_pull(environment), environment)'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'for dependency in gate.DEPENDENCIES:'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'for conclusion in ("skipped", "neutral", "failure", "cancelled")'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'f"missing-{dependency}"'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'unexpected-dependency'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'stale-live-base'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'malformed-live-base'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'missing-live-base'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'stale-live-head'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'missing-approval'
+assert_contains "${STAGING_PR_GATE_SELFTEST}" 'api-failure'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner.sh'
 assert_contains "${CI_WORKFLOW}" 'node --version && pnpm --version'
 assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
@@ -156,9 +201,12 @@ assert_contains "${ROOT}/scripts/ci-verify-runner-selftest.sh" 'arc-host-path-ex
 assert_not_contains "${ROOT}/scripts/backup.sh" '--single-transaction'
 assert_not_contains "${ROOT}/apps/api/src/cleanup.rs" 'd.updated_at'
 
+PYTHONDONTWRITEBYTECODE=1 python3 "${STAGING_PR_GATE_SELFTEST}"
+
 for workflow in \
   "${CI_WORKFLOW}" \
   "${PR_WORKFLOW}" \
+  "${STAGING_PR_WORKFLOW}" \
   "${STAGING_WORKFLOW}" \
   "${STAGING_DEPLOYABILITY}" \
   "${FULL_CI_WORKFLOW}" \
@@ -172,34 +220,13 @@ for workflow in \
   assert_not_contains "${workflow}" 'dtolnay/rust-toolchain@stable'
 done
 
-python3 - "${STAGING_WORKFLOW}" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-workflow = Path(sys.argv[1]).read_text()
-match = re.search(r'-d\s+"(?P<payload>\{.*core-staging-updated.*\})"', workflow)
-if not match:
-    raise SystemExit("staging workflow missing repository_dispatch JSON payload")
-
-payload = match.group("payload").replace(r'\"', '"')
-required = [
-    '"event_type":"core-staging-updated"',
-    '"schema_version":1',
-    '"core_sha":"${GITHUB_SHA}"',
-    '"core_tag":"sha-${GITHUB_SHA:0:12}"',
-]
-for needle in required:
-    if needle not in payload:
-        raise SystemExit(f"dispatch payload missing {needle}")
-PY
-
 python3 - \
   "${CI_WORKFLOW}" \
   "${STAGING_WORKFLOW}" \
   "${STAGING_DEPLOYABILITY}" \
   "${FULL_CI_WORKFLOW}" \
   "${PR_WORKFLOW}" \
+  "${STAGING_PR_WORKFLOW}" \
   "${PREWARM_WORKFLOW}" \
   "${RELEASE_WORKFLOW}" \
   "${DATABASE_WORKFLOW}" <<'PY'
@@ -222,7 +249,7 @@ expected = {
         "topology-e2e": "homelab-heavy",
         "remote-build": "homelab-heavy",
         "images": "homelab-heavy",
-        "notify-cloud": "homelab",
+        "pin-cloud-staging": "homelab",
     },
     sys.argv[3]: {
         "generated-apps": "homelab-heavy",
@@ -243,13 +270,25 @@ expected = {
         "docker": "homelab-heavy",
         "remote-build": "homelab-heavy",
     },
-    sys.argv[6]: {"prewarm": "homelab"},
-    sys.argv[7]: {
+    sys.argv[6]: {
+        "revoke-approval-on-update": "homelab",
+        "secrets": "homelab",
+        "rust": "homelab-heavy",
+        "database": "homelab-heavy",
+        "web": "homelab-heavy",
+        "compose": "homelab",
+        "docker": "homelab-heavy",
+        "topology-e2e": "homelab-heavy",
+        "remote-build": "homelab-heavy",
+        "staging-pr-gate": "homelab",
+    },
+    sys.argv[7]: {"prewarm": "homelab"},
+    sys.argv[8]: {
         "release-source": "homelab",
         "release-validation": "homelab-heavy",
         "linux-cli": "homelab-heavy",
     },
-    sys.argv[8]: {"database": "homelab-heavy"},
+    sys.argv[9]: {"database": "homelab-heavy"},
 }
 for workflow_path, expected_runners in expected.items():
     workflow = Path(workflow_path).read_text()
@@ -285,13 +324,230 @@ if light_jobs != 3 or heavy_jobs != 4 or approved_guards != 6:
     )
 PY
 
+python3 - "${STAGING_PR_WORKFLOW}" "${STAGING_WORKFLOW}" "${STAGING_PR_GATE}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+pr_path = Path(sys.argv[1])
+staging_path = Path(sys.argv[2])
+workflow = pr_path.read_text()
+staging = staging_path.read_text()
+gate_helper = Path(sys.argv[3]).read_text()
+
+
+def job_body(source: str, name: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        raise SystemExit(f"{pr_path} missing job {name}")
+    return match.group("body")
+
+
+header = workflow.split("\njobs:\n", 1)[0]
+if "permissions:\n  contents: read\n" not in header:
+    raise SystemExit("staging PR workflow default permissions must be contents: read")
+if "pull_request_target:" in header:
+    raise SystemExit("staging PR workflow must not use default-branch pull_request_target")
+
+branch_match = re.search(r"^    branches:\n(?P<body>(?:      - .+\n)+)", header, re.MULTILINE)
+if not branch_match or branch_match.group("body").split() != ["-", "staging"]:
+    raise SystemExit("staging PR workflow must target only the staging base branch")
+
+type_match = re.search(r"^    types:\n(?P<body>(?:      - .+\n)+)", header, re.MULTILINE)
+expected_types = ["opened", "reopened", "synchronize", "labeled", "unlabeled"]
+if not type_match:
+    raise SystemExit("staging PR workflow is missing explicit activity types")
+actual_types = [line.removeprefix("      - ") for line in type_match.group("body").splitlines()]
+if actual_types != expected_types:
+    raise SystemExit(f"staging PR workflow activity types changed: {actual_types}")
+
+approval = "staging-homelab-ci-approved"
+approved_guard = (
+    "    if: github.event.pull_request.head.repo.full_name == github.repository "
+    "&& github.event.action == 'labeled' "
+    f"&& github.event.label.name == '{approval}'\n"
+)
+substantive_jobs = (
+    "secrets",
+    "rust",
+    "database",
+    "web",
+    "compose",
+    "docker",
+    "topology-e2e",
+    "remote-build",
+)
+for name in substantive_jobs:
+    body = job_body(workflow, name)
+    if approved_guard not in body:
+        raise SystemExit(f"staging PR job {name} is not gated by fresh same-repo approval")
+    for needle in (
+        "repository: ${{ github.event.pull_request.head.repo.full_name }}",
+        "ref: ${{ github.event.pull_request.head.sha }}",
+        "persist-credentials: false",
+        "scripts/ci-verify-runner.sh",
+    ):
+        if needle not in body:
+            raise SystemExit(f"staging PR job {name} missing {needle}")
+
+dependency_match = re.search(
+    r'^DEPENDENCIES = \(\n(?P<body>.*?)^\)\n',
+    gate_helper,
+    re.MULTILINE | re.DOTALL,
+)
+if not dependency_match:
+    raise SystemExit("staging PR aggregate helper dependency tuple is malformed")
+helper_dependencies = tuple(
+    re.findall(r'^    "([a-z0-9-]+)",$', dependency_match.group("body"), re.MULTILINE)
+)
+if helper_dependencies != substantive_jobs:
+    raise SystemExit(
+        f"staging PR helper dependencies changed: {helper_dependencies}"
+    )
+
+database = job_body(workflow, "database")
+for needle in (
+    "    timeout-minutes: 20\n",
+    '      CARGO_BUILD_JOBS: "2"\n',
+    '      HOSTLET_DB_TEST_REQUIRED: "1"\n',
+    "image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
+    "POSTGRES_DB: hostlet_ci_test",
+    "postgresql://hostlet_ci:hostlet-ci-test-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/hostlet_ci_test",
+    "run: bash scripts/ci-db-tests.sh",
+):
+    if needle not in database:
+        raise SystemExit(f"staging PR database lane missing {needle.strip()}")
+if "uses: ./.github/workflows/database-tests.yml" in database:
+    raise SystemExit("staging PR database lane must test the explicit PR head directly")
+
+topology = job_body(workflow, "topology-e2e")
+for needle in (
+    '      CARGO_BUILD_JOBS: "8"\n',
+    '      HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"\n',
+    "scripts/ci-install-railpack.sh",
+    "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
+    "scripts/ci-self-hosted-deploy-e2e.sh",
+):
+    if needle not in topology:
+        raise SystemExit(f"staging PR topology lane missing {needle.strip()}")
+if topology.index("scripts/ci-install-railpack.sh") > topology.index(
+    "scripts/ci-self-hosted-deploy-e2e.sh"
+):
+    raise SystemExit("staging PR topology lane must install Railpack before deploy E2E")
+
+revoke = job_body(workflow, "revoke-approval-on-update")
+for needle in (
+    "github.event.pull_request.head.repo.full_name == github.repository",
+    "github.event.action == 'synchronize'",
+    "github.event.action == 'reopened'",
+    f"contains(github.event.pull_request.labels.*.name, '{approval}')",
+    "      pull-requests: write\n",
+    "200|404)",
+    "failed to revoke stale staging PR approval",
+):
+    if needle not in revoke:
+        raise SystemExit(f"staging PR approval revoker missing {needle.strip()}")
+if "actions/checkout@" in revoke:
+    raise SystemExit("staging PR approval revoker must remain metadata-only")
+
+gate = job_body(workflow, "staging-pr-gate")
+for needle in (
+    "    name: staging-pr-gate\n",
+    "    if: always()\n",
+    "    needs: [revoke-approval-on-update, secrets, rust, database, web, compose, docker, topology-e2e, remote-build]\n",
+    "      contents: read\n",
+    "      pull-requests: read\n",
+    "repository: ${{ github.repository }}",
+    "ref: ${{ github.event.pull_request.base.sha }}",
+    "path: .hostlet-staging-pr-gate",
+    "sparse-checkout: /scripts/ci-staging-pr-gate.py",
+    "sparse-checkout-cone-mode: false",
+    "persist-credentials: false",
+    "GH_TOKEN: ${{ github.token }}",
+    "PR_NUMBER: ${{ github.event.pull_request.number }}",
+    "EVENT_ACTION: ${{ github.event.action }}",
+    "EVENT_LABEL: ${{ github.event.label.name }}",
+    "EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    "EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+    "HOSTLET_STAGING_PR_RESULTS_JSON: ${{ toJSON(needs) }}",
+    "run: python3 .hostlet-staging-pr-gate/scripts/ci-staging-pr-gate.py",
+):
+    if needle not in gate:
+        raise SystemExit(f"staging PR aggregate gate missing {needle.strip()}")
+checkout_actions = re.findall(r"^\s+uses:\s*(.+)$", gate, re.MULTILINE)
+if checkout_actions != ["actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"]:
+    raise SystemExit("staging PR aggregate gate must use only the pinned checkout action")
+run_commands = re.findall(r"^\s+run:\s*(.+)$", gate, re.MULTILINE)
+if run_commands != ["python3 .hostlet-staging-pr-gate/scripts/ci-staging-pr-gate.py"]:
+    raise SystemExit("staging PR aggregate gate must execute only the base-owned helper")
+for forbidden in (
+    "ref: ${{ github.event.pull_request.head.sha }}",
+    "ref: ${{ github.sha }}",
+    "github.event.pull_request.merge_commit_sha",
+    "continue-on-error",
+):
+    if forbidden in gate:
+        raise SystemExit(f"staging PR aggregate gate contains unsafe behavior: {forbidden}")
+if gate.count("sparse-checkout:") != 1 or gate.count("persist-credentials: false") != 1:
+    raise SystemExit("staging PR aggregate gate checkout must remain base-owned and sparse")
+
+if workflow.count("uses: actions/checkout@") != workflow.count("persist-credentials: false"):
+    raise SystemExit("every staging PR checkout must disable persisted credentials")
+
+dispatch_guard = (
+    "    if: github.event_name != 'workflow_dispatch' "
+    "|| github.ref == 'refs/heads/staging'\n"
+)
+staging_job_section = staging.split("\njobs:\n", 1)[1]
+staging_jobs = re.findall(
+    r"^  ([a-zA-Z0-9_-]+):\n",
+    staging_job_section,
+    re.MULTILINE,
+)
+for name in staging_jobs:
+    if dispatch_guard not in job_body(staging_job_section, name):
+        raise SystemExit(f"Core staging job {name} lacks the staging dispatch guard")
+
+pin = job_body(staging, "pin-cloud-staging")
+for needle in (
+    "    needs: [images]\n",
+    "repository: KanterLabs/hostlet-cloud",
+    "ref: staging",
+    "token: ${{ secrets.CLOUD_DISPATCH_PAT }}",
+    "fetch-depth: 0",
+    "submodules: recursive",
+    "persist-credentials: false",
+    "working-directory: hostlet-cloud",
+    "GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_PAT }}",
+    'scripts/update-core-staging-pin.sh "${GITHUB_SHA}"',
+):
+    if needle not in pin:
+        raise SystemExit(f"Core staging pin-PR producer missing {needle.strip()}")
+for forbidden in (
+    "repository_dispatch",
+    "/dispatches",
+    "core-drift-reviewed",
+    "auto-merge",
+):
+    if forbidden in staging:
+        raise SystemExit(f"Core staging workflow contains forbidden pin behavior: {forbidden}")
+if staging.count("secrets.CLOUD_DISPATCH_PAT") != 2:
+    raise SystemExit("Core staging token must be scoped only to Cloud checkout and pin helper")
+PY
+
 python3 - "${CI_WORKFLOW}" "${STAGING_WORKFLOW}" "${RELEASE_WORKFLOW}" <<'PY'
 import re
 import sys
 from pathlib import Path
 
+staging_path = Path(sys.argv[2])
 for workflow_path in sys.argv[1:]:
-    workflow = Path(workflow_path).read_text()
+    path = Path(workflow_path)
+    workflow = path.read_text()
     match = re.search(
         r"^  database:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
         workflow,
@@ -302,7 +558,15 @@ for workflow_path in sys.argv[1:]:
     body = match.group("body")
     if "    uses: ./.github/workflows/database-tests.yml\n" not in body:
         raise SystemExit(f"{workflow_path} database job must call reusable gate")
-    if re.search(r"^    if:", body, re.MULTILINE):
+    conditional = re.search(r"^    if:", body, re.MULTILINE)
+    if path == staging_path:
+        expected = (
+            "    if: github.event_name != 'workflow_dispatch' "
+            "|| github.ref == 'refs/heads/staging'\n"
+        )
+        if expected not in body:
+            raise SystemExit("staging database gate must reject non-staging dispatches")
+    elif conditional:
         raise SystemExit(f"{workflow_path} database gate must not be conditional")
     if re.search(r"^    runs-on:", body, re.MULTILINE):
         raise SystemExit(f"{workflow_path} reusable database caller must not set runs-on")
@@ -372,7 +636,7 @@ if release.count("uses: actions/checkout@") != release.count(
     raise SystemExit("every release checkout must disable persisted credentials")
 PY
 
-python3 - "${STAGING_WORKFLOW}" "${DATABASE_WORKFLOW}" <<'PY'
+python3 - "${STAGING_WORKFLOW}" "${STAGING_PR_WORKFLOW}" "${DATABASE_WORKFLOW}" <<'PY'
 import sys
 from pathlib import Path
 
