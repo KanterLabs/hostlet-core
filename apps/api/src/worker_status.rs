@@ -108,7 +108,10 @@ impl WorkerStatusRegistry {
 
     pub fn register_at(&self, spec: WorkerSpec, now: DateTime<Utc>) -> WorkerReporter {
         let mut inner = self.inner();
-        inner.next_generation = inner.next_generation.saturating_add(1);
+        inner.next_generation = inner
+            .next_generation
+            .checked_add(1)
+            .expect("worker status generation counter exhausted");
         let generation = inner.next_generation;
         inner.records.insert(
             spec.name,
@@ -370,6 +373,18 @@ mod tests {
             succeeded.last_result,
             Some(serde_json::json!({"current": true}))
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "worker status generation counter exhausted")]
+    fn registration_panics_when_generation_counter_overflows() {
+        let registry = WorkerStatusRegistry::default();
+        registry.inner().next_generation = u64::MAX - 1;
+
+        let reporter = registry.register_at(SPEC, instant(0));
+        assert_eq!(reporter.generation, u64::MAX);
+
+        registry.register_at(SPEC, instant(1));
     }
 
     #[tokio::test]
