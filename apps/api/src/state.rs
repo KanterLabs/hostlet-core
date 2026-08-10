@@ -5,6 +5,7 @@ use crate::health_alerts::{HealthEventHooks, NoopHealthEventHooks};
 use crate::policies::{RepositoryAccessProvider, SelfHostedRepositoryAccessProvider};
 use crate::rate_limit::RateLimiter;
 use crate::screenshots::{NoopScreenshotHooks, ScreenshotHooks};
+use crate::worker_status::WorkerStatusRegistry;
 use anyhow::{bail, Context};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
@@ -73,6 +74,7 @@ pub struct AppState {
     pub allowed_github_logins: Option<HashSet<String>>,
     pub update_checks_enabled: bool,
     pub health_event_hooks: Arc<dyn HealthEventHooks>,
+    pub worker_status: WorkerStatusRegistry,
     pub agents: Arc<RwLock<HashMap<Uuid, AgentConnection>>>,
     pub rate_limiter: Arc<RateLimiter>,
     pub logs: broadcast::Sender<LogEvent>,
@@ -166,6 +168,7 @@ impl AppState {
             allowed_github_logins,
             update_checks_enabled: update_checks_enabled(),
             health_event_hooks: Arc::new(NoopHealthEventHooks),
+            worker_status: WorkerStatusRegistry::default(),
             agents: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Arc::new(RateLimiter::default()),
             logs,
