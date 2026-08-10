@@ -1,5 +1,8 @@
 deploy_generated_topology_app() {
   local create app_id deploy deployment_id detail frontend_port backend_port route_file delete job client_name server_name topology_config inspection frontend_html
+  local health_before_repair checked_before_repair stale_frontend_port stale_backend_port repaired_detail ports_repaired repaired_route_hash repair_logs repair_log_count
+  local health_after_repair checked_after_repair next_route_hash next_logs next_log_count
+  local health_job_payload health_job_id restart_payload restart_job_id pause_payload pause_job_id resume_payload resume_job_id transition_route_hash transition_logs transition_log_count
   client_name="@hostlet-topology/client"
   server_name="@hostlet-topology/server"
   topology_config='{"schemaVersion":1,"mode":"auto","backendPathPrefixes":["/api","/socket.io"]}'
@@ -77,6 +80,112 @@ assert r.get("routing",{}).get("websocketsToBackend") is True, r
   grep -q 'path /api /api/\* /socket.io /socket.io/\*' "${route_file}"
   grep -q "127.0.0.1:${frontend_port}" "${route_file}"
   grep -q "127.0.0.1:${backend_port}" "${route_file}"
+
+  # Reproduce the multi-service route incident: both stored service ports are
+  # stale and the shared route has been collapsed to a single backend proxy.
+  # One recurring health pass must restore the split route and persist both
+  # observed ports; the following pass must not rewrite it again.
+  wait_app_health_checked_after "${app_id}" ""
+  health_before_repair="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}/health")"
+  checked_before_repair="$(printf '%s' "${health_before_repair}" | json_get lastCheckedAt)"
+  stale_frontend_port=9
+  stale_backend_port=10
+  docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+UPDATE deployments
+SET published_port=${stale_frontend_port}
+WHERE id='${deployment_id}';
+UPDATE deployment_services
+SET published_port=CASE
+  WHEN service_name='${client_name}' THEN ${stale_frontend_port}
+  WHEN service_name='${server_name}' THEN ${stale_backend_port}
+  ELSE published_port
+END
+WHERE deployment_id='${deployment_id}';
+SQL
+  printf '# hostlet-route-key: app-%s\n# hostlet-domain: patchwork.localhost\npatchwork.localhost {\n  reverse_proxy 127.0.0.1:%s\n}\n' \
+    "${app_id}" "${stale_backend_port}" >"${route_file}"
+
+  wait_app_health_checked_after "${app_id}" "${checked_before_repair}"
+  ports_repaired=0
+  for _ in $(seq 1 20); do
+    repaired_detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+    if printf '%s' "${repaired_detail}" | python3 -c '
+import json, sys
+detail=json.load(sys.stdin)
+client_name, server_name, frontend_port, backend_port=sys.argv[1:]
+services={service["name"]:service for service in detail.get("services", [])}
+assert int(detail["currentDeployment"]["publishedPort"]) == int(frontend_port), detail
+assert int(services[client_name]["publishedPort"]) == int(frontend_port), services
+assert int(services[server_name]["publishedPort"]) == int(backend_port), services
+' "${client_name}" "${server_name}" "${frontend_port}" "${backend_port}" 2>/dev/null; then
+      ports_repaired=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "${ports_repaired}" != 1 ]; then
+    echo "generated topology health repair did not persist both observed ports" >&2
+    printf '%s\n' "${repaired_detail}" >&2
+    exit 1
+  fi
+  grep -q 'header Connection \*Upgrade\*' "${route_file}"
+  grep -q 'path /api /api/\* /socket.io /socket.io/\*' "${route_file}"
+  grep -q "127.0.0.1:${frontend_port}" "${route_file}"
+  grep -q "127.0.0.1:${backend_port}" "${route_file}"
+  repaired_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
+  repair_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
+  repair_log_count="$(printf '%s' "${repair_logs}" | grep -o 'Detected Docker-published port drift for' | wc -l | tr -d ' ')"
+  [ "${repair_log_count}" -eq 1 ]
+
+  health_after_repair="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}/health")"
+  checked_after_repair="$(printf '%s' "${health_after_repair}" | json_get lastCheckedAt)"
+  wait_app_health_checked_after "${app_id}" "${checked_after_repair}"
+  next_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
+  [ "${next_route_hash}" = "${repaired_route_hash}" ]
+  next_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
+  next_log_count="$(printf '%s' "${next_logs}" | grep -o 'Detected Docker-published port drift for' | wc -l | tr -d ' ')"
+  [ "${next_log_count}" -eq "${repair_log_count}" ]
+
+  # Queued interactive jobs carry an older, single-target payload shape. Give
+  # each probe path a stale frontend port: it must resolve the current canonical
+  # API target, repair through the split writer, and never collapse this route.
+  docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+UPDATE deployments SET published_port=${stale_frontend_port} WHERE id='${deployment_id}';
+SQL
+  health_job_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/health/check-now" --data '{}')"
+  health_job_id="$(printf '%s' "${health_job_payload}" | json_get jobId)"
+  wait_job_status "${health_job_id}"
+  detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+  [ "$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)" = "${frontend_port}" ]
+
+  docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+UPDATE deployments SET published_port=${stale_frontend_port} WHERE id='${deployment_id}';
+SQL
+  restart_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/restart" --data '{}')"
+  restart_job_id="$(printf '%s' "${restart_payload}" | json_get jobId)"
+  wait_job_status "${restart_job_id}"
+  detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+  [ "$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)" = "${frontend_port}" ]
+
+  pause_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/pause")"
+  pause_job_id="$(printf '%s' "${pause_payload}" | json_get jobId)"
+  wait_job_status "${pause_job_id}"
+  docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
+UPDATE deployments SET published_port=${stale_frontend_port} WHERE id='${deployment_id}';
+SQL
+  resume_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/resume")"
+  resume_job_id="$(printf '%s' "${resume_payload}" | json_get jobId)"
+  wait_job_status "${resume_job_id}"
+  detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
+  [ "$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)" = "${frontend_port}" ]
+  transition_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
+  [ "${transition_route_hash}" = "${repaired_route_hash}" ]
+  transition_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
+  transition_log_count="$(printf '%s' "${transition_logs}" | grep -o 'Detected Docker-published port drift for' | wc -l | tr -d ' ')"
+  [ "${transition_log_count}" -eq "$((repair_log_count + 3))" ]
+  curl -fsS "http://127.0.0.1:${frontend_port}/" >/dev/null
+  timeout 5 bash -c "</dev/tcp/127.0.0.1/${backend_port}"
+
   delete="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X DELETE "${BASE_URL}/api/apps/${app_id}")"
   job="$(printf '%s' "${delete}" | json_get jobId)"
   wait_job_status "${job}"
