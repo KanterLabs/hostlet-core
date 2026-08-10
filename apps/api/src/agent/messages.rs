@@ -521,6 +521,11 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
     if container.is_some_and(|value| !valid_container_name(value)) {
         return;
     }
+    let backend_container = msg
+        .get("backend_container_name")
+        .and_then(|v| v.as_str())
+        .filter(|value| valid_container_name(value));
+    let backend_published_port = bounded_i32(msg, "backend_published_port", PORT_RANGE);
     let http_status = bounded_i32(msg, "http_status", HTTP_STATUS_RANGE);
     let published_port = bounded_i32(msg, "published_port", PORT_RANGE);
     let latency_ms = bounded_i32(msg, "latency_ms", LATENCY_MS_RANGE);
@@ -528,23 +533,48 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
     let success_count = bounded_i32(msg, "success_count", HEALTH_COUNTER_RANGE).unwrap_or(0);
     let checked_url = capped_str(msg, "checked_url", HEALTH_TEXT_MAX_CHARS);
     let error = capped_str(msg, "error", HEALTH_TEXT_MAX_CHARS);
+    let Ok(mut tx) = state.db.begin().await else {
+        return;
+    };
+    // Hold the app row through both writes so a switch cannot admit an old event.
+    let current_deployment_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT current_deployment_id FROM apps
+         WHERE id=$1 AND server_id=$2 FOR UPDATE",
+    )
+    .bind(app_id)
+    .bind(server_id)
+    .fetch_optional(&mut *tx)
+    .await;
+    let Ok(Some(current_deployment_id)) = current_deployment_id else {
+        return;
+    };
+    if current_deployment_id != deployment_id {
+        return;
+    }
     let previous_status = if is_health_down_status(status) {
-        previous_health_status(state, server_id, app_id).await
+        sqlx::query_scalar::<_, String>("SELECT status FROM app_health_snapshots WHERE app_id=$1")
+            .bind(app_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .ok()
+            .flatten()
     } else {
         None
     };
-    // Upsert the latest health snapshot for the app (one row per app_id), but only
-    // when the app belongs to this server. last_healthy_at advances only on a
-    // 'healthy' status and is otherwise preserved.
+    // last_healthy_at advances only on a healthy event and is otherwise preserved.
     let updated = sqlx::query(
-        r#"
-                INSERT INTO app_health_snapshots
+        r#"INSERT INTO app_health_snapshots
                   (app_id,deployment_id,container_name,status,checked_url,http_status,latency_ms,
                    failure_count,success_count,last_error,last_checked_at,last_healthy_at,updated_at)
                 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),
                        CASE WHEN $4='healthy' THEN now() ELSE NULL END,
                        now()
-                WHERE EXISTS (SELECT 1 FROM apps WHERE id=$1 AND server_id=$11)
+                WHERE EXISTS (
+                  SELECT 1 FROM apps
+                  WHERE id=$1
+                    AND server_id=$11
+                    AND current_deployment_id IS NOT DISTINCT FROM $2::uuid
+                )
                 ON CONFLICT (app_id) DO UPDATE SET
                   deployment_id=EXCLUDED.deployment_id,
                   container_name=EXCLUDED.container_name,
@@ -574,11 +604,29 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
     .bind(success_count)
     .bind(error.as_deref())
     .bind(server_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map(|done| done.rows_affected())
     .unwrap_or(0);
     if updated == 0 {
+        return;
+    }
+    let history_inserted = sqlx::query(
+        "INSERT INTO app_health_events
+           (app_id,deployment_id,container_name,status,checked_url,http_status,latency_ms,error)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(container)
+    .bind(status)
+    .bind(checked_url.as_deref())
+    .bind(http_status)
+    .bind(latency_ms)
+    .bind(error.as_deref())
+    .execute(&mut *tx)
+    .await;
+    if history_inserted.is_err() || tx.commit().await.is_err() {
         return;
     }
     if health_transition_needs_alert(status, previous_status.as_deref()) {
@@ -600,65 +648,21 @@ async fn handle_health_status(state: &AppState, server_id: Uuid, msg: &serde_jso
         );
     }
     if let (Some(deployment_id), Some(published_port)) = (deployment_id, published_port) {
-        let _ = sqlx::query(
-            r#"
-                UPDATE deployments d
-                SET published_port=$1
-                FROM apps a
-                WHERE d.id=$2
-                  AND d.server_id=$3
-                  AND d.app_id=$4
-                  AND a.id=d.app_id
-                  AND a.current_deployment_id=d.id
-                  AND d.status IN ('success','rolled_back')
-                "#,
+        let backend = backend_container
+            .zip(backend_published_port)
+            .filter(|(backend_container, _)| container != Some(*backend_container));
+        super::health_ports::persist_observed_ports(
+            state,
+            server_id,
+            app_id,
+            deployment_id,
+            container,
+            published_port,
+            backend,
         )
-        .bind(published_port)
-        .bind(deployment_id)
-        .bind(server_id)
-        .bind(app_id)
-        .execute(&state.db)
         .await;
     }
-    // Append an immutable history event, then trim the per-app event log.
-    let _ = sqlx::query(
-        r#"
-                INSERT INTO app_health_events
-                  (app_id,deployment_id,container_name,status,checked_url,http_status,latency_ms,error)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-                "#,
-    )
-    .bind(app_id)
-    .bind(deployment_id)
-    .bind(container)
-    .bind(status)
-    .bind(checked_url.as_deref())
-    .bind(http_status)
-    .bind(latency_ms)
-    .bind(error.as_deref())
-    .execute(&state.db)
-    .await;
     prune_health_events(state, app_id).await;
-}
-
-async fn previous_health_status(state: &AppState, server_id: Uuid, app_id: Uuid) -> Option<String> {
-    match sqlx::query_scalar(
-        "SELECT hs.status
-         FROM app_health_snapshots hs
-         JOIN apps a ON a.id=hs.app_id
-         WHERE hs.app_id=$1 AND a.server_id=$2",
-    )
-    .bind(app_id)
-    .bind(server_id)
-    .fetch_optional(&state.db)
-    .await
-    {
-        Ok(status) => status,
-        Err(err) => {
-            tracing::warn!(error = %err, %app_id, "failed to load previous app health status");
-            None
-        }
-    }
 }
 
 fn health_transition_needs_alert(status: &str, previous_status: Option<&str>) -> bool {
