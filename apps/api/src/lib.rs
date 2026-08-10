@@ -27,6 +27,7 @@ pub mod storage;
 pub mod suspensions;
 pub mod update_checks;
 pub mod web;
+pub mod worker_status;
 
 use axum::{
     body::Body,
