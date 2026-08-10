@@ -34,6 +34,8 @@ pub(crate) const ACTIVE_DEPLOYMENT_STATUSES: &[&str] = &[
 ];
 
 pub(crate) const TEARDOWN_FENCE_PAYLOAD_KEY: &str = "teardown_fence";
+const OWNED_DEPLOYMENT_QUERY: &str =
+    "SELECT 1 FROM deployments d JOIN apps a ON a.id=d.app_id WHERE d.id=$1 AND a.user_id=$2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,13 +256,11 @@ pub async fn deployment_logs(
         Ok(context) => context,
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    let deployment = sqlx::query(
-        "SELECT 1 FROM deployments d JOIN apps a ON a.id=d.app_id WHERE d.id=$1 AND a.user_id=$2",
-    )
-    .bind(id)
-    .bind(context.user_id)
-    .fetch_optional(&state.db)
-    .await;
+    let deployment = sqlx::query(OWNED_DEPLOYMENT_QUERY)
+        .bind(id)
+        .bind(context.user_id)
+        .fetch_optional(&state.db)
+        .await;
     match deployment {
         Ok(Some(_)) => {}
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
@@ -293,13 +293,11 @@ pub async fn logs_ws(
         Ok(context) => context,
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    let row = sqlx::query(
-        "SELECT 1 FROM deployments d JOIN apps a ON a.id=d.app_id WHERE d.id=$1 AND a.user_id=$2",
-    )
-    .bind(deployment_id)
-    .bind(context.user_id)
-    .fetch_optional(&state.db)
-    .await;
+    let row = sqlx::query(OWNED_DEPLOYMENT_QUERY)
+        .bind(deployment_id)
+        .bind(context.user_id)
+        .fetch_optional(&state.db)
+        .await;
     let Ok(Some(_)) = row else {
         return StatusCode::NOT_FOUND.into_response();
     };
