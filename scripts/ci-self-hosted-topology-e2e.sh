@@ -2,7 +2,7 @@ deploy_generated_topology_app() {
   local create app_id deploy deployment_id detail frontend_port backend_port route_file delete job client_name server_name topology_config inspection frontend_html
   local health_before_repair checked_before_repair stale_frontend_port stale_backend_port repaired_detail ports_repaired repaired_route_hash repair_logs repair_log_count
   local health_after_repair checked_after_repair next_route_hash next_logs next_log_count
-  local health_job_payload health_job_id restart_payload restart_job_id pause_payload pause_job_id resume_payload resume_job_id transition_route_hash transition_logs transition_log_count
+  local health_job_payload health_job_id restart_payload restart_job_id pause_payload pause_job_id resume_payload resume_job_id transition_route_hash current_port
   client_name="@hostlet-topology/client"
   server_name="@hostlet-topology/server"
   topology_config='{"schemaVersion":1,"mode":"auto","backendPathPrefixes":["/api","/socket.io"]}'
@@ -134,21 +134,31 @@ assert int(services[server_name]["publishedPort"]) == int(backend_port), service
   grep -q "127.0.0.1:${backend_port}" "${route_file}"
   repaired_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
   repair_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
-  repair_log_count="$(printf '%s' "${repair_logs}" | grep -o 'Detected Docker-published port drift for' | wc -l | tr -d ' ')"
-  [ "${repair_log_count}" -eq 1 ]
+  repair_log_count="$(printf '%s' "${repair_logs}" | awk '{ count += gsub(/Detected Docker-published port drift for/, "") } END { print count + 0 }')"
+  if [ "${repair_log_count}" -ne 1 ]; then
+    echo "expected one initial generated-topology drift repair log, got ${repair_log_count}" >&2
+    exit 1
+  fi
 
   health_after_repair="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}/health")"
   checked_after_repair="$(printf '%s' "${health_after_repair}" | json_get lastCheckedAt)"
   wait_app_health_checked_after "${app_id}" "${checked_after_repair}"
   next_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
-  [ "${next_route_hash}" = "${repaired_route_hash}" ]
+  if [ "${next_route_hash}" != "${repaired_route_hash}" ]; then
+    echo "generated-topology route changed after a no-drift health pass" >&2
+    exit 1
+  fi
   next_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
-  next_log_count="$(printf '%s' "${next_logs}" | grep -o 'Detected Docker-published port drift for' | wc -l | tr -d ' ')"
-  [ "${next_log_count}" -eq "${repair_log_count}" ]
+  next_log_count="$(printf '%s' "${next_logs}" | awk '{ count += gsub(/Detected Docker-published port drift for/, "") } END { print count + 0 }')"
+  if [ "${next_log_count}" -ne "${repair_log_count}" ]; then
+    echo "expected no additional generated-topology drift log without new drift; got ${next_log_count} after ${repair_log_count}" >&2
+    exit 1
+  fi
 
   # Queued interactive jobs carry an older, single-target payload shape. Give
-  # each probe path a stale frontend port: it must resolve the current canonical
-  # API target, repair through the split writer, and never collapse this route.
+  # each probe path a stale frontend port: the interactive job and recurring
+  # health pass intentionally race, but whichever observes the drift must
+  # converge through the current split writer and never collapse this route.
   docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
 UPDATE deployments SET published_port=${stale_frontend_port} WHERE id='${deployment_id}';
 SQL
@@ -156,7 +166,11 @@ SQL
   health_job_id="$(printf '%s' "${health_job_payload}" | json_get jobId)"
   wait_job_status "${health_job_id}"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-  [ "$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)" = "${frontend_port}" ]
+  current_port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
+  if [ "${current_port}" != "${frontend_port}" ]; then
+    echo "health-check repair persisted frontend port ${current_port}, expected ${frontend_port}" >&2
+    exit 1
+  fi
 
   docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
 UPDATE deployments SET published_port=${stale_frontend_port} WHERE id='${deployment_id}';
@@ -165,7 +179,11 @@ SQL
   restart_job_id="$(printf '%s' "${restart_payload}" | json_get jobId)"
   wait_job_status "${restart_job_id}"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-  [ "$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)" = "${frontend_port}" ]
+  current_port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
+  if [ "${current_port}" != "${frontend_port}" ]; then
+    echo "restart repair persisted frontend port ${current_port}, expected ${frontend_port}" >&2
+    exit 1
+  fi
 
   pause_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/pause")"
   pause_job_id="$(printf '%s' "${pause_payload}" | json_get jobId)"
@@ -177,12 +195,16 @@ SQL
   resume_job_id="$(printf '%s' "${resume_payload}" | json_get jobId)"
   wait_job_status "${resume_job_id}"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-  [ "$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)" = "${frontend_port}" ]
+  current_port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
+  if [ "${current_port}" != "${frontend_port}" ]; then
+    echo "resume repair persisted frontend port ${current_port}, expected ${frontend_port}" >&2
+    exit 1
+  fi
   transition_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
-  [ "${transition_route_hash}" = "${repaired_route_hash}" ]
-  transition_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
-  transition_log_count="$(printf '%s' "${transition_logs}" | grep -o 'Detected Docker-published port drift for' | wc -l | tr -d ' ')"
-  [ "${transition_log_count}" -eq "$((repair_log_count + 3))" ]
+  if [ "${transition_route_hash}" != "${repaired_route_hash}" ]; then
+    echo "interactive health transitions changed the repaired split route" >&2
+    exit 1
+  fi
   curl -fsS "http://127.0.0.1:${frontend_port}/" >/dev/null
   timeout 5 bash -c "</dev/tcp/127.0.0.1/${backend_port}"
 
