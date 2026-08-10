@@ -21,6 +21,8 @@ use uuid::Uuid;
 mod auth;
 pub(crate) mod build_execution;
 pub mod build_fleet;
+mod health_ports;
+mod health_target_payload;
 mod messages;
 mod routes;
 mod socket;

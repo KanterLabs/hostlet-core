@@ -707,10 +707,7 @@ pub(crate) async fn handle_job(cfg: Config, payload: Value) -> anyhow::Result<Op
         Some("deploy") => deploy(cfg, payload).await.map(|()| None),
         Some("rollback") => rollback(cfg, payload).await.map(|()| None),
         Some("delete_app") => delete_app(cfg, payload).await.map(|()| None),
-        Some("health_check") => {
-            health_check_job(&cfg, &payload).await;
-            Ok(None)
-        }
+        Some("health_check") => health_check_job(&cfg, &payload).await.map(|()| None),
         Some("capture_screenshot") => capture_screenshot_job(&cfg, &payload).await.map(|()| None),
         Some("browser_smoke") => capture_screenshot_job(&cfg, &payload).await.map(|()| None),
         Some("restart_container") => {

@@ -12,6 +12,15 @@ pub(super) struct HealthTarget {
     domain: Option<String>,
     route_key: Option<String>,
     route_generation: Option<i64>,
+    split_route: Option<SplitRoute>,
+}
+
+#[derive(Clone)]
+struct SplitRoute {
+    backend_container_name: String,
+    backend_container_port: u16,
+    backend_published_port: u16,
+    backend_path_prefixes: Vec<String>,
 }
 
 pub(super) fn health_status_event(
@@ -27,6 +36,14 @@ pub(super) fn health_status_event(
         "deployment_id": target.deployment_id,
         "container_name": target.container_name,
         "published_port": target.published_port,
+        "backend_container_name": target
+            .split_route
+            .as_ref()
+            .map(|route| route.backend_container_name.clone()),
+        "backend_published_port": target
+            .split_route
+            .as_ref()
+            .map(|route| route.backend_published_port),
         "status": status,
         "checked_url": result.url,
         "http_status": result.http_status,
@@ -65,6 +82,59 @@ pub(super) async fn health_targets(cfg: &Config) -> anyhow::Result<Vec<HealthTar
         .iter()
         .filter_map(health_target_from_payload)
         .collect::<Vec<_>>())
+}
+
+fn select_current_health_target(
+    payload: &Value,
+    targets: Vec<HealthTarget>,
+) -> Option<HealthTarget> {
+    let app_id = payload
+        .get("app_id")
+        .or_else(|| payload.get("appId"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    let deployment_id = payload
+        .get("deployment_id")
+        .or_else(|| payload.get("deploymentId"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    select_health_target_by_id(app_id, deployment_id, targets)
+}
+
+fn select_health_target_by_id(
+    app_id: Uuid,
+    deployment_id: Uuid,
+    targets: Vec<HealthTarget>,
+) -> Option<HealthTarget> {
+    targets
+        .into_iter()
+        .find(|target| target.app_id == app_id && target.deployment_id == deployment_id)
+}
+
+/// Resolve interactive jobs through the API's current, canonical target list.
+/// Job payloads can wait in the queue while a deployment changes and older
+/// payload schemas do not carry split-route facts, so they are never trusted
+/// for a route-affecting probe.
+pub(super) async fn current_health_target(
+    cfg: &Config,
+    payload: &Value,
+) -> anyhow::Result<Option<HealthTarget>> {
+    Ok(select_current_health_target(
+        payload,
+        health_targets(cfg).await?,
+    ))
+}
+
+async fn current_health_target_by_id(
+    cfg: &Config,
+    app_id: Uuid,
+    deployment_id: Uuid,
+) -> anyhow::Result<Option<HealthTarget>> {
+    Ok(select_health_target_by_id(
+        app_id,
+        deployment_id,
+        health_targets(cfg).await?,
+    ))
 }
 
 pub(super) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> {
@@ -123,7 +193,17 @@ pub(super) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
     let route_generation = value
         .get("routeGeneration")
         .or_else(|| value.get("route_generation"))
-        .and_then(Value::as_i64);
+        .and_then(Value::as_i64)
+        .filter(|generation| *generation >= 0);
+    let split_route = match value.get("splitRoute").or_else(|| value.get("split_route")) {
+        None => None,
+        Some(value) => Some(parse_split_route(value)?),
+    };
+    if split_route.is_some()
+        && (domain.is_none() || route_key.is_none() || route_generation.is_none())
+    {
+        return None;
+    }
     Some(HealthTarget {
         app_id,
         deployment_id,
@@ -135,7 +215,72 @@ pub(super) fn health_target_from_payload(value: &Value) -> Option<HealthTarget> 
         domain,
         route_key,
         route_generation,
+        split_route,
     })
+}
+
+fn parse_split_route(value: &Value) -> Option<SplitRoute> {
+    let backend = value.get("backend")?;
+    let backend_container_name = backend
+        .get("containerName")
+        .or_else(|| backend.get("container_name"))
+        .and_then(Value::as_str)?
+        .to_string();
+    if !valid_container_name(&backend_container_name) {
+        return None;
+    }
+    let backend_container_port = bounded_port(backend, "targetPort", "target_port")?;
+    let backend_published_port = bounded_port(backend, "publishedPort", "published_port")?;
+    let backend_path_prefixes = parse_backend_path_prefixes(
+        value
+            .get("backendPathPrefixes")
+            .or_else(|| value.get("backend_path_prefixes"))?,
+    )?;
+    Some(SplitRoute {
+        backend_container_name,
+        backend_container_port,
+        backend_published_port,
+        backend_path_prefixes,
+    })
+}
+
+fn bounded_port(value: &Value, camel: &str, snake: &str) -> Option<u16> {
+    value
+        .get(camel)
+        .or_else(|| value.get(snake))
+        .and_then(Value::as_i64)
+        .and_then(|value| (1..=65_535).contains(&value).then_some(value as u16))
+}
+
+fn parse_backend_path_prefixes(value: &Value) -> Option<Vec<String>> {
+    let values = value.as_array()?;
+    if values.len() > 16 {
+        return None;
+    }
+    let mut prefixes = Vec::with_capacity(values.len());
+    for value in values {
+        let prefix = value.as_str()?.to_string();
+        if !valid_backend_path_prefix(&prefix) || prefixes.iter().any(|item| item == &prefix) {
+            return None;
+        }
+        prefixes.push(prefix);
+    }
+    Some(prefixes)
+}
+
+/// Keep this in lockstep with `GeneratedTopologyConfig`'s route-prefix
+/// validation. Split-route facts are untrusted API input and must not allow a
+/// Caddy matcher to escape the topology's path-prefix constraints.
+fn valid_backend_path_prefix(value: &str) -> bool {
+    value.starts_with('/')
+        && value != "/"
+        && value.len() <= 128
+        && !value.ends_with('/')
+        && !value.contains("..")
+        && !value.contains('*')
+        && !value.contains('?')
+        && !value.contains('#')
+        && !value.chars().any(|ch| ch.is_control() || ch == '\\')
 }
 
 fn clean_route_key(value: &str) -> Option<String> {
@@ -184,7 +329,7 @@ pub(super) async fn probe_health_target(
             container_state: Some(container_state),
         };
     }
-    if let Err(err) = refresh_published_port(cfg, target).await {
+    if let Err(err) = refresh_published_ports(cfg, target).await {
         return HealthProbeResult {
             healthy: false,
             url,
@@ -257,37 +402,141 @@ pub(super) async fn probe_health_target(
     }
 }
 
-async fn refresh_published_port(cfg: &Config, target: &mut HealthTarget) -> anyhow::Result<()> {
-    let actual = docker_published_port(&target.container_name, target.container_port).await?;
-    if !published_port_changed(target.published_port, actual) {
+async fn refresh_published_ports(cfg: &Config, target: &mut HealthTarget) -> anyhow::Result<()> {
+    let actual_frontend =
+        docker_published_port(&target.container_name, target.container_port).await?;
+    let actual_backend = match target.split_route.as_ref() {
+        Some(route) => Some(
+            docker_published_port(&route.backend_container_name, route.backend_container_port)
+                .await?,
+        ),
+        None => None,
+    };
+    if !split_route_ports_changed(target, actual_frontend, actual_backend) {
         return Ok(());
     }
+    let Some(current) =
+        current_health_target_by_id(cfg, target.app_id, target.deployment_id).await?
+    else {
+        bail!("health target no longer belongs to the current deployment");
+    };
+    if !same_route_owner(target, &current) {
+        bail!("health route ownership changed while published ports were inspected");
+    }
+    if !split_route_ports_changed(&current, actual_frontend, actual_backend) {
+        target.published_port = actual_frontend;
+        if let (Some(actual), Some(route)) = (actual_backend, target.split_route.as_mut()) {
+            route.backend_published_port = actual;
+        }
+        return Ok(());
+    }
+    let backend_summary = actual_backend
+        .zip(current.split_route.as_ref())
+        .map(|(actual, route)| {
+            format!(
+                " and backend {} {} to {}",
+                route.backend_container_name, route.backend_published_port, actual
+            )
+        })
+        .unwrap_or_default();
     log(
         cfg,
         target.deployment_id,
         "stdout",
         &format!(
-            "Detected Docker-published port drift for {}; updating route from {} to {}.",
-            target.container_name, target.published_port, actual
+            "Detected Docker-published port drift for {}; updating route from {} to {}{}.",
+            current.container_name, current.published_port, actual_frontend, backend_summary
         ),
     )
     .await;
-    refresh_route(cfg, target, actual).await?;
-    target.published_port = actual;
+    refresh_route(cfg, &current, actual_frontend, actual_backend).await?;
+    target.published_port = actual_frontend;
+    if let (Some(actual), Some(route)) = (actual_backend, target.split_route.as_mut()) {
+        route.backend_published_port = actual;
+    }
     Ok(())
+}
+
+fn same_route_owner(left: &HealthTarget, right: &HealthTarget) -> bool {
+    left.container_name == right.container_name
+        && left.container_port == right.container_port
+        && left.domain == right.domain
+        && left.route_key == right.route_key
+        && left.route_generation == right.route_generation
+        && match (&left.split_route, &right.split_route) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                left.backend_container_name == right.backend_container_name
+                    && left.backend_container_port == right.backend_container_port
+                    && left.backend_path_prefixes == right.backend_path_prefixes
+            }
+            _ => false,
+        }
 }
 
 fn published_port_changed(stored: u16, actual: u16) -> bool {
     stored != actual
 }
 
-async fn refresh_route(cfg: &Config, target: &HealthTarget, port: u16) -> anyhow::Result<()> {
+fn split_route_ports_changed(
+    target: &HealthTarget,
+    actual_frontend: u16,
+    actual_backend: Option<u16>,
+) -> bool {
+    if published_port_changed(target.published_port, actual_frontend) {
+        return true;
+    }
+    target.split_route.as_ref().is_some_and(|route| {
+        actual_backend
+            .is_some_and(|actual| published_port_changed(route.backend_published_port, actual))
+    })
+}
+
+async fn refresh_route(
+    cfg: &Config,
+    target: &HealthTarget,
+    frontend_port: u16,
+    backend_port: Option<u16>,
+) -> anyhow::Result<()> {
     let Some(route_key) = target.route_key.as_deref() else {
         return Ok(());
     };
     let Some(domain) = target.domain.as_deref() else {
         return Ok(());
     };
+    if let (Some(route), Some(backend_port)) = (target.split_route.as_ref(), backend_port) {
+        let Some(generation) = target.route_generation else {
+            anyhow::bail!("split route refresh requires a route generation");
+        };
+        if cfg.local_mode {
+            if let Some(router) = &cfg.local_router {
+                return apply_local_caddy_split_route_versioned(
+                    cfg,
+                    target.deployment_id,
+                    router,
+                    route_key,
+                    domain,
+                    frontend_port,
+                    backend_port,
+                    &route.backend_path_prefixes,
+                    generation,
+                )
+                .await;
+            }
+            return Ok(());
+        }
+        return apply_caddy_split_route_versioned(
+            cfg,
+            target.deployment_id,
+            route_key,
+            domain,
+            frontend_port,
+            backend_port,
+            &route.backend_path_prefixes,
+            generation,
+        )
+        .await;
+    }
     if cfg.local_mode {
         if let Some(router) = &cfg.local_router {
             return match target.route_generation {
@@ -298,7 +547,7 @@ async fn refresh_route(cfg: &Config, target: &HealthTarget, port: u16) -> anyhow
                         router,
                         route_key,
                         domain,
-                        port,
+                        frontend_port,
                         generation,
                     )
                     .await
@@ -310,7 +559,7 @@ async fn refresh_route(cfg: &Config, target: &HealthTarget, port: u16) -> anyhow
                         router,
                         route_key,
                         domain,
-                        port,
+                        frontend_port,
                     )
                     .await
                 }
@@ -325,12 +574,14 @@ async fn refresh_route(cfg: &Config, target: &HealthTarget, port: u16) -> anyhow
                 target.deployment_id,
                 route_key,
                 domain,
-                port,
+                frontend_port,
                 generation,
             )
             .await
         }
-        None => apply_caddy_route(cfg, target.deployment_id, route_key, domain, port).await,
+        None => {
+            apply_caddy_route(cfg, target.deployment_id, route_key, domain, frontend_port).await
+        }
     }
 }
 
@@ -426,112 +677,5 @@ fn inspect_container_state(value: &str) -> Option<ContainerState> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn inspect_container_state_accepts_running_container() {
-        assert_eq!(
-            inspect_container_state("true false false 0"),
-            Some(ContainerState::Running)
-        );
-    }
-
-    #[test]
-    fn inspect_container_state_reports_restart_loop() {
-        let state = inspect_container_state("true true false 1").unwrap();
-
-        assert_eq!(
-            state.error_message(),
-            "container is restarting after exit code 1"
-        );
-    }
-
-    #[test]
-    fn inspect_container_state_reports_oom_kill() {
-        let state = inspect_container_state("false false true 137").unwrap();
-
-        assert_eq!(state.error_message(), "container was OOM-killed");
-    }
-
-    #[test]
-    fn inspect_container_state_reports_stopped_exit_code() {
-        let state = inspect_container_state("false false false 2").unwrap();
-
-        assert_eq!(
-            state.error_message(),
-            "container is not running; last exit code 2"
-        );
-    }
-
-    #[test]
-    fn inspect_container_state_rejects_malformed_output() {
-        assert_eq!(inspect_container_state(""), None);
-        assert_eq!(inspect_container_state("true false"), None);
-    }
-
-    #[test]
-    fn health_target_payload_accepts_route_metadata() {
-        let app_id = Uuid::from_u128(1);
-        let deployment_id = Uuid::from_u128(2);
-        let target = health_target_from_payload(&json!({
-            "appId": app_id,
-            "deploymentId": deployment_id,
-            "containerName": "hostlet-app-demo",
-            "containerPort": 3000,
-            "publishedPort": 32000,
-            "healthPath": "/health",
-            "domain": "demo.example.com",
-            "routeKey": "app-00000000-0000-0000-0000-000000000001"
-        }))
-        .unwrap();
-
-        assert_eq!(target.domain.as_deref(), Some("demo.example.com"));
-        assert_eq!(
-            target.route_key.as_deref(),
-            Some("app-00000000-0000-0000-0000-000000000001")
-        );
-        assert!(!target.tcp_probe);
-    }
-
-    #[test]
-    fn health_target_payload_preserves_tcp_probe_kind() {
-        let target = health_target_from_payload(&json!({
-            "appId": Uuid::from_u128(1),
-            "deploymentId": Uuid::from_u128(2),
-            "containerName": "hostlet-app-websocket",
-            "containerPort": 3000,
-            "publishedPort": 32001,
-            "healthPath": "/",
-            "probeKind": "tcp"
-        }))
-        .unwrap();
-        assert!(target.tcp_probe);
-    }
-
-    #[test]
-    fn health_target_payload_rejects_invalid_route_metadata_without_rejecting_target() {
-        let app_id = Uuid::from_u128(1);
-        let deployment_id = Uuid::from_u128(2);
-        let target = health_target_from_payload(&json!({
-            "app_id": app_id,
-            "deployment_id": deployment_id,
-            "container_name": "hostlet-app-demo",
-            "container_port": 3000,
-            "published_port": 32000,
-            "health_path": "/health",
-            "domain": "not a domain",
-            "route_key": "../../bad"
-        }))
-        .unwrap();
-
-        assert_eq!(target.domain, None);
-        assert_eq!(target.route_key, None);
-    }
-
-    #[test]
-    fn published_port_changed_detects_drift_only() {
-        assert!(!published_port_changed(32000, 32000));
-        assert!(published_port_changed(32000, 32001));
-    }
-}
+#[path = "health_tests.rs"]
+mod tests;

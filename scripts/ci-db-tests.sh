@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXPECTED_DB_TESTS=56
+EXPECTED_DB_TESTS=61
 
 if [ -z "${HOSTLET_DB_TEST_URL:-}" ]; then
   echo "HOSTLET_DB_TEST_URL is required" >&2

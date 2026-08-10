@@ -605,10 +605,16 @@ async fn apply_caddy_route_inner(
     let target = dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&dir, &target, domain).await?;
     let previous = tokio::fs::read(&target).await.ok();
+    ensure_route_write_is_current(
+        previous.as_deref(),
+        deployment_id,
+        generation,
+        RouteKind::Single,
+    )?;
     let mut rendered = render_caddy_route(app, domain, port);
     if let Some(generation) = generation {
         rendered = format!(
-            "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{rendered}"
+            "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n# hostlet-route-kind: single\n{rendered}"
         );
     }
     write_route_file(&target, &rendered).await?;
@@ -650,8 +656,14 @@ pub(crate) async fn apply_caddy_split_route_versioned(
     let target = dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&dir, &target, domain).await?;
     let previous = tokio::fs::read(&target).await.ok();
+    ensure_route_write_is_current(
+        previous.as_deref(),
+        deployment_id,
+        Some(generation),
+        RouteKind::Split,
+    )?;
     let rendered = format!(
-        "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{}",
+        "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n# hostlet-route-kind: split\n{}",
         render_caddy_split_route(app, domain, frontend_port, backend_port, backend_prefixes)
     );
     write_route_file(&target, &rendered).await?;
@@ -757,10 +769,16 @@ async fn apply_local_caddy_route_inner(
     let target = router.snippets_dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&router.snippets_dir, &target, domain).await?;
     let previous = tokio::fs::read(&target).await.ok();
+    ensure_route_write_is_current(
+        previous.as_deref(),
+        deployment_id,
+        generation,
+        RouteKind::Single,
+    )?;
     let mut rendered = render_local_caddy_route(app, domain, port);
     if let Some(generation) = generation {
         rendered = format!(
-            "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{rendered}"
+            "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n# hostlet-route-kind: single\n{rendered}"
         );
     }
     write_route_file(&target, &rendered).await?;
@@ -795,8 +813,14 @@ pub(crate) async fn apply_local_caddy_split_route_versioned(
     let target = router.snippets_dir.join(format!("{app}.caddy"));
     ensure_no_conflicting_route(&router.snippets_dir, &target, domain).await?;
     let previous = tokio::fs::read(&target).await.ok();
+    ensure_route_write_is_current(
+        previous.as_deref(),
+        deployment_id,
+        Some(generation),
+        RouteKind::Split,
+    )?;
     let rendered = format!(
-        "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n{}",
+        "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n# hostlet-route-kind: split\n{}",
         render_local_caddy_split_route(app, domain, frontend_port, backend_port, backend_prefixes)
     );
     write_route_file(&target, &rendered).await?;

@@ -18,8 +18,9 @@ pub(crate) use activation::*;
 use capture_url::validate_capture_url;
 pub(crate) use health::CONTAINER_STATE_INSPECT_FORMAT;
 use health::{
-    failed_health_probe, health_status_event, health_target_from_payload, health_targets,
-    probe_health_target, single_probe_health_event, HealthProbeResult, HealthTarget,
+    current_health_target, failed_health_probe, health_status_event, health_target_from_payload,
+    health_targets, probe_health_target, single_probe_health_event, HealthProbeResult,
+    HealthTarget,
 };
 pub(crate) use host_resources::{collect_host_resource_snapshot, HostResourceSampler};
 use reconcile::{
@@ -341,17 +342,18 @@ async fn request_app_rebuild(cfg: &Config, app_id: Uuid, deployment_id: Uuid, im
     .await;
 }
 
-pub(crate) async fn health_check_job(cfg: &Config, payload: &Value) {
-    let Some(mut target) = health_target_from_payload(payload) else {
-        return;
+pub(crate) async fn health_check_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
+    let Some(mut target) = current_health_target(cfg, payload).await? else {
+        bail!("health-check job no longer targets the current deployment");
     };
     let result = probe_health_target(cfg, &mut target).await;
     post(cfg, single_probe_health_event(&target, &result)).await;
+    Ok(())
 }
 
 pub(crate) async fn restart_container_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
-    let Some(target) = health_target_from_payload(payload) else {
-        bail!("restart job missing valid health target");
+    let Some(target) = current_health_target(cfg, payload).await? else {
+        bail!("restart job no longer targets the current deployment");
     };
     run_quiet("docker", &["restart", &target.container_name]).await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -425,8 +427,8 @@ pub(crate) async fn resume_app_job(cfg: &Config, payload: &Value) -> anyhow::Res
         run_quiet_absent_ok("docker", &["start", &container], &["No such container"]).await?;
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let Some(mut target) = health_target_from_payload(payload) else {
-        bail!("resume job missing valid health target");
+    let Some(mut target) = current_health_target(cfg, payload).await? else {
+        bail!("resume job no longer targets the current deployment");
     };
     let result = probe_health_target(cfg, &mut target).await;
     post(cfg, single_probe_health_event(&target, &result)).await;

@@ -30,6 +30,22 @@ async fn db_health_down_hook_fires_once_per_unhealthy_transition() {
     let user_id = insert_user(&state).await;
     let app_id = insert_app(&state, user_id).await;
     let deployment_id = insert_deployment(&state, app_id).await;
+    sqlx::query(
+        "UPDATE deployments
+         SET status='success',container_name=$1,published_port=32054
+         WHERE id=$2",
+    )
+    .bind(format!("hostlet-app-{app_id}"))
+    .bind(deployment_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE apps SET current_deployment_id=$1 WHERE id=$2")
+        .bind(deployment_id)
+        .bind(app_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
 
     send_health_status(&state, app_id, deployment_id, "degraded").await;
     send_health_status(&state, app_id, deployment_id, "unhealthy").await;
