@@ -423,6 +423,12 @@ pub(crate) async fn suspend_app_job(payload: &Value) -> anyhow::Result<()> {
 /// Start every preserved container belonging to an app and verify the primary
 /// HTTP target after the topology is back online.
 pub(crate) async fn resume_app_job(cfg: &Config, payload: &Value) -> anyhow::Result<()> {
+    // A resume may wait in the durable queue while a newer deployment becomes
+    // current. Reject it before starting any container; the second lookup below
+    // also prevents a deployment switch during startup from affecting routing.
+    if current_health_target(cfg, payload).await?.is_none() {
+        bail!("resume job no longer targets the current deployment");
+    }
     for container in app_runtime_containers(payload).await? {
         run_quiet_absent_ok("docker", &["start", &container], &["No such container"]).await?;
     }
