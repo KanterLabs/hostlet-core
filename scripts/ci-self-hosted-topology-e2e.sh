@@ -1,8 +1,30 @@
+topology_docker_published_port() {
+  local container_name="$1" target_port="$2"
+  docker inspect --format "{{(index (index .NetworkSettings.Ports \"${target_port}/tcp\") 0).HostPort}}" "${container_name}"
+}
+
+assert_generated_topology_runtime_state() {
+  local client_name="$1" server_name="$2" frontend_port="$3" backend_port="$4" route_file="$5"
+  python3 -c '
+import json, sys
+detail=json.load(sys.stdin)
+client_name, server_name, frontend_port, backend_port=sys.argv[1:]
+services={service["name"]:service for service in detail.get("services", [])}
+assert int(detail["currentDeployment"]["publishedPort"]) == int(frontend_port), detail
+assert int(services[client_name]["publishedPort"]) == int(frontend_port), services
+assert int(services[server_name]["publishedPort"]) == int(backend_port), services
+' "${client_name}" "${server_name}" "${frontend_port}" "${backend_port}" || return 1
+  grep -q 'header Connection \*Upgrade\*' "${route_file}" || return 1
+  grep -q 'path /api /api/\* /socket.io /socket.io/\*' "${route_file}" || return 1
+  grep -q "127.0.0.1:${frontend_port}" "${route_file}" || return 1
+  grep -q "127.0.0.1:${backend_port}" "${route_file}" || return 1
+}
+
 deploy_generated_topology_app() {
-  local create app_id deploy deployment_id detail frontend_port backend_port route_file delete job client_name server_name topology_config inspection frontend_html
+  local create app_id deploy deployment_id detail frontend_container frontend_target_port frontend_port backend_container backend_target_port backend_port route_file delete job client_name server_name topology_config inspection frontend_html
   local health_before_repair checked_before_repair stale_frontend_port stale_backend_port repaired_detail ports_repaired repaired_route_hash repair_logs repair_log_count
   local health_after_repair checked_after_repair next_route_hash next_logs next_log_count
-  local health_job_payload health_job_id restart_payload restart_job_id pause_payload pause_job_id resume_payload resume_job_id transition_route_hash current_port
+  local health_job_payload health_job_id restart_payload restart_job_id pause_payload pause_job_id resume_payload resume_job_id
   client_name="@hostlet-topology/client"
   server_name="@hostlet-topology/server"
   topology_config='{"schemaVersion":1,"mode":"auto","backendPathPrefixes":["/api","/socket.io"]}'
@@ -34,13 +56,20 @@ JSON
   deployment_id="$(printf '%s' "${deploy}" | json_get deploymentId)"
   wait_deployment_status "${deployment_id}"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-  read -r frontend_port backend_port < <(printf '%s' "${detail}" | python3 -c '
+  read -r frontend_container frontend_target_port frontend_port backend_container backend_target_port backend_port < <(printf '%s' "${detail}" | python3 -c '
 import json, sys
 d=json.load(sys.stdin)
 services={s["name"]:s for s in d.get("services", [])}
 client, server=sys.argv[1:]
 assert set(services) == {client, server}, services
-print(services[client]["publishedPort"], services[server]["publishedPort"])
+print(
+    services[client]["containerName"],
+    services[client]["targetPort"],
+    services[client]["publishedPort"],
+    services[server]["containerName"],
+    services[server]["targetPort"],
+    services[server]["publishedPort"],
+)
 ' "${client_name}" "${server_name}")
   if [ -n "${HOSTLET_TOPOLOGY_CANARY_REPO:-}" ]; then
     curl -fsS "http://127.0.0.1:${frontend_port}/" >/dev/null
@@ -76,10 +105,10 @@ assert {s.get("role") for s in r.get("services",[])} == {"frontend","backend"}, 
 assert r.get("routing",{}).get("websocketsToBackend") is True, r
 '
   route_file="${HOSTLET_LOCAL_ROUTER_SNIPPETS_DIR}/app-${app_id}.caddy"
-  grep -q 'header Connection \*Upgrade\*' "${route_file}"
-  grep -q 'path /api /api/\* /socket.io /socket.io/\*' "${route_file}"
-  grep -q "127.0.0.1:${frontend_port}" "${route_file}"
-  grep -q "127.0.0.1:${backend_port}" "${route_file}"
+  [ "$(topology_docker_published_port "${frontend_container}" "${frontend_target_port}")" = "${frontend_port}" ]
+  [ "$(topology_docker_published_port "${backend_container}" "${backend_target_port}")" = "${backend_port}" ]
+  printf '%s' "${detail}" | assert_generated_topology_runtime_state \
+    "${client_name}" "${server_name}" "${frontend_port}" "${backend_port}" "${route_file}"
 
   # Reproduce the multi-service route incident: both stored service ports are
   # stale and the shared route has been collapsed to a single backend proxy.
@@ -128,10 +157,8 @@ assert int(services[server_name]["publishedPort"]) == int(backend_port), service
     printf '%s\n' "${repaired_detail}" >&2
     exit 1
   fi
-  grep -q 'header Connection \*Upgrade\*' "${route_file}"
-  grep -q 'path /api /api/\* /socket.io /socket.io/\*' "${route_file}"
-  grep -q "127.0.0.1:${frontend_port}" "${route_file}"
-  grep -q "127.0.0.1:${backend_port}" "${route_file}"
+  printf '%s' "${repaired_detail}" | assert_generated_topology_runtime_state \
+    "${client_name}" "${server_name}" "${frontend_port}" "${backend_port}" "${route_file}"
   repaired_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
   repair_logs="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/deployments/${deployment_id}/logs")"
   repair_log_count="$(printf '%s' "${repair_logs}" | awk '{ count += gsub(/Detected Docker-published port drift for/, "") } END { print count + 0 }')"
@@ -165,12 +192,11 @@ SQL
   health_job_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/health/check-now" --data '{}')"
   health_job_id="$(printf '%s' "${health_job_payload}" | json_get jobId)"
   wait_job_status "${health_job_id}"
+  frontend_port="$(topology_docker_published_port "${frontend_container}" "${frontend_target_port}")"
+  backend_port="$(topology_docker_published_port "${backend_container}" "${backend_target_port}")"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-  current_port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
-  if [ "${current_port}" != "${frontend_port}" ]; then
-    echo "health-check repair persisted frontend port ${current_port}, expected ${frontend_port}" >&2
-    exit 1
-  fi
+  printf '%s' "${detail}" | assert_generated_topology_runtime_state \
+    "${client_name}" "${server_name}" "${frontend_port}" "${backend_port}" "${route_file}"
 
   docker exec -i "${POSTGRES_CONTAINER}" psql -U hostlet -d hostlet >/dev/null <<SQL
 UPDATE deployments SET published_port=${stale_frontend_port} WHERE id='${deployment_id}';
@@ -178,12 +204,14 @@ SQL
   restart_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" "${JSON_CT[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/restart" --data '{}')"
   restart_job_id="$(printf '%s' "${restart_payload}" | json_get jobId)"
   wait_job_status "${restart_job_id}"
+  # Docker assigns a fresh host port when a container published with an empty
+  # host port is restarted. The repair invariant is convergence on that live
+  # mapping, not preservation of the pre-restart number.
+  frontend_port="$(topology_docker_published_port "${frontend_container}" "${frontend_target_port}")"
+  backend_port="$(topology_docker_published_port "${backend_container}" "${backend_target_port}")"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-  current_port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
-  if [ "${current_port}" != "${frontend_port}" ]; then
-    echo "restart repair persisted frontend port ${current_port}, expected ${frontend_port}" >&2
-    exit 1
-  fi
+  printf '%s' "${detail}" | assert_generated_topology_runtime_state \
+    "${client_name}" "${server_name}" "${frontend_port}" "${backend_port}" "${route_file}"
 
   pause_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/pause")"
   pause_job_id="$(printf '%s' "${pause_payload}" | json_get jobId)"
@@ -194,17 +222,11 @@ SQL
   resume_payload="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${ORIGIN_CSRF[@]}" -X POST "${BASE_URL}/api/apps/${app_id}/resume")"
   resume_job_id="$(printf '%s' "${resume_payload}" | json_get jobId)"
   wait_job_status "${resume_job_id}"
+  frontend_port="$(topology_docker_published_port "${frontend_container}" "${frontend_target_port}")"
+  backend_port="$(topology_docker_published_port "${backend_container}" "${backend_target_port}")"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
-  current_port="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
-  if [ "${current_port}" != "${frontend_port}" ]; then
-    echo "resume repair persisted frontend port ${current_port}, expected ${frontend_port}" >&2
-    exit 1
-  fi
-  transition_route_hash="$(sha256sum "${route_file}" | awk '{print $1}')"
-  if [ "${transition_route_hash}" != "${repaired_route_hash}" ]; then
-    echo "interactive health transitions changed the repaired split route" >&2
-    exit 1
-  fi
+  printf '%s' "${detail}" | assert_generated_topology_runtime_state \
+    "${client_name}" "${server_name}" "${frontend_port}" "${backend_port}" "${route_file}"
   curl -fsS "http://127.0.0.1:${frontend_port}/" >/dev/null
   timeout 5 bash -c "</dev/tcp/127.0.0.1/${backend_port}"
 
