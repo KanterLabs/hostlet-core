@@ -6,6 +6,7 @@ use crate::deployment_policy::{
 
 mod deletion_fence;
 mod health;
+mod health_targets;
 mod lifecycle;
 mod priority;
 mod resource;

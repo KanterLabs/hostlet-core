@@ -100,6 +100,116 @@ pub(crate) fn route_domain(contents: &str) -> Option<&str> {
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RouteKind {
+    Single,
+    Split,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RouteVersion {
+    deployment_id: Uuid,
+    generation: i64,
+    kind: RouteKind,
+}
+
+fn route_version(contents: &str) -> anyhow::Result<Option<RouteVersion>> {
+    let mut deployment_id = None;
+    let mut generation = None;
+    let mut kind = None;
+    for line in contents.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("# hostlet-deployment-id:") {
+            if deployment_id.replace(value.trim()).is_some() {
+                bail!("existing Hostlet route has duplicate deployment metadata");
+            }
+        }
+        if let Some(value) = line.strip_prefix("# hostlet-route-generation:") {
+            if generation.replace(value.trim()).is_some() {
+                bail!("existing Hostlet route has duplicate generation metadata");
+            }
+        }
+        if let Some(value) = line.strip_prefix("# hostlet-route-kind:") {
+            if kind.replace(value.trim()).is_some() {
+                bail!("existing Hostlet route has duplicate route-kind metadata");
+            }
+        }
+    }
+    match (deployment_id, generation, kind) {
+        (None, None, None) => Ok(None),
+        (Some(deployment_id), Some(generation), kind) => {
+            let deployment_id = Uuid::parse_str(deployment_id)
+                .context("existing Hostlet route has an invalid deployment id")?;
+            let generation = generation
+                .parse::<i64>()
+                .ok()
+                .filter(|generation| *generation >= 0)
+                .context("existing Hostlet route has an invalid generation")?;
+            let kind = match kind {
+                Some("single") => RouteKind::Single,
+                Some("split") => RouteKind::Split,
+                Some(_) => bail!("existing Hostlet route has an invalid route kind"),
+                None if route_looks_split(contents) => RouteKind::Split,
+                None => RouteKind::Single,
+            };
+            Ok(Some(RouteVersion {
+                deployment_id,
+                generation,
+                kind,
+            }))
+        }
+        _ => bail!("existing Hostlet route has incomplete version metadata"),
+    }
+}
+
+fn route_looks_split(contents: &str) -> bool {
+    contents.lines().map(str::trim).any(|line| {
+        line == "@hostletWebsocket header Connection *Upgrade*"
+            || (line.starts_with('@') && line.ends_with("Websocket {"))
+    })
+}
+
+/// Fence every write while the per-route lock is held. A newer activation may
+/// replace an older route, and the current deployment may repair its own route,
+/// but stale, conflicting, or unversioned writers cannot overwrite a versioned
+/// route that another activation already installed.
+pub(crate) fn ensure_route_write_is_current(
+    previous: Option<&[u8]>,
+    deployment_id: Uuid,
+    generation: Option<i64>,
+    requested_kind: RouteKind,
+) -> anyhow::Result<()> {
+    if generation.is_some_and(|generation| generation < 0) {
+        bail!("route generation must be non-negative");
+    }
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let contents = std::str::from_utf8(previous).context("existing Hostlet route is not UTF-8")?;
+    let Some(existing) = route_version(contents)? else {
+        return Ok(());
+    };
+    let Some(generation) = generation else {
+        bail!("an unversioned route write cannot replace a versioned route");
+    };
+    if generation < existing.generation {
+        bail!(
+            "stale route generation {generation} cannot replace generation {}",
+            existing.generation
+        );
+    }
+    if generation == existing.generation && deployment_id != existing.deployment_id {
+        bail!("route generation is already owned by another deployment");
+    }
+    if generation == existing.generation
+        && deployment_id == existing.deployment_id
+        && existing.kind == RouteKind::Split
+        && requested_kind == RouteKind::Single
+    {
+        bail!("a split route cannot be downgraded within the same deployment generation");
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_router_reload(
     cfg: &Config,
     deployment_id: Uuid,
@@ -118,4 +228,105 @@ pub(crate) async fn run_router_reload_quiet(router: &LocalRouter) -> anyhow::Res
     };
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_quiet(bin, &args).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CURRENT: Uuid = Uuid::from_u128(1);
+    const OTHER: Uuid = Uuid::from_u128(2);
+
+    fn versioned(deployment_id: Uuid, generation: i64) -> Vec<u8> {
+        format!(
+            "# hostlet-deployment-id: {deployment_id}\n# hostlet-route-generation: {generation}\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn route_write_fence_allows_first_legacy_and_newer_writes() {
+        assert!(ensure_route_write_is_current(None, CURRENT, Some(1), RouteKind::Single).is_ok());
+        assert!(ensure_route_write_is_current(
+            Some(b"legacy route"),
+            CURRENT,
+            Some(1),
+            RouteKind::Single
+        )
+        .is_ok());
+        assert!(ensure_route_write_is_current(
+            Some(&versioned(CURRENT, 1)),
+            OTHER,
+            Some(2),
+            RouteKind::Single
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn route_write_fence_allows_current_deployment_repair() {
+        assert!(ensure_route_write_is_current(
+            Some(&versioned(CURRENT, 7)),
+            CURRENT,
+            Some(7),
+            RouteKind::Single
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn route_write_fence_rejects_stale_conflicting_and_unversioned_writes() {
+        let current = versioned(CURRENT, 7);
+        assert!(
+            ensure_route_write_is_current(Some(&current), CURRENT, Some(6), RouteKind::Single)
+                .is_err()
+        );
+        assert!(
+            ensure_route_write_is_current(Some(&current), OTHER, Some(7), RouteKind::Single)
+                .is_err()
+        );
+        assert!(
+            ensure_route_write_is_current(Some(&current), CURRENT, None, RouteKind::Single)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn route_write_fence_rejects_malformed_version_metadata() {
+        assert!(ensure_route_write_is_current(
+            Some(b"# hostlet-route-generation: 7\n"),
+            CURRENT,
+            Some(7),
+            RouteKind::Single
+        )
+        .is_err());
+        assert!(ensure_route_write_is_current(
+            Some(b"# hostlet-deployment-id: nope\n# hostlet-route-generation: 7\n"),
+            CURRENT,
+            Some(7),
+            RouteKind::Single
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn route_write_fence_rejects_same_generation_split_downgrade() {
+        let split = format!(
+            "# hostlet-deployment-id: {CURRENT}\n# hostlet-route-generation: 7\n@hostletWebsocket header Connection *Upgrade*\n"
+        );
+        assert!(ensure_route_write_is_current(
+            Some(split.as_bytes()),
+            CURRENT,
+            Some(7),
+            RouteKind::Single
+        )
+        .is_err());
+        assert!(ensure_route_write_is_current(
+            Some(split.as_bytes()),
+            CURRENT,
+            Some(7),
+            RouteKind::Split
+        )
+        .is_ok());
+    }
 }

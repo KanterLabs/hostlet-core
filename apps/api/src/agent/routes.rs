@@ -1,3 +1,4 @@
+use super::health_target_payload::{route_shape, split_route_payload, RouteShape};
 use super::*;
 
 pub async fn register() -> impl IntoResponse {
@@ -45,22 +46,58 @@ pub async fn health_targets(
                a.container_port,
                a.domain,
                d.id AS deployment_id,
-               COALESCE(ds.container_name, d.container_name) AS container_name,
-               COALESCE(ds.published_port, d.published_port) AS published_port,
-               COALESCE(ds.target_port, a.container_port) AS target_port,
-               ds.service_name
-               ,d.runtime_metadata
-               ,a.route_generation
+               d.container_name,
+               d.published_port,
+               COALESCE(primary_ds.target_port, a.container_port) AS target_port,
+               primary_ds.service_name,
+               d.runtime_metadata,
+               a.route_generation,
+               inferred_backend.service_count AS backend_service_count,
+               inferred_backend.service_name AS backend_service_name,
+               backend_ds.container_name AS backend_container_name,
+               backend_ds.target_port AS backend_target_port,
+               backend_ds.published_port AS backend_published_port
         FROM apps a
-        JOIN deployments d ON d.id = a.current_deployment_id
-        LEFT JOIN deployment_services ds
-          ON ds.deployment_id = d.id
-         AND ds.role = 'web'
+        JOIN deployments d
+          ON d.id = a.current_deployment_id
+         AND d.app_id = a.id
+        LEFT JOIN LATERAL (
+          SELECT ds.service_name, ds.target_port
+          FROM deployment_services ds
+          WHERE ds.deployment_id = d.id
+            AND ds.app_id = d.app_id
+            AND ds.container_name = d.container_name
+            AND ds.role = 'web'
+          ORDER BY ds.id ASC
+          LIMIT 1
+        ) primary_ds ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::bigint AS service_count,
+                 CASE WHEN COUNT(*)=1 THEN MIN(service->>'name') END AS service_name
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(d.runtime_metadata #> '{inferenceReceipt,services}') = 'array'
+              THEN d.runtime_metadata #> '{inferenceReceipt,services}'
+              ELSE '[]'::jsonb
+            END
+          ) AS service
+          WHERE service->>'role' = 'backend'
+        ) inferred_backend ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT ds.container_name, ds.target_port, ds.published_port
+          FROM deployment_services ds
+          WHERE ds.deployment_id = d.id
+            AND ds.app_id = d.app_id
+            AND ds.service_name = inferred_backend.service_name
+            AND ds.role = 'web'
+          ORDER BY ds.id ASC
+          LIMIT 1
+        ) backend_ds ON TRUE
         WHERE a.server_id=$1
           AND d.server_id=$1
           AND d.status IN ('success','rolled_back')
-          AND COALESCE(ds.container_name, d.container_name) IS NOT NULL
-          AND COALESCE(ds.published_port, d.published_port) IS NOT NULL
+          AND d.container_name IS NOT NULL
+          AND d.published_port IS NOT NULL
           AND a.suspended_at IS NULL
           AND a.pending_deployment_id IS NULL
         ORDER BY a.created_at ASC
@@ -95,7 +132,7 @@ pub async fn health_targets(
                         .and_then(|probe| probe.get("path"))
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or(&default_health_path);
-                    serde_json::json!({
+                    let mut target = serde_json::json!({
                         "appId": row.get::<Uuid, _>("app_id"),
                         "deploymentId": row.get::<Uuid, _>("deployment_id"),
                         "containerName": row.get::<String, _>("container_name"),
@@ -107,7 +144,22 @@ pub async fn health_targets(
                         "domain": row.get::<String, _>("domain"),
                         "routeKey": format!("app-{}", row.get::<Uuid, _>("app_id")),
                         "routeGeneration": row.get::<i64, _>("route_generation"),
-                    })
+                    });
+
+                    match route_shape(&metadata, &row) {
+                        RouteShape::Single => {}
+                        RouteShape::Split => {
+                            target["splitRoute"] =
+                                split_route_payload(&row).unwrap_or(serde_json::Value::Null);
+                        }
+                        // A present null marker makes the agent reject the
+                        // entire target rather than downgrade an immutable
+                        // generated-topology route to a single proxy.
+                        RouteShape::Invalid => {
+                            target["splitRoute"] = serde_json::Value::Null;
+                        }
+                    }
+                    target
                 })
                 .collect::<Vec<_>>(),
         )
