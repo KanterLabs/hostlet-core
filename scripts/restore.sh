@@ -7,6 +7,7 @@ COMPOSE_FILE="${HOSTLET_COMPOSE_FILE:-$ROOT_DIR/infra/docker-compose.yml}"
 POSTGRES_USER="${POSTGRES_USER:-hostlet}"
 POSTGRES_DB="${POSTGRES_DB:-hostlet}"
 AGENT_VOLUME="${HOSTLET_AGENT_VOLUME:-infra_hostlet-agent}"
+SCREENSHOT_VOLUME="${HOSTLET_SCREENSHOT_VOLUME:-infra_hostlet-screenshots}"
 AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-alpine:3.22}"
 STOP_TIMEOUT="${HOSTLET_RESTORE_STOP_TIMEOUT_SECONDS:-30}"
 JOURNAL_FILE="${HOSTLET_RESTORE_JOURNAL:-$ROOT_DIR/.hostlet/restore-state}"
@@ -207,6 +208,9 @@ validate_sql_dump "$BACKUP_DIR/postgres.sql"
 if [[ -e "$BACKUP_DIR/hostlet-agent-state.tar.gz" || -L "$BACKUP_DIR/hostlet-agent-state.tar.gz" ]]; then
   validate_archive "$BACKUP_DIR/hostlet-agent-state.tar.gz"
 fi
+if [[ -e "$BACKUP_DIR/hostlet-screenshots-state.tar.gz" || -L "$BACKUP_DIR/hostlet-screenshots-state.tar.gz" ]]; then
+  validate_archive "$BACKUP_DIR/hostlet-screenshots-state.tar.gz"
+fi
 validate_sql_semantics "$BACKUP_DIR/postgres.sql"
 
 if [[ ! "$STOP_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]]; then
@@ -318,14 +322,19 @@ psql_exec -v ON_ERROR_STOP=1 --single-transaction < "$BACKUP_DIR/postgres.sql"
 
 RESTORE_PHASE=agent-state
 
-if [[ -f "$BACKUP_DIR/hostlet-agent-state.tar.gz" ]]; then
-  docker volume create "$AGENT_VOLUME" >/dev/null
+restore_volume() {
+  local volume="$1" archive="$2"
+  [[ -f "$BACKUP_DIR/$archive" ]] || return 0
+  docker volume create "$volume" >/dev/null
   docker run --rm \
-    -v "$AGENT_VOLUME:/data" \
+    -v "$volume:/data" \
     -v "$BACKUP_DIR:/backup:ro" \
     "$AGENT_IMAGE" \
-    sh -lc 'rm -rf /data/* && tar -xzf /backup/hostlet-agent-state.tar.gz -C /data'
-fi
+    sh -lc "rm -rf /data/* && tar -xzf /backup/$archive -C /data"
+}
+
+restore_volume "$AGENT_VOLUME" hostlet-agent-state.tar.gz
+restore_volume "$SCREENSHOT_VOLUME" hostlet-screenshots-state.tar.gz
 
 RESTORE_PHASE=restart
 if ((${#RUNNING_SERVICES[@]})); then
