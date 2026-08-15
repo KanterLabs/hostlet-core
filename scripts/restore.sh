@@ -91,6 +91,10 @@ if [[ -z "$BACKUP_DIR" ]]; then
   echo "Usage: $0 [--env-file <path>] /path/to/hostlet-backup" >&2
   exit 1
 fi
+BACKUP_DIR="$(realpath -e -- "$BACKUP_DIR" 2>/dev/null)" || {
+  echo "backup directory does not exist: $BACKUP_DIR" >&2
+  exit 1
+}
 
 require_regular_file() {
   local path="$1" label="$2"

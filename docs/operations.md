@@ -72,6 +72,10 @@ one. S3-compatible credentials/region come from the standard `AWS_ACCESS_KEY_ID`
 inherits your shell's environment, so exporting these before running it (or in a cron/
 systemd unit's environment) is enough; nothing needs to be set in `.env`.
 
+Restore resolves the backup directory to an absolute path before changing into
+the Hostlet repository, so a relative path supplied from another working
+directory cannot select a same-named directory inside the repository.
+
 ## Troubleshooting
 
 - If API startup fails after an environment change, check Postgres credential compatibility with the existing persistent volume.
