@@ -61,6 +61,7 @@ export function statusHelp(status: string) {
     case "failed": return "Deployment failed. The previous working version was preserved.";
     case "canceled":
     case "cancelled": return "Deployment was canceled before activation.";
+    case "waiting_capacity": return "Deployment is waiting for available server/runtime capacity.";
     default: return "Deployment is queued or running.";
   }
 }

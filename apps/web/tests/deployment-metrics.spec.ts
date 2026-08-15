@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { firstErrorLine } from "@/components/ui";
-import { statusSteps } from "@/app/deployments/[id]/deploymentStatus";
+import { statusHelp, statusSteps } from "@/app/deployments/[id]/deploymentStatus";
 import { mergeDeploymentLogHistory } from "@/lib/useDeploymentLogs";
 
 const validRuntimeMetadata = {
@@ -175,6 +175,10 @@ test("terminal transition retains live logs when history requests are delayed an
   await expect(page.getByText("live before terminal", { exact: true })).toBeVisible();
   await expect(page.getByText("stream ended")).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText("live before terminal", { exact: true })).toBeVisible();
+});
+
+test("capacity waiting help names server/runtime capacity", () => {
+  expect(statusHelp("waiting_capacity")).toBe("Deployment is waiting for available server/runtime capacity.");
 });
 
 for (const [status, label, help] of [

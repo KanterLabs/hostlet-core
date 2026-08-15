@@ -254,6 +254,19 @@ export function OperationsSection({
 }
 
 function JobsList({ jobs, onRetryJob, onCancelJob }: { jobs: AgentJob[]; onRetryJob: (id: string) => void; onCancelJob: (id: string) => void }) {
+  const capacityWaitMessage = (reason?: string | null) => {
+    const messages: Record<string, string> = {
+      app_slots: "Waiting for an available app slot.",
+      build_slot: "Waiting for an available build slot.",
+      runtime_memory: "Waiting for available runtime memory.",
+      service_slots: "Waiting for available service slots.",
+      telemetry_stale: "Waiting for fresh server capacity telemetry.",
+      live_memory: "Waiting for available memory.",
+      disk: "Waiting for available disk space.",
+    };
+    return messages[reason || ""] || "Waiting for available server/runtime capacity.";
+  };
+
   return (
     <div>
       <h3 className="data-label">Recent jobs</h3>
@@ -263,12 +276,13 @@ function JobsList({ jobs, onRetryJob, onCancelJob }: { jobs: AgentJob[]; onRetry
             <div className="min-w-0">
               <div className="truncate font-medium">{job.type}</div>
               <div className="muted text-sm">{formatTimestamp(job.createdAt)} · attempt {job.attempt}/{job.maxAttempts}</div>
+              {job.status === "waiting_capacity" && <div className="muted text-sm">{capacityWaitMessage(job.capacityWaitReason)}</div>}
               {job.failure && <Notice tone="danger" className="mt-2" description={job.failure} />}
             </div>
             <div className="flex items-center gap-2">
               <StatusPill status={job.status} />
               {["failed", "expired", "cancelled"].includes(job.status) && <button className="button-secondary compact" onClick={() => onRetryJob(job.id)}>Retry</button>}
-              {job.status === "queued" && <button className="button-secondary compact" onClick={() => onCancelJob(job.id)}>Cancel</button>}
+              {["queued", "waiting_capacity"].includes(job.status) && <button className="button-secondary compact" onClick={() => onCancelJob(job.id)}>Cancel</button>}
             </div>
           </div>
         ))}

@@ -9,7 +9,7 @@ type StatusVariant = "active" | "success" | "failed" | "warning";
 
 const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: LucideIcon; tone: string; chartColor: string }> = {
   active: {
-    values: ["queued", "queued for build", "pending", "waiting", "running", "building", "publishing", "queued for release", "pulling", "starting", "health checking", "routing"],
+    values: ["queued", "queued for build", "pending", "waiting", "waiting capacity", "running", "building", "publishing", "queued for release", "pulling", "starting", "health checking", "routing"],
     icon: Loader2,
     tone: "bg-warning-bg text-warning-fg ring-warning-border",
     chartColor: "hsl(var(--warning-fg))",
