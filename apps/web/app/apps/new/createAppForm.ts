@@ -111,6 +111,33 @@ export type RepoInspection = {
   summary: string;
 };
 
+/** Copy shown when inferred managed services cannot use generated topology. */
+export const MANAGED_ADDONS_TOPOLOGY_MESSAGE =
+  "Managed Postgres/Redis were detected. Add a hostlet.yml Compose manifest to deploy the app and backing services together; generated topology is not available for this combination yet.";
+
+/** Returns whether inspection found one or more catalog-managed backing services. */
+export function hasManagedAddOns(runtimeConfig: Record<string, unknown>): boolean {
+  const compose = runtimeConfig.compose;
+  if (!compose || typeof compose !== "object" || Array.isArray(compose)) return false;
+  const addOns = (compose as Record<string, unknown>).addOns;
+  return Array.isArray(addOns) && addOns.length > 0;
+}
+
+function hasGeneratedTopology(runtimeConfig: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(runtimeConfig, "generatedTopology");
+}
+
+/**
+ * Generated topology is incompatible with detected managed add-ons both after
+ * an automatic selection and while a multi-service repo still needs selection.
+ */
+export function managedAddOnsBlockTopologySelection(
+  runtimeConfig: Record<string, unknown>,
+  readiness: InferencePlan["readiness"] | undefined,
+): boolean {
+  return hasManagedAddOns(runtimeConfig) && (readiness === "needs_selection" || hasGeneratedTopology(runtimeConfig));
+}
+
 /**
  * Merge a repo inspection result onto the current form, preferring the inferred
  * values while falling back to whatever the user already has. Pure: returns the
@@ -201,6 +228,9 @@ export function createAppDisabledReason({
   if (!form.branch.trim()) return "Enter a branch.";
   if (!form.server_id) return "Choose a local deploy target.";
   if (requiredEnvMissing) return "Fill required environment values from the repo inspection.";
+  if (inspection && managedAddOnsBlockTopologySelection(form.runtime_config, inspection.inferencePlan?.readiness)) {
+    return MANAGED_ADDONS_TOPOLOGY_MESSAGE;
+  }
   if (inspection?.inferencePlan?.readiness === "needs_selection") return "Choose the services Hostlet should deploy.";
   if (inspection?.deployable === false) return "This repo is not deployable yet. Add a supported app manifest or start command, then inspect again.";
   return "";

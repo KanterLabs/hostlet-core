@@ -31,6 +31,7 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
     validate_port(port)?;
     validate_domain(domain)?;
     validate_health_path(health_path)?;
+    validate_runtime_config_for_deploy(&p)?;
     status(&cfg, deployment_id, "building", None).await;
     let checkout = cfg.workdir.join("repos").join(&app_name);
     let expected_remote = format!("https://github.com/{repo}.git");
@@ -296,6 +297,17 @@ pub(crate) async fn deploy(cfg: Config, p: Value) -> anyhow::Result<()> {
         p.get("type").and_then(Value::as_str) == Some("rollback"),
     )
     .await?;
+    Ok(())
+}
+
+/// Re-check runtime combinations at the final execution boundary. API create
+/// rejects this shape too, but deployment jobs are durable and may be replayed
+/// from an older inspection payload.
+pub(crate) fn validate_runtime_config_for_deploy(payload: &Value) -> anyhow::Result<()> {
+    if let Some(runtime_config) = payload.get("runtime_config") {
+        hostlet_contracts::validate_runtime_config_compatibility(runtime_config)
+            .map_err(anyhow::Error::msg)?;
+    }
     Ok(())
 }
 

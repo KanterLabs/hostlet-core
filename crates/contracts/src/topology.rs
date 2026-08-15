@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const GENERATED_TOPOLOGY_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_BACKEND_PATH_PREFIXES: &[&str] = &["/api", "/graphql", "/socket.io", "/trpc"];
+pub const GENERATED_TOPOLOGY_ADDONS_WARNING: &str =
+    "Managed Postgres/Redis add-ons cannot be combined with generated topology yet. Add a hostlet.yml Compose manifest to run the inferred services and backing services together.";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +196,32 @@ pub fn validate_generated_topology_config(
     Ok(())
 }
 
+/// Returns whether a runtime config asks the generated-topology pipeline to
+/// deploy alongside managed Compose add-ons. Those pipelines have different
+/// service/network lifecycles, so accepting both would silently drop the
+/// add-ons when the agent selects generated topology first.
+pub fn runtime_config_has_generated_topology_addons(runtime_config: &Value) -> bool {
+    runtime_config.get("generatedTopology").is_some()
+        && runtime_config_has_managed_addons(runtime_config)
+}
+
+fn runtime_config_has_managed_addons(runtime_config: &Value) -> bool {
+    runtime_config
+        .pointer("/compose/addOns")
+        .and_then(Value::as_array)
+        .is_some_and(|add_ons| !add_ons.is_empty())
+}
+
+/// Rejects runtime combinations that cannot be represented by one agent
+/// deployment pipeline. Keep this shared by API input validation and the agent
+/// because queued jobs can outlive the inspection response or be replayed.
+pub fn validate_runtime_config_compatibility(runtime_config: &Value) -> Result<(), &'static str> {
+    if runtime_config_has_generated_topology_addons(runtime_config) {
+        return Err("managed add-ons require an explicit Compose runtime; generated topology cannot deploy them together");
+    }
+    Ok(())
+}
+
 fn valid_route_prefix(value: &str) -> bool {
     value.starts_with('/')
         && value != "/"
@@ -212,15 +240,30 @@ pub fn attach_topology_plan(mut inspection: Value, plan: &TopologyPlan) -> Value
     let Some(map) = inspection.as_object_mut() else {
         return inspection;
     };
+    let managed_addons = map
+        .get("runtimeConfig")
+        .is_some_and(runtime_config_has_managed_addons);
+    let generated_topology_addons = managed_addons && plan.readiness == TopologyReadiness::Ready;
     map.insert(
         "inferencePlan".to_string(),
         serde_json::to_value(plan).unwrap_or_else(|_| serde_json::json!({})),
     );
     map.insert(
         "deployable".to_string(),
-        serde_json::json!(plan.readiness == TopologyReadiness::Ready),
+        serde_json::json!(plan.readiness == TopologyReadiness::Ready && !generated_topology_addons),
     );
     map.insert("summary".to_string(), serde_json::json!(plan.summary));
+    if managed_addons && plan.readiness != TopologyReadiness::Unsupported {
+        let warnings = map
+            .entry("warnings")
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(warnings) = warnings.as_array_mut() {
+            let warning = serde_json::json!(GENERATED_TOPOLOGY_ADDONS_WARNING);
+            if !warnings.iter().any(|existing| existing == &warning) {
+                warnings.push(warning);
+            }
+        }
+    }
     if plan.readiness == TopologyReadiness::Ready {
         let config = GeneratedTopologyConfig::default();
         let runtime_config = map
@@ -814,143 +857,5 @@ fn in_directory(directory: &str, command: &str) -> String {
 mod patchwork_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn inventory(files: &[(&str, &str)]) -> RepositoryInventory {
-        RepositoryInventory {
-            files: files
-                .iter()
-                .map(|(path, contents)| RepositoryFile {
-                    path: (*path).to_string(),
-                    contents: Some((*contents).to_string()),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn competing_backends_require_selection() {
-        let plan = plan_repository_topology(&inventory(&[
-            ("package.json", "{}"),
-            (
-                "apps/one/package.json",
-                r#"{"name":"one","scripts":{"start":"node one.js"},"dependencies":{"express":"1"}}"#,
-            ),
-            (
-                "apps/two/package.json",
-                r#"{"name":"two","scripts":{"start":"node two.js"},"dependencies":{"fastify":"1"}}"#,
-            ),
-        ]));
-        assert_eq!(plan.readiness, TopologyReadiness::NeedsSelection);
-        assert!(plan.services.is_empty());
-        assert_eq!(plan.candidates.len(), 2);
-    }
-
-    #[test]
-    fn noise_directories_do_not_become_candidates() {
-        let plan = plan_repository_topology(&inventory(&[(
-            "examples/demo/package.json",
-            r#"{"scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#,
-        )]));
-        assert_eq!(plan.readiness, TopologyReadiness::Unsupported);
-    }
-
-    #[test]
-    fn selected_config_requires_safe_prefixes_and_selector() {
-        let mut config = GeneratedTopologyConfig {
-            mode: "selected".to_string(),
-            ..GeneratedTopologyConfig::default()
-        };
-        assert!(validate_generated_topology_config(&config).is_err());
-        config.backend_selector = Some("node:apps/api/package.json:api".to_string());
-        assert!(validate_generated_topology_config(&config).is_ok());
-        config.backend_path_prefixes = vec!["/api/*".to_string()];
-        assert!(validate_generated_topology_config(&config).is_err());
-    }
-
-    #[test]
-    fn workspace_commands_follow_the_detected_package_manager() {
-        for (manager_file, manager_contents, expected) in [
-            ("package-lock.json", "{}", "npm run start --workspace api"),
-            ("yarn.lock", "", "yarn workspace api run start"),
-            ("bun.lock", "", "bun run --filter api start"),
-            (
-                "pnpm-lock.yaml",
-                "lockfileVersion: '9.0'",
-                "pnpm --filter api run start",
-            ),
-        ] {
-            let plan = plan_repository_topology(&inventory(&[
-                (manager_file, manager_contents),
-                (
-                    "apps/api/package.json",
-                    r#"{"name":"api","scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#,
-                ),
-            ]));
-            assert_eq!(plan.readiness, TopologyReadiness::Ready, "{manager_file}");
-            assert_eq!(
-                plan.services[0].start_command.as_deref(),
-                Some(expected),
-                "{manager_file}"
-            );
-        }
-    }
-
-    #[test]
-    fn supported_non_node_runtimes_are_inferred() {
-        let cases: &[(&[(&str, &str)], &str)] = &[
-            (
-                &[
-                    ("service/requirements.txt", "fastapi\nuvicorn"),
-                    ("service/main.py", "app = 1"),
-                ],
-                "python",
-            ),
-            (
-                &[
-                    ("service/go.mod", "module example.test/service"),
-                    ("service/main.go", "package main\nfunc main() {}"),
-                ],
-                "golang",
-            ),
-            (
-                &[
-                    (
-                        "service/Cargo.toml",
-                        "[package]\nname = \"service\"\nversion = \"0.1.0\"",
-                    ),
-                    ("service/src/main.rs", "fn main() {}"),
-                ],
-                "rust",
-            ),
-            (&[("site/index.html", "<h1>ok</h1>")], "staticfile"),
-        ];
-        for (files, provider) in cases {
-            let plan = plan_repository_topology(&inventory(files));
-            assert_eq!(plan.readiness, TopologyReadiness::Ready, "{provider}");
-            assert_eq!(plan.services[0].provider, *provider);
-        }
-    }
-
-    #[test]
-    fn attach_plan_preserves_existing_runtime_config_and_adds_auto_selection() {
-        let plan = plan_repository_topology(&inventory(&[(
-            "package.json",
-            r#"{"scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#,
-        )]));
-        let inspection = attach_topology_plan(
-            serde_json::json!({"runtimeConfig":{"compose":{"addOns":[{"key":"postgres"}]}}}),
-            &plan,
-        );
-        assert_eq!(inspection["deployable"], true);
-        assert_eq!(
-            inspection["runtimeConfig"]["generatedTopology"]["mode"],
-            "auto"
-        );
-        assert_eq!(
-            inspection["runtimeConfig"]["compose"]["addOns"][0]["key"],
-            "postgres"
-        );
-    }
-}
+#[path = "topology/tests.rs"]
+mod tests;

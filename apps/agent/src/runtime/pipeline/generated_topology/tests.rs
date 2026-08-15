@@ -152,3 +152,23 @@ snapshots: {}
     assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), lock);
     tokio::fs::remove_dir_all(checkout).await.unwrap();
 }
+
+#[test]
+fn deployment_planning_rejects_generated_topology_managed_addons() {
+    for add_ons in [
+        json!([{"key": "postgres"}]),
+        json!([{"key": "redis"}]),
+        json!([{"key": "postgres"}, {"key": "redis"}]),
+    ] {
+        let payload = json!({
+            "runtime_config": {
+                "generatedTopology": {"schemaVersion": 1, "mode": "auto"},
+                "compose": {"addOns": add_ons}
+            }
+        });
+        let error = super::super::validate_runtime_config_for_deploy(&payload)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("managed add-ons"), "{error}");
+    }
+}

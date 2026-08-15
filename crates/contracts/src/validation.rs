@@ -53,6 +53,7 @@ pub fn clean_runtime_config(value: &serde_json::Value) -> Result<(), &'static st
                 .map_err(|_| "runtime config generatedTopology is invalid")?;
         crate::validate_generated_topology_config(&config)?;
     }
+    crate::validate_runtime_config_compatibility(value)?;
     Ok(())
 }
 
@@ -193,6 +194,20 @@ mod tests {
         )
         .is_err());
         assert!(clean_runtime_config(&serde_json::json!({"dataMountPath": 1})).is_err());
+    }
+
+    #[test]
+    fn clean_runtime_config_rejects_generated_topology_with_managed_addons() {
+        let config = serde_json::json!({
+            "generatedTopology": {"schemaVersion": 1, "mode": "auto"},
+            "compose": {"addOns": [{"key": "postgres"}]}
+        });
+        let error = clean_runtime_config(&config).unwrap_err();
+        assert!(error.contains("managed add-ons"));
+        assert!(clean_runtime_config(&serde_json::json!({
+            "generatedTopology": {"schemaVersion": 1, "mode": "auto"}
+        }))
+        .is_ok());
     }
 
     #[test]

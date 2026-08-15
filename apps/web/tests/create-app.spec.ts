@@ -184,6 +184,51 @@ test("ambiguous topology requires selection and submits the selected services", 
   });
 });
 
+test("managed add-ons block generated topology selection while preserving the preview", async ({ page }) => {
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/github/repo-inspect") {
+      await jsonRoute(route, {
+        ...INSPECTION,
+        deployable: false,
+        runtimeKind: "compose",
+        runtimeConfig: { compose: { addOns: [{ key: "postgres" }, { key: "redis" }] } },
+        services: [
+          { name: "web", role: "web", build: true },
+          { name: "postgres", role: "backing", image: "postgres:16" },
+          { name: "redis", role: "backing", image: "redis:7" },
+        ],
+        summary: "Hostlet found multiple runnable service candidates.",
+        inferencePlan: {
+          schemaVersion: 1,
+          readiness: "needs_selection",
+          confidence: "medium",
+          services: [],
+          candidates: [
+            topologyCandidate("client", "frontend", "packages/client"),
+            topologyCandidate("server", "backend", "packages/server"),
+          ],
+          routing: null,
+          warnings: ["Choose at most one frontend and one backend before deploying."],
+          summary: "Hostlet found multiple runnable service candidates.",
+        },
+      });
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/new");
+  await page.getByLabel("GitHub repo link").fill("https://github.com/acme/patchwork");
+  await page.getByRole("button", { name: "Inspect repo" }).click();
+
+  await expect(page.getByText("postgres", { exact: true })).toBeVisible();
+  await expect(page.getByText("redis", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Managed Postgres\/Redis were detected/).first()).toBeVisible();
+  await expect(page.getByLabel("Frontend")).toBeDisabled();
+  await expect(page.getByLabel("Backend")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Use selected topology" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Create app" })).toBeDisabled();
+});
+
 test("topology deployment is blocked until the agent supports protocol v3", async ({ page }) => {
   const frontend = topologyCandidate("client", "frontend", "packages/client");
   const backend = topologyCandidate("server", "backend", "packages/server");
