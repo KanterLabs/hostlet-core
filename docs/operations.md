@@ -44,7 +44,8 @@ Then pull and restart with `--no-build`.
 
 ## Backup And Restore
 
-Backups include a Postgres dump and agent state volume when available. The dump
+Backups include a Postgres dump, agent state volume, and API screenshot storage
+volume when available. The dump
 contains encrypted database rows, including encrypted GitHub tokens and app
 environment variables. Backups intentionally do not copy `.env`, `.env.prod`,
 raw secret values, private keys, or plaintext app environment files.

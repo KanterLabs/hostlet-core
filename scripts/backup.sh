@@ -9,6 +9,7 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 POSTGRES_USER="${POSTGRES_USER:-hostlet}"
 POSTGRES_DB="${POSTGRES_DB:-hostlet}"
 AGENT_VOLUME="${HOSTLET_AGENT_VOLUME:-infra_hostlet-agent}"
+SCREENSHOT_VOLUME="${HOSTLET_SCREENSHOT_VOLUME:-infra_hostlet-screenshots}"
 SCHEDULED="${HOSTLET_BACKUP_SCHEDULED:-false}"
 AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-alpine:3.22}"
 # Explicit env file for compose resolution.  Standalone runs against prod need
@@ -133,18 +134,27 @@ This backup intentionally does not copy .env, because it contains live secrets.
 Store your production .env in a separate password manager or secret store.
 TXT
 
-if docker volume inspect "$AGENT_VOLUME" >/dev/null 2>&1; then
-  docker run --rm \
-    -v "$AGENT_VOLUME:/data:ro" \
-    -v "$BACKUP_DIR:/backup" \
-    "$AGENT_IMAGE" \
-    sh -c "tar -czf /backup/hostlet-agent-state.tar.gz -C /data . && chown -R $(id -u):$(id -g) /backup"
-fi
+archive_volume() {
+  local volume="$1" archive="$2"
+  if docker volume inspect "$volume" >/dev/null 2>&1; then
+    docker run --rm \
+      -v "$volume:/data:ro" \
+      -v "$BACKUP_DIR:/backup" \
+      "$AGENT_IMAGE" \
+      sh -c "tar -czf /backup/$archive -C /data . && chown -R $(id -u):$(id -g) /backup"
+  fi
+}
+
+# Include the two persistent Hostlet state volumes. The screenshot volume is
+# intentionally separate from the agent volume because production Compose
+# mounts it into the API container at /var/lib/hostlet/screenshots.
+archive_volume "$AGENT_VOLUME" hostlet-agent-state.tar.gz
+archive_volume "$SCREENSHOT_VOLUME" hostlet-screenshots-state.tar.gz
 
 # Single source of truth for the manifest fields, rendered into both the plain
 # key=value manifest.txt and the JSON latest.json so the two cannot drift.
-MANIFEST_KEYS=(created_at path compose_file postgres_db postgres_user agent_volume scheduled)
-MANIFEST_VALUES=("$STAMP" "$FINAL_BACKUP_DIR" "$COMPOSE_FILE" "$POSTGRES_DB" "$POSTGRES_USER" "$AGENT_VOLUME" "$SCHEDULED")
+MANIFEST_KEYS=(created_at path compose_file postgres_db postgres_user agent_volume screenshot_volume scheduled)
+MANIFEST_VALUES=("$STAMP" "$FINAL_BACKUP_DIR" "$COMPOSE_FILE" "$POSTGRES_DB" "$POSTGRES_USER" "$AGENT_VOLUME" "$SCREENSHOT_VOLUME" "$SCHEDULED")
 
 # manifest.txt mirrors latest.json minus the redundant "path" (it is the dir itself).
 {

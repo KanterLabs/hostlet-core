@@ -66,6 +66,53 @@ if compgen -G "$BACKUP_ROOT/.hostlet-latest.*" >/dev/null; then
   exit 1
 fi
 
+cat > "$FAKE_BIN/docker" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == compose ]]; then
+  printf '%s\n' '-- PostgreSQL database dump' '-- Hostlet backup self-test'
+  exit 0
+fi
+if [[ "${1:-}" == volume && "${2:-}" == inspect ]]; then
+  [[ "${3:-}" == infra_hostlet-agent || "${3:-}" == infra_hostlet-screenshots ]]
+  exit
+fi
+if [[ "${1:-}" == run ]]; then
+  backup_mount=""
+  args=("$@")
+  for ((index = 1; index < ${#args[@]}; index++)); do
+    if [[ "${args[index]}" == -v && "${args[index + 1]}" == *:/backup ]]; then
+      backup_mount="${args[index + 1]%:/backup}"
+      break
+    fi
+  done
+  [[ -n "$backup_mount" ]] || exit 1
+  if [[ "$*" == *hostlet-agent-state.tar.gz* ]]; then
+    printf '%s\n' agent-state > "$backup_mount/hostlet-agent-state.tar.gz"
+  fi
+  if [[ "$*" == *hostlet-screenshots-state.tar.gz* ]]; then
+    tar -czf "$backup_mount/hostlet-screenshots-state.tar.gz" -C "${HOSTLET_SCREENSHOT_SOURCE:?}" .
+  fi
+  exit 0
+fi
+exit 0
+SHIM
+chmod 700 "$FAKE_BIN/docker"
+screenshot_source="$TMP_DIR/screenshot-source"
+mkdir -m 700 "$screenshot_source"
+printf 'hostlet-screenshot-bytes\0\377\n' > "$screenshot_source/screenshot.webp"
+screenshot_backup_root="$TMP_DIR/screenshot-backups"
+screenshot_backup="$screenshot_backup_root/snapshot"
+HOSTLET_SCREENSHOT_SOURCE="$screenshot_source" PATH="$FAKE_BIN:$PATH" HOSTLET_BACKUP_ROOT="$screenshot_backup_root" \
+  bash "$ROOT_DIR/scripts/backup.sh" "$screenshot_backup" >/dev/null
+[[ -s "$screenshot_backup/hostlet-agent-state.tar.gz" ]]
+[[ -s "$screenshot_backup/hostlet-screenshots-state.tar.gz" ]]
+grep -q '^screenshot_volume=infra_hostlet-screenshots$' "$screenshot_backup/manifest.txt"
+screenshot_archive_extract="$TMP_DIR/screenshot-archive-extract"
+mkdir -m 700 "$screenshot_archive_extract"
+tar -xzf "$screenshot_backup/hostlet-screenshots-state.tar.gz" -C "$screenshot_archive_extract"
+cmp "$screenshot_source/screenshot.webp" "$screenshot_archive_extract/screenshot.webp"
+
 restore_log="$TMP_DIR/restore.log"
 cat > "$FAKE_BIN/docker" <<'SHIM'
 #!/usr/bin/env bash
@@ -110,6 +157,20 @@ if [[ "${HOSTLET_RESTORE_TEST_FAIL:-}" == import && "$*" == *--single-transactio
 fi
 if [[ "${HOSTLET_RESTORE_TEST_FAIL:-}" == archive && "$*" == *"tar -xzf /backup/hostlet-agent-state.tar.gz"* ]]; then
   exit 43
+fi
+if [[ "${1:-}" == run && "$*" == *hostlet-screenshots-state.tar.gz* ]]; then
+  backup_mount=""
+  args=("$@")
+  for ((index = 1; index < ${#args[@]}; index++)); do
+    if [[ "${args[index]}" == -v && "${args[index + 1]}" == *:/backup:ro ]]; then
+      backup_mount="${args[index + 1]%:/backup:ro}"
+      break
+    fi
+  done
+  [[ -n "$backup_mount" && -n "${HOSTLET_SCREENSHOT_RESTORE_DIR:-}" ]] || exit 1
+  rm -rf -- "$HOSTLET_SCREENSHOT_RESTORE_DIR"
+  mkdir -m 700 -p "$HOSTLET_SCREENSHOT_RESTORE_DIR"
+  tar -xzf "$backup_mount/hostlet-screenshots-state.tar.gz" -C "$HOSTLET_SCREENSHOT_RESTORE_DIR"
 fi
 exit 0
 SHIM
@@ -206,6 +267,8 @@ agent_archive_source="$TMP_DIR/agent-state"
 mkdir -m 700 "$agent_archive_source"
 printf '%s\n' restored-agent-state > "$agent_archive_source/state.json"
 tar -czf "$restore_ok/hostlet-agent-state.tar.gz" -C "$agent_archive_source" .
+cp "$screenshot_backup/hostlet-screenshots-state.tar.gz" \
+  "$restore_ok/hostlet-screenshots-state.tar.gz"
 restore_journal="$TMP_DIR/restore-journal"
 : > "$restore_log"
 probe_output="$TMP_DIR/probe-output"
@@ -258,13 +321,19 @@ rm -f "$restore_journal"
 
 : > "$restore_log"
 restore_output="$TMP_DIR/restore-output"
+screenshot_restore_dir="$TMP_DIR/screenshot-restored"
+mkdir -m 700 "$screenshot_restore_dir"
+[[ -z "$(find "$screenshot_restore_dir" -mindepth 1 -print -quit)" ]]
 PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$restore_log" \
+  HOSTLET_SCREENSHOT_RESTORE_DIR="$screenshot_restore_dir" \
   HOSTLET_RESTORE_TEST_RUNNING=api,local-agent,caddy \
   HOSTLET_RESTORE_JOURNAL="$restore_journal" \
   bash "$ROOT_DIR/scripts/restore.sh" "$restore_ok" > "$restore_output"
 grep -q 'Restore complete\.' "$restore_output"
 grep -q 'stop .*api web local-agent caddy' "$restore_log"
 grep -q 'start api local-agent caddy' "$restore_log"
+grep -q 'infra_hostlet-screenshots:/data' "$restore_log"
+cmp "$screenshot_source/screenshot.webp" "$screenshot_restore_dir/screenshot.webp"
 [[ ! -e "$restore_journal" ]]
 
 echo "backup destination protection self-test passed"
