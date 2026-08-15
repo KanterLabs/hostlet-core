@@ -146,6 +146,17 @@ async fn enqueue_build(
         object.remove("artifact_registry");
     }
     let mut tx = state.db.begin().await?;
+    // Pause is a durable admission fence.  Recheck it while holding the app
+    // row lock immediately before creating the build job so a pause racing the
+    // deployment request cannot leave build work queued for a suspended app.
+    let app_suspended: bool = sqlx::query_scalar(
+        "SELECT suspended_at IS NOT NULL FROM apps WHERE id=$1 FOR UPDATE",
+    )
+    .bind(app_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    anyhow::ensure!(!app_suspended, "app is paused; build is not permitted");
+    locks::deployment(&mut tx, deployment_id, app_id).await?;
     let build_id: Uuid = sqlx::query_scalar(
         "INSERT INTO deployment_builds
            (deployment_id,build_pool_id,status,required_platform,build_spec_json,waiting_reason)

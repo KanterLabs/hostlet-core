@@ -1,8 +1,14 @@
+mod agent_jobs;
 mod deploy_app;
 mod recovery;
+#[cfg(test)]
+pub(crate) use agent_jobs::required_protocol_version;
+pub(crate) use agent_jobs::{
+    insert_agent_job_in_transaction, job_signing_secret_for_server, send_job,
+};
 pub(crate) use recovery::*;
 
-use crate::{auth::request_context, state::AppState};
+use crate::{agent::locks, auth::request_context, state::AppState};
 use anyhow::Context;
 use axum::{
     extract::{
@@ -431,6 +437,20 @@ pub async fn create_and_send_deploy_with_approval(
         github_token.as_deref(),
     )
     .await?;
+    // Hold the app row across the final pause check and deployment insert. The
+    // later build enqueue repeats this fence, so a pause can only win before
+    // durable lifecycle work is admitted.
+    let mut insertion_tx = state.db.begin().await?;
+    locks::app(&mut insertion_tx, app_id).await?;
+    let still_suspended: bool =
+        sqlx::query_scalar("SELECT suspended_at IS NOT NULL FROM apps WHERE id=$1")
+            .bind(app_id)
+            .fetch_one(&mut *insertion_tx)
+            .await?;
+    anyhow::ensure!(
+        !still_suspended,
+        "this app is paused; resume it before starting a deployment"
+    );
     let insert_deployment = sqlx::query(
         "INSERT INTO deployments
            (app_id,server_id,status,commit_sha,started_at,runtime_kind,expected_current_deployment_id) \
@@ -441,7 +461,7 @@ pub async fn create_and_send_deploy_with_approval(
     .bind(server_id)
     .bind(&commit_sha)
     .bind(&app.runtime_kind)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *insertion_tx)
     .await;
     let deployment_id: Uuid = match insert_deployment {
         Ok(row) => row.get("id"),
@@ -450,6 +470,7 @@ pub async fn create_and_send_deploy_with_approval(
         }
         Err(err) => return Err(err.into()),
     };
+    insertion_tx.commit().await?;
     // Everything from here to just before the audit event is wrapped so that any
     // error marks the newly-created row 'failed' before propagating — preventing
     // it from sitting in 'queued' and blocking the next deploy for 30 minutes.
@@ -567,13 +588,19 @@ pub(crate) async fn create_and_send_rollback(
 ) -> anyhow::Result<Uuid> {
     ensure_no_active_deployment(state, app_id).await?;
     let app = sqlx::query(
-        "SELECT server_id,current_deployment_id,domain,container_port,health_path,runtime_kind \
+        "SELECT server_id,current_deployment_id,domain,container_port,health_path,runtime_kind,\
+                suspended_at \
          FROM apps WHERE id=$1 AND user_id=$2",
     )
     .bind(app_id)
     .bind(user_id)
     .fetch_one(&state.db)
     .await?;
+    anyhow::ensure!(
+        app.get::<Option<chrono::DateTime<chrono::Utc>>, _>("suspended_at")
+            .is_none(),
+        "this app is paused; resume it before starting a rollback"
+    );
     if !rollback_supported_for_runtime(&app.get::<String, _>("runtime_kind")) {
         anyhow::bail!("rollback is not supported for this runtime");
     }
@@ -618,6 +645,20 @@ pub(crate) async fn create_and_send_rollback(
     }))
     .collect::<Vec<_>>();
     let server_id: Uuid = app.get("server_id");
+    // Recheck suspension while holding the app row immediately before the
+    // rollback row is inserted. `enqueue_agent_job` takes the same lock before
+    // creating the claimable rollback job, closing the pause/enqueue window.
+    let mut insertion_tx = state.db.begin().await?;
+    locks::app(&mut insertion_tx, app_id).await?;
+    let still_suspended: bool =
+        sqlx::query_scalar("SELECT suspended_at IS NOT NULL FROM apps WHERE id=$1")
+            .bind(app_id)
+            .fetch_one(&mut *insertion_tx)
+            .await?;
+    anyhow::ensure!(
+        !still_suspended,
+        "this app is paused; resume it before starting a rollback"
+    );
     let insert_rollback = sqlx::query(
         "INSERT INTO deployments \
          (app_id,server_id,status,commit_sha,started_at,image_tag,container_name,
@@ -631,7 +672,7 @@ pub(crate) async fn create_and_send_rollback(
     .bind(prev.get::<Option<String>, _>("compose_project"))
     .bind(app.get::<String, _>("runtime_kind"))
     .bind(current)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *insertion_tx)
     .await;
     let rollback_id: Uuid = match insert_rollback {
         Ok(row) => row.get("id"),
@@ -640,6 +681,7 @@ pub(crate) async fn create_and_send_rollback(
         }
         Err(err) => return Err(err.into()),
     };
+    insertion_tx.commit().await?;
     // Same guard as create_and_send_deploy: wrap the section after the INSERT so
     // any error marks the row 'failed' rather than leaving it 'queued' forever.
     let result: anyhow::Result<()> = async {
@@ -715,71 +757,6 @@ pub(crate) async fn create_and_send_rollback(
     Ok(rollback_id)
 }
 
-async fn send_job(
-    state: &AppState,
-    server_id: Uuid,
-    deployment_id: Uuid,
-    payload: serde_json::Value,
-) -> anyhow::Result<()> {
-    let job_type = payload
-        .get("type")
-        .and_then(|value| value.as_str())
-        .unwrap_or("deployment")
-        .to_string();
-    let app_id = payload
-        .get("app_id")
-        .and_then(|value| value.as_str())
-        .and_then(|value| Uuid::parse_str(value).ok());
-    let required_protocol = required_protocol_version(&job_type, &payload);
-    if required_protocol >= 3 {
-        let advertised: Option<i32> =
-            sqlx::query_scalar("SELECT agent_protocol_version FROM servers WHERE id=$1")
-                .bind(server_id)
-                .fetch_optional(&state.db)
-                .await?;
-        if advertised.unwrap_or(1) < required_protocol {
-            anyhow::bail!(
-                "agent_upgrade_required: this inferred topology requires Hostlet agent protocol v{required_protocol}"
-            );
-        }
-    }
-    let job_id = enqueue_agent_job(
-        state,
-        server_id,
-        app_id,
-        Some(deployment_id),
-        &job_type,
-        payload,
-        10,
-    )
-    .await?;
-    if let Some(app_id) = app_id {
-        record_audit_event(
-            state,
-            &format!("{job_type}_job_queued"),
-            Uuid::nil(),
-            app_id,
-            Some(deployment_id),
-            Some(job_id),
-        )
-        .await;
-    }
-    let waiting_for_capacity: bool = sqlx::query_scalar(
-        "SELECT COALESCE(payload_json->>'capacity_wait'='true',false)
-         FROM agent_jobs WHERE id=$1",
-    )
-    .bind(job_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(false);
-    // Best-effort: advance 'queued' → 'running' only once the capacity
-    // scheduler has made the job claimable.
-    if !waiting_for_capacity {
-        mark_deployment_running(state, deployment_id).await;
-    }
-    Ok(())
-}
-
 async fn record_audit_event(
     state: &AppState,
     event_type: &str,
@@ -817,6 +794,58 @@ pub async fn enqueue_agent_job(
     priority: i32,
 ) -> anyhow::Result<Uuid> {
     let mut transaction = state.db.begin().await?;
+    let queue_priority_offset = match app_id {
+        Some(app_id) => {
+            // Canonical lifecycle lock order is app -> deployment -> job ->
+            // server. Lock the app and deployment before capacity admission;
+            // this prevents a server -> app inversion with suspension.
+            locks::app(&mut transaction, app_id).await?;
+            if let Some(deployment_id) = deployment_id {
+                locks::deployment(&mut transaction, deployment_id, app_id).await?;
+            }
+            let app = sqlx::query(
+                "SELECT queue_priority_offset,suspended_at IS NOT NULL AS suspended
+                 FROM apps WHERE id=$1",
+            )
+            .bind(app_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
+            if matches!(job_type, "deploy" | "rollback" | "build" | "release") {
+                anyhow::ensure!(
+                    !app.get::<bool, _>("suspended"),
+                    "this app is paused; resume it before queueing lifecycle work"
+                );
+            }
+            let offset = app.get::<i32, _>("queue_priority_offset");
+            if job_type != "delete_app" {
+                let deletion_fenced = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                       SELECT 1
+                       FROM agent_jobs
+                       WHERE app_id=$1
+                         AND job_type='delete_app'
+                         AND (
+                           status IN ('queued','claimed','running','success')
+                           OR payload_json->>'teardown_fence'='true'
+                         )
+                     )",
+                )
+                .bind(app_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+                anyhow::ensure!(!deletion_fenced, "app deletion is in progress");
+            }
+            offset
+        }
+        None => {
+            anyhow::ensure!(
+                job_type == "docker_cleanup",
+                "app-bound agent job is missing its app"
+            );
+            0
+        }
+    };
     let capacity_decision = if matches!(job_type, "deploy" | "rollback") {
         let app_id =
             app_id.ok_or_else(|| anyhow::anyhow!("capacity-managed job is missing its app"))?;
@@ -847,47 +876,6 @@ pub async fn enqueue_agent_job(
             None => {}
         }
     }
-    let queue_priority_offset = match app_id {
-        Some(app_id) => {
-            // Ordinary app-bound enqueues share this row lock. App teardown
-            // takes FOR UPDATE, so a racing enqueue either commits before the
-            // teardown fence (and is cancelled by it) or observes the durable
-            // delete marker after the fence commits.
-            let offset = sqlx::query_scalar::<_, i32>(
-                "SELECT queue_priority_offset FROM apps WHERE id=$1 FOR KEY SHARE",
-            )
-            .bind(app_id)
-            .fetch_optional(&mut *transaction)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
-            if job_type != "delete_app" {
-                let deletion_fenced = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(
-                       SELECT 1
-                       FROM agent_jobs
-                       WHERE app_id=$1
-                         AND job_type='delete_app'
-                         AND (
-                           status IN ('queued','claimed','running','success')
-                           OR payload_json->>'teardown_fence'='true'
-                         )
-                     )",
-                )
-                .bind(app_id)
-                .fetch_one(&mut *transaction)
-                .await?;
-                anyhow::ensure!(!deletion_fenced, "app deletion is in progress");
-            }
-            offset
-        }
-        None => {
-            anyhow::ensure!(
-                job_type == "docker_cleanup",
-                "app-bound agent job is missing its app"
-            );
-            0
-        }
-    };
     let id = insert_agent_job_in_transaction(
         &mut transaction,
         server_id,
@@ -913,78 +901,6 @@ pub async fn enqueue_agent_job(
     }
     transaction.commit().await?;
     Ok(id)
-}
-
-pub(crate) async fn insert_agent_job_in_transaction(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    server_id: Uuid,
-    app_id: Option<Uuid>,
-    deployment_id: Option<Uuid>,
-    job_type: &str,
-    payload: serde_json::Value,
-    priority: i32,
-) -> anyhow::Result<Uuid> {
-    let protocol_version = required_protocol_version(job_type, &payload);
-    let id = sqlx::query(
-        "INSERT INTO agent_jobs
-           (server_id,app_id,deployment_id,job_type,status,payload_json,priority,protocol_version)
-         VALUES ($1,$2,$3,$4,'queued',$5,$6,$7)
-         RETURNING id",
-    )
-    .bind(server_id)
-    .bind(app_id)
-    .bind(deployment_id)
-    .bind(job_type)
-    .bind(payload)
-    .bind(priority)
-    .bind(protocol_version)
-    .fetch_one(&mut **transaction)
-    .await?
-    .get::<Uuid, _>("id");
-    Ok(id)
-}
-
-fn required_protocol_version(job_type: &str, payload: &serde_json::Value) -> i32 {
-    match job_type {
-        "build" | "release" => 6,
-        "suspend_app" | "resume_app" | "stop_previous_deployment" => 4,
-        "deploy"
-            if payload
-                .pointer("/runtime_config/generatedTopology")
-                .is_some() =>
-        {
-            3
-        }
-        "rollback"
-            if payload
-                .pointer("/target_runtime_metadata/inferenceReceipt/schemaVersion")
-                .is_some()
-                || payload
-                    .pointer("/target_runtime_metadata/runtime")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("generated_topology") =>
-        {
-            3
-        }
-        "deploy" | "rollback" => 2,
-        _ => 1,
-    }
-}
-
-pub async fn job_signing_secret_for_server(
-    state: &AppState,
-    server_id: Uuid,
-) -> anyhow::Result<String> {
-    let encrypted: Option<String> =
-        sqlx::query_scalar("SELECT job_signing_secret_ciphertext FROM servers WHERE id=$1")
-            .bind(server_id)
-            .fetch_optional(&state.db)
-            .await?
-            .flatten();
-    match encrypted {
-        Some(value) => state.crypto.decrypt(&value),
-        None => Ok(state.job_signing_secret.clone()),
-    }
 }
 
 include!("deploy/helpers.rs");

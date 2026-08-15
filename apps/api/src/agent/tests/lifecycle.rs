@@ -142,6 +142,11 @@ async fn db_complete_job_scrubs_payload_secrets() {
     .await;
 
     claim_only_queued_job(&state).await;
+    let claim_token: Uuid = sqlx::query_scalar("SELECT claim_token FROM agent_jobs WHERE id=$1")
+        .bind(job_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     let headers = agent_headers(&state, TEST_SERVER_ID);
     let status = complete_job_status(
         &state,
@@ -151,7 +156,7 @@ async fn db_complete_job_scrubs_payload_secrets() {
             status: "success".into(),
             failure: None,
             result: None,
-            claim_token: None,
+            claim_token: Some(claim_token),
         },
     )
     .await;
@@ -229,6 +234,11 @@ async fn db_ws_job_status_cannot_resurrect_terminal_job() {
     .await;
 
     claim_only_queued_job(&state).await;
+    let claim_token: Uuid = sqlx::query_scalar("SELECT claim_token FROM agent_jobs WHERE id=$1")
+        .bind(job_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     let headers = agent_headers(&state, TEST_SERVER_ID);
     let status = complete_job_status(
         &state,
@@ -238,7 +248,7 @@ async fn db_ws_job_status_cannot_resurrect_terminal_job() {
             status: "success".into(),
             failure: None,
             result: None,
-            claim_token: None,
+            claim_token: Some(claim_token),
         },
     )
     .await;
