@@ -43,6 +43,24 @@ async fn topology_inventory_is_scoped_to_the_validated_project_root() {
     tokio::fs::remove_dir_all(checkout).await.unwrap();
 }
 
+#[tokio::test]
+async fn topology_inventory_rejects_url_delimiters_in_relevant_paths() {
+    let checkout = temp_checkout("url-delimiters");
+    tokio::fs::create_dir_all(checkout.join("src"))
+        .await
+        .unwrap();
+    for filename in ["app?.js", "app#.js"] {
+        tokio::fs::write(checkout.join("src").join(filename), "console.log(1);")
+            .await
+            .unwrap();
+    }
+
+    let inventory = checkout_inventory(&checkout).await.unwrap();
+    assert!(inventory.files.is_empty());
+
+    tokio::fs::remove_dir_all(checkout).await.unwrap();
+}
+
 #[test]
 fn semver_proof_accepts_patchwork_metadata_only_change() {
     assert!(resolved_satisfies("^1.61.1", "1.61.1"));

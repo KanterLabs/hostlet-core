@@ -1,8 +1,8 @@
 pub(super) use hostlet_contracts::{
-    compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
-    infer_dockerfile, infer_package_json, infer_service_addons, manifest_dependency_tokens,
-    node_inspection, package_json_dependencies, railpack_inspection, unknown_inspection,
-    with_detected_services, DetectedServices,
+    compose_inspection, compose_rejection_inspection, dockerfile_inspection, gitea_inspection,
+    infer_addons_from_compose, infer_dockerfile, infer_package_json, infer_service_addons,
+    manifest_dependency_tokens, node_inspection, package_json_dependencies, railpack_inspection,
+    unknown_inspection, with_detected_services, DetectedServices,
 };
 
 #[cfg(test)]
