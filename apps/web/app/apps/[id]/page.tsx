@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatTimestamp } from "@/lib/time";
+import { useUnsavedChanges } from "@/lib/useUnsavedChanges";
 import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 import { webhookReadiness } from "@/lib/webhooks";
 import {
@@ -62,7 +63,7 @@ import {
   shortSha,
   webhookSummary,
 } from "./appDetailHelpers";
-import { emptySettings } from "./appDetail.types";
+import { emptySettings, settingsEqual, settingsFromApp } from "./appDetail.types";
 import type {
   App,
   AppScreenshot,
@@ -88,6 +89,11 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
   const [newEnv, setNewEnv] = useState({ key: "", value: "" });
   const [resourceMessage, setResourceMessage] = useState("Waiting for a successful deploy.");
   const [buildPools, setBuildPools] = useState<Array<{ id: string; name: string; enabled: boolean; qualificationStatus: string }>>([]);
+  const settingsDirty = !!app && !settingsEqual(settings, settingsFromApp(app));
+  const confirmNavigation = useUnsavedChanges(settingsDirty);
+  const discardSettings = useCallback(() => {
+    if (app) setSettings(settingsFromApp(app));
+  }, [app]);
 
   const refreshScreenshot = useCallback(async () => {
     try {
@@ -102,6 +108,7 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
 
   const {
     message,
+    setMessage,
     healthMessage,
     setHealthMessage,
     busyAction,
@@ -132,11 +139,13 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
     setEnvValues,
     setNewEnv,
     refreshScreenshot,
+    settingsDirty,
+    confirmNavigation,
   });
 
   useEffect(() => {
     let active = true;
-    refreshApp();
+    refreshApp({ syncSettings: true });
     refreshScreenshot();
     api<Array<{ key: string }>>(`/api/apps/${id}/env`)
       .then((keys) => { if (active) setEnvKeys(keys); })
@@ -441,16 +450,27 @@ export default function AppDetail({ params }: { params: Promise<{ id: string }> 
                   <SelectField
                     label="Build pool"
                     value={app?.buildPoolId || ""}
+                    disabled={!!busyAction}
                     onChange={async (value) => {
-                      await api(`/api/apps/${id}/build-pool`, { method: "PUT", body: JSON.stringify({ buildPoolId: value || null }) });
-                      await refreshApp();
+                      const draftWasDirty = settingsDirty;
+                      try {
+                        await api(`/api/apps/${id}/build-pool`, { method: "PUT", body: JSON.stringify({ buildPoolId: value || null }) });
+                        await refreshApp();
+                        setMessage(`Build pool updated.${draftWasDirty ? " Unsaved settings remain in this form and were not included." : ""}`);
+                      } catch (error) {
+                        setMessage(`Build pool update failed. ${error instanceof Error ? error.message : ""}`);
+                      }
                     }}
                   >
                     <option value="">Default build pool</option>
                     {buildPools.filter((pool) => pool.enabled && pool.qualificationStatus !== "pending" && pool.qualificationStatus !== "failed").map((pool) => <option key={pool.id} value={pool.id}>{pool.name}</option>)}
                   </SelectField>
                 </div>
-                <button className="button mt-4" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button className="button" disabled={!!busyAction} onClick={saveSettings}><Save size={16} />{busyAction === "settings" ? "Saving..." : "Save settings"}</button>
+                  {settingsDirty && <button className="button-secondary" disabled={!!busyAction} onClick={discardSettings}>Discard changes</button>}
+                </div>
+                {settingsDirty && <p className="mt-2 text-sm text-amber-800" role="status">Unsaved settings are not included in deploys or auxiliary app actions.</p>}
               </Panel>
             </div>
 
