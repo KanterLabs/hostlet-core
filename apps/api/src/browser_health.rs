@@ -4,6 +4,28 @@ use uuid::Uuid;
 
 pub const BROWSER_SMOKE_JOB: &str = "browser_smoke";
 
+/// Clear health state when a deployment becomes the app's active runtime.
+///
+/// Snapshots are keyed by app for the API's fast current-state reads, so an
+/// activation must not leave the previous deployment's probe result attached
+/// to the app while the new runtime is waiting for its first report. Browser
+/// state is reset at the same boundary for the same reason. Historical health
+/// events remain available and retain their deployment ids.
+pub async fn reset_for_activation(
+    tx: &mut Transaction<'_, Postgres>,
+    app_id: Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM app_health_snapshots WHERE app_id=$1")
+        .bind(app_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM app_browser_health WHERE app_id=$1")
+        .bind(app_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 pub fn combined_status(http_status: &str, browser_status: Option<&str>) -> String {
     match http_status {
         "unhealthy" => "unhealthy".to_string(),
@@ -32,21 +54,34 @@ pub async fn mark_pending(
     app_id: Uuid,
     deployment_id: Uuid,
 ) -> anyhow::Result<()> {
+    let mut tx = db.begin().await?;
+    let current_deployment_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT current_deployment_id
+         FROM apps
+         WHERE id=$1 AND public_exposure=true
+         FOR UPDATE",
+    )
+    .bind(app_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current_deployment_id != Some(Some(deployment_id)) {
+        tx.commit().await?;
+        return Ok(());
+    }
     sqlx::query(
-        "INSERT INTO app_browser_health (app_id,deployment_id,status,failure,checked_at,updated_at)
-         SELECT $1,$2,'pending',NULL,NULL,now()
-         WHERE EXISTS (
-           SELECT 1 FROM apps
-           WHERE id=$1 AND current_deployment_id=$2 AND public_exposure=true
-         )
+        "INSERT INTO app_browser_health
+           (app_id,deployment_id,status,failure,checked_at,updated_at)
+         VALUES ($1,$2,'pending',NULL,NULL,now())
          ON CONFLICT (app_id) DO UPDATE SET
            deployment_id=EXCLUDED.deployment_id,status='pending',failure=NULL,
-           checked_at=NULL,updated_at=now()",
+           checked_at=NULL,updated_at=now()
+         WHERE app_browser_health.deployment_id=EXCLUDED.deployment_id",
     )
     .bind(app_id)
     .bind(deployment_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -74,10 +109,19 @@ pub async fn record_job_result(
     } else {
         None
     };
+    let current_deployment_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT current_deployment_id FROM apps WHERE id=$1 FOR UPDATE",
+    )
+    .bind(app_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if current_deployment_id != Some(Some(deployment_id)) {
+        return Ok(());
+    }
     sqlx::query(
-        "INSERT INTO app_browser_health (app_id,deployment_id,status,failure,checked_at,updated_at)
-         SELECT $1,$2,$3,$4,now(),now()
-         WHERE EXISTS (SELECT 1 FROM apps WHERE id=$1 AND current_deployment_id=$2)
+        "INSERT INTO app_browser_health
+           (app_id,deployment_id,status,failure,checked_at,updated_at)
+         VALUES ($1,$2,$3,$4,now(),now())
          ON CONFLICT (app_id) DO UPDATE SET
            deployment_id=EXCLUDED.deployment_id,status=EXCLUDED.status,
            failure=EXCLUDED.failure,checked_at=EXCLUDED.checked_at,updated_at=now()

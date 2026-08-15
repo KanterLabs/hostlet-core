@@ -233,11 +233,41 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
         }
     }
     if matches!(status.as_str(), "success" | "rolled_back") && updated == 1 {
-        let _ = sqlx::query("UPDATE apps SET current_deployment_id=$1, domain=COALESCE($2, domain) WHERE id=(SELECT app_id FROM deployments WHERE id=$1)")
+        // Switch the app and clear app-keyed health state in one transaction.
+        // The app-row lock prevents a health event from being accepted between
+        // the deployment switch and the reset.
+        let activated = async {
+            let mut tx = state.db.begin().await?;
+            let Some(app_id) = sqlx::query_scalar::<_, Uuid>(
+                "SELECT app_id FROM deployments WHERE id=$1 AND server_id=$2",
+            )
+            .bind(id)
+            .bind(server_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            else {
+                anyhow::bail!("deployment disappeared during activation");
+            };
+            crate::agent::locks::app(&mut tx, app_id).await?;
+            crate::agent::locks::deployment(&mut tx, id, app_id).await?;
+            sqlx::query(
+                "UPDATE apps
+                 SET current_deployment_id=$1,domain=COALESCE($2,domain)
+                 WHERE id=$3",
+            )
             .bind(id)
             .bind(msg.get("local_url").and_then(|v| v.as_str()))
-            .execute(&state.db)
-            .await;
+            .bind(app_id)
+            .execute(&mut *tx)
+            .await?;
+            crate::browser_health::reset_for_activation(&mut tx, app_id).await?;
+            tx.commit().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if activated.is_err() {
+            return;
+        }
         if let Err(err) =
             crate::screenshots::enqueue_auto_screenshot_for_deployment(state, id).await
         {

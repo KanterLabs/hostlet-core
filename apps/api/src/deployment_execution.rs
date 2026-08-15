@@ -409,6 +409,12 @@ pub async fn commit_activation(
         Ok(_) => return (StatusCode::CONFLICT, "pending activation changed").into_response(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+    if crate::browser_health::reset_for_activation(&mut tx, app_id)
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     let deployment_updated = sqlx::query(
         "UPDATE deployments SET status=$2,failure_summary=NULL,failure_code=NULL,
                 runtime_metadata=COALESCE($3,runtime_metadata),
