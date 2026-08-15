@@ -66,4 +66,120 @@ if compgen -G "$BACKUP_ROOT/.hostlet-latest.*" >/dev/null; then
   exit 1
 fi
 
+restore_log="$TMP_DIR/restore.log"
+cat > "$FAKE_BIN/docker" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${HOSTLET_RESTORE_TEST_LOG:?}"
+db_state="${HOSTLET_RESTORE_TEST_DATABASES:-}"
+create_pattern='CREATE DATABASE "([^"]+)"'
+drop_pattern='DROP DATABASE IF EXISTS "([^"]+)"'
+if [[ -n "$db_state" && "$*" =~ $create_pattern ]]; then
+  printf '%s\n' "${BASH_REMATCH[1]}" >> "$db_state"
+  exit 0
+fi
+if [[ -n "$db_state" && "$*" =~ $drop_pattern ]]; then
+  if [[ "${HOSTLET_RESTORE_TEST_FAIL_DROP_ONCE:-}" == yes && ! -e "${HOSTLET_RESTORE_TEST_DROP_MARKER:?}" ]]; then
+    : > "$HOSTLET_RESTORE_TEST_DROP_MARKER"
+    exit 46
+  fi
+  db_name="${BASH_REMATCH[1]}"
+  db_state_tmp="${db_state}.tmp"
+  awk -v target="$db_name" '$0 != target' "$db_state" > "$db_state_tmp"
+  mv -T "$db_state_tmp" "$db_state"
+  exit 0
+fi
+if [[ "$*" == *restore_validation_* && "$*" == *--single-transaction* ]]; then
+  semantic_sql="$(cat)"
+  if grep -Eq '(^|[[:space:]])SELEKT([[:space:]]|$)' <<< "$semantic_sql"; then
+    exit 42
+  fi
+fi
+exit 0
+SHIM
+chmod 700 "$FAKE_BIN/docker"
+
+assert_restore_rejected() {
+  local name="$1"
+  : > "$restore_log"
+  if PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$restore_log" \
+    bash "$ROOT_DIR/scripts/restore.sh" "$TMP_DIR/restore-$name" >/dev/null 2>&1; then
+    echo "restore unexpectedly accepted $name" >&2
+    exit 1
+  fi
+  [[ ! -s "$restore_log" ]] || {
+    echo "restore touched Docker before rejecting $name" >&2
+    exit 1
+  }
+}
+
+for name in empty header-only statement-boundary-truncated mid-statement-truncated; do
+  mkdir -m 700 "$TMP_DIR/restore-$name"
+done
+touch "$TMP_DIR/restore-empty/postgres.sql"
+printf '%s\n' '-- PostgreSQL database dump' > "$TMP_DIR/restore-header-only/postgres.sql"
+printf '%s\n' '-- PostgreSQL database dump' 'CREATE TABLE sample (id integer);' \
+  > "$TMP_DIR/restore-statement-boundary-truncated/postgres.sql"
+printf '%s\n' '-- PostgreSQL database dump' 'CREATE TABLE sample (id integer' \
+  > "$TMP_DIR/restore-mid-statement-truncated/postgres.sql"
+for name in empty header-only statement-boundary-truncated mid-statement-truncated; do
+  assert_restore_rejected "$name"
+done
+
+mkdir -m 700 "$TMP_DIR/restore-invalid-sql"
+printf '%s\n' '-- PostgreSQL database dump' 'SELEKT invalid SQL;' \
+  '-- PostgreSQL database dump complete' > "$TMP_DIR/restore-invalid-sql/postgres.sql"
+semantic_state="$TMP_DIR/semantic-databases"
+: > "$semantic_state"
+: > "$restore_log"
+if PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$restore_log" \
+  HOSTLET_RESTORE_TEST_DATABASES="$semantic_state" bash "$ROOT_DIR/scripts/restore.sh" \
+  "$TMP_DIR/restore-invalid-sql" >/dev/null 2>&1; then
+  echo "restore unexpectedly accepted semantically invalid SQL" >&2
+  exit 1
+fi
+grep -q 'CREATE DATABASE "hostlet_restore_validation_' "$restore_log"
+grep -q 'DROP DATABASE IF EXISTS "hostlet_restore_validation_' "$restore_log"
+! grep -q 'DROP SCHEMA public CASCADE' "$restore_log"
+! grep -q '^volume create ' "$restore_log"
+[[ ! -s "$semantic_state" ]]
+
+mkdir -m 700 "$TMP_DIR/restore-corrupt-archive"
+printf '%s\n' '-- PostgreSQL database dump' 'SET client_encoding = '\''UTF8'\'';' \
+  '-- PostgreSQL database dump complete' > "$TMP_DIR/restore-corrupt-archive/postgres.sql"
+printf '%s\n' 'not a gzip archive' > "$TMP_DIR/restore-corrupt-archive/hostlet-agent-state.tar.gz"
+assert_restore_rejected corrupt-archive
+
+mkdir -m 700 "$TMP_DIR/restore-truncated-gzip"
+printf '%s\n' '-- PostgreSQL database dump' 'SET client_encoding = '\''UTF8'\'';' \
+  '-- PostgreSQL database dump complete' > "$TMP_DIR/restore-truncated-gzip/postgres.sql"
+archive_source="$TMP_DIR/archive-source"
+mkdir -m 700 "$archive_source"
+printf '%s\n' archive-member > "$archive_source/state.txt"
+valid_archive="$TMP_DIR/valid-state.tar.gz"
+tar -czf "$valid_archive" -C "$archive_source" .
+archive_bytes="$(wc -c < "$valid_archive")"
+dd if="$valid_archive" of="$TMP_DIR/restore-truncated-gzip/hostlet-agent-state.tar.gz" \
+  bs=1 count=$((archive_bytes / 2)) status=none
+assert_restore_rejected truncated-gzip
+
+cleanup_restore="$TMP_DIR/restore-cleanup-retry"
+mkdir -m 700 "$cleanup_restore"
+printf '%s\n' '-- PostgreSQL database dump' 'SET client_encoding = '\''UTF8'\'';' \
+  '-- PostgreSQL database dump complete' > "$cleanup_restore/postgres.sql"
+cleanup_state="$TMP_DIR/cleanup-databases"
+cleanup_marker="$TMP_DIR/cleanup-drop-once"
+cleanup_log="$TMP_DIR/cleanup.log"
+cleanup_output="$TMP_DIR/cleanup-output"
+: > "$cleanup_state"
+: > "$cleanup_log"
+PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$cleanup_log" \
+  HOSTLET_RESTORE_TEST_DATABASES="$cleanup_state" HOSTLET_RESTORE_TEST_FAIL_DROP_ONCE=yes \
+  HOSTLET_RESTORE_TEST_DROP_MARKER="$cleanup_marker" \
+  bash "$ROOT_DIR/scripts/restore.sh" "$cleanup_restore" > "$cleanup_output"
+grep -q 'Restore complete\.' "$cleanup_output"
+[[ -e "$cleanup_marker" ]]
+[[ ! -s "$cleanup_state" ]]
+[[ "$(grep -c 'DROP DATABASE IF EXISTS "hostlet_restore_validation_' "$cleanup_log")" -eq 2 ]]
+
 echo "backup destination protection self-test passed"
