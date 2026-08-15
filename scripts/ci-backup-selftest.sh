@@ -95,6 +95,22 @@ if [[ "$*" == *restore_validation_* && "$*" == *--single-transaction* ]]; then
     exit 42
   fi
 fi
+if [[ "$*" == *"ps --status running --services"* ]]; then
+  if [[ "${HOSTLET_RESTORE_TEST_FAIL:-}" == probe ]]; then
+    exit 45
+  fi
+  service="${*: -1}"
+  case ",${HOSTLET_RESTORE_TEST_RUNNING:-}," in
+    *,"$service",*) printf '%s\n' "$service" ;;
+  esac
+  exit 0
+fi
+if [[ "${HOSTLET_RESTORE_TEST_FAIL:-}" == import && "$*" == *--single-transaction* && "$*" != *restore_validation_* ]]; then
+  exit 42
+fi
+if [[ "${HOSTLET_RESTORE_TEST_FAIL:-}" == archive && "$*" == *"tar -xzf /backup/hostlet-agent-state.tar.gz"* ]]; then
+  exit 43
+fi
 exit 0
 SHIM
 chmod 700 "$FAKE_BIN/docker"
@@ -181,5 +197,74 @@ grep -q 'Restore complete\.' "$cleanup_output"
 [[ -e "$cleanup_marker" ]]
 [[ ! -s "$cleanup_state" ]]
 [[ "$(grep -c 'DROP DATABASE IF EXISTS "hostlet_restore_validation_' "$cleanup_log")" -eq 2 ]]
+
+restore_ok="$TMP_DIR/restore-valid"
+mkdir -m 700 "$restore_ok"
+printf '%s\n' '-- PostgreSQL database dump' 'SET client_encoding = '\''UTF8'\'';' \
+  '-- PostgreSQL database dump complete' > "$restore_ok/postgres.sql"
+agent_archive_source="$TMP_DIR/agent-state"
+mkdir -m 700 "$agent_archive_source"
+printf '%s\n' restored-agent-state > "$agent_archive_source/state.json"
+tar -czf "$restore_ok/hostlet-agent-state.tar.gz" -C "$agent_archive_source" .
+restore_journal="$TMP_DIR/restore-journal"
+: > "$restore_log"
+probe_output="$TMP_DIR/probe-output"
+if PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$restore_log" \
+  HOSTLET_RESTORE_TEST_FAIL=probe HOSTLET_RESTORE_TEST_RUNNING=api,local-agent,caddy \
+  HOSTLET_RESTORE_JOURNAL="$restore_journal" \
+  bash "$ROOT_DIR/scripts/restore.sh" "$restore_ok" > "$probe_output" 2>&1; then
+  echo "restore unexpectedly proceeded after writer-state probe failure" >&2
+  exit 1
+fi
+grep -q "Unable to determine whether writer service 'api' is running" "$probe_output"
+! grep -q ' stop -t ' "$restore_log"
+! grep -q 'DROP SCHEMA public CASCADE' "$restore_log"
+! grep -q '^volume create ' "$restore_log"
+[[ ! -e "$restore_journal" ]]
+
+: > "$restore_log"
+if PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$restore_log" \
+  HOSTLET_RESTORE_TEST_FAIL=import HOSTLET_RESTORE_TEST_RUNNING=api,local-agent,caddy \
+  HOSTLET_RESTORE_JOURNAL="$restore_journal" \
+  bash "$ROOT_DIR/scripts/restore.sh" "$restore_ok" >/dev/null 2>&1; then
+  echo "restore unexpectedly succeeded after import failure" >&2
+  exit 1
+fi
+grep -q 'stop .*api web local-agent caddy' "$restore_log"
+grep -q 'start api local-agent caddy' "$restore_log"
+! grep -q 'start api web local-agent caddy' "$restore_log"
+grep -q '^phase=failed$' "$restore_journal"
+grep -q '^services=services-restarted$' "$restore_journal"
+rm -f "$restore_journal"
+
+: > "$restore_log"
+archive_output="$TMP_DIR/archive-restore-output"
+if PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$restore_log" \
+  HOSTLET_RESTORE_TEST_FAIL=archive HOSTLET_RESTORE_TEST_RUNNING=api,local-agent,caddy \
+  HOSTLET_RESTORE_JOURNAL="$restore_journal" \
+  bash "$ROOT_DIR/scripts/restore.sh" "$restore_ok" > "$archive_output" 2>&1; then
+  echo "restore unexpectedly succeeded after archive extraction failure" >&2
+  exit 1
+fi
+grep -q 'stop .*api web local-agent caddy' "$restore_log"
+grep -q 'start api local-agent caddy' "$restore_log"
+! grep -q 'start api web local-agent caddy' "$restore_log"
+grep -q '^phase=failed$' "$restore_journal"
+grep -q '^services=services-restarted$' "$restore_journal"
+grep -q '^recovery=database-or-agent-state-may-be-partial$' "$restore_journal"
+grep -q '^original_running=api,local-agent,caddy$' "$restore_journal"
+grep -q 'originally running services were restarted' "$archive_output"
+rm -f "$restore_journal"
+
+: > "$restore_log"
+restore_output="$TMP_DIR/restore-output"
+PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes HOSTLET_RESTORE_TEST_LOG="$restore_log" \
+  HOSTLET_RESTORE_TEST_RUNNING=api,local-agent,caddy \
+  HOSTLET_RESTORE_JOURNAL="$restore_journal" \
+  bash "$ROOT_DIR/scripts/restore.sh" "$restore_ok" > "$restore_output"
+grep -q 'Restore complete\.' "$restore_output"
+grep -q 'stop .*api web local-agent caddy' "$restore_log"
+grep -q 'start api local-agent caddy' "$restore_log"
+[[ ! -e "$restore_journal" ]]
 
 echo "backup destination protection self-test passed"

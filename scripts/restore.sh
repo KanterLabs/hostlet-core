@@ -8,6 +8,8 @@ POSTGRES_USER="${POSTGRES_USER:-hostlet}"
 POSTGRES_DB="${POSTGRES_DB:-hostlet}"
 AGENT_VOLUME="${HOSTLET_AGENT_VOLUME:-infra_hostlet-agent}"
 AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-alpine:3.22}"
+STOP_TIMEOUT="${HOSTLET_RESTORE_STOP_TIMEOUT_SECONDS:-30}"
+JOURNAL_FILE="${HOSTLET_RESTORE_JOURNAL:-$ROOT_DIR/.hostlet/restore-state}"
 # Explicit env file for compose resolution.  Standalone runs against prod need
 # this because compose does not auto-load the project .env when invoked via SSH.
 # Accepted via --env-file <path> flag or HOSTLET_COMPOSE_ENV_FILE env var.
@@ -207,29 +209,114 @@ if [[ -e "$BACKUP_DIR/hostlet-agent-state.tar.gz" || -L "$BACKUP_DIR/hostlet-age
 fi
 validate_sql_semantics "$BACKUP_DIR/postgres.sql"
 
+if [[ ! "$STOP_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]]; then
+  echo "restore stop timeout must be between 1 and 9999 seconds" >&2
+  exit 1
+fi
+
+JOURNAL_DIR="$(dirname -- "$JOURNAL_FILE")"
+mkdir -p -- "$JOURNAL_DIR"
+if [[ -e "$JOURNAL_FILE" || -L "$JOURNAL_FILE" ]]; then
+  echo "an interrupted restore journal already exists at $JOURNAL_FILE; inspect it before retrying" >&2
+  exit 1
+fi
+
+write_journal() {
+  local phase="$1" services="$2" recovery="$3" temp
+  temp="$(mktemp --tmpdir="$JOURNAL_DIR" .restore-state.XXXXXX)"
+  chmod 600 -- "$temp"
+  {
+    printf 'format=hostlet-restore-v1\n'
+    printf 'phase=%s\n' "$phase"
+    printf 'services=%s\n' "$services"
+    printf 'recovery=%s\n' "$recovery"
+    printf 'original_running=%s\n' "${RUNNING_SERVICE_LIST:-none}"
+    printf 'backup=%s\n' "$BACKUP_DIR"
+    printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$temp"
+  mv -T -- "$temp" "$JOURNAL_FILE"
+}
+
+STOPPED_SERVICES=(api web local-agent caddy)
+RUNNING_SERVICES=()
+RUNNING_SERVICE_LIST=none
+SERVICES_STOPPED=false
+RESTORE_OK=false
+RESTORE_PHASE=validated
+
+restore_exit() {
+  local status=$?
+  trap - EXIT
+  trap '' INT TERM
+  set +e
+  if [[ "$RESTORE_OK" == true ]]; then
+    rm -f -- "$JOURNAL_FILE"
+  elif [[ "$SERVICES_STOPPED" == true ]]; then
+    if ((${#RUNNING_SERVICES[@]} == 0)); then
+      write_journal failed services-were-stopped "database-or-agent-state-may-be-partial"
+      echo "Restore failed during ${RESTORE_PHASE}; no writer services were running before restore." >&2
+      echo "Recoverable restore state is recorded at $JOURNAL_FILE; inspect it before retrying." >&2
+    elif compose_cmd start "${RUNNING_SERVICES[@]}" >/dev/null 2>&1; then
+      write_journal failed services-restarted "database-or-agent-state-may-be-partial"
+      echo "Restore failed during ${RESTORE_PHASE}; the originally running services were restarted." >&2
+      echo "Recoverable restore state is recorded at $JOURNAL_FILE; inspect it before retrying." >&2
+    else
+      write_journal recovery-required services-stopped "database-or-agent-state-may-be-partial"
+      echo "Restore failed during ${RESTORE_PHASE}; API, web, agent, and router remain stopped." >&2
+      echo "Recoverable restore state is recorded at $JOURNAL_FILE; restart the stack only after inspection." >&2
+      status=1
+    fi
+  elif [[ "$SERVICES_STOPPED" == false ]]; then
+    # Confirmation, service probing, or journal setup failed before any
+    # service was stopped; do not leave a false services-stopped journal.
+    rm -f -- "$JOURNAL_FILE"
+  else
+    write_journal failed services-running "no-writers-were-stopped"
+  fi
+  exit "$status"
+}
+trap restore_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ "${HOSTLET_RESTORE_CONFIRM:-}" != "yes" ]]; then
   echo "Refusing to restore without HOSTLET_RESTORE_CONFIRM=yes." >&2
   echo "This replaces the current Hostlet database contents." >&2
   exit 1
 fi
 
-# After the schema is dropped the database is empty until the dump finishes
-# loading. Warn loudly if the restore step fails midway so the empty-DB state
-# is not silently mistaken for success.
-RESTORE_OK=false
-warn_partial_restore() {
-  if [[ "$RESTORE_OK" != "true" ]]; then
-    echo "Restore failed after dropping the schema; the database may be empty." >&2
-    echo "Re-run this script with the same backup to retry the restore." >&2
+RESTORE_PHASE=probing
+for service in "${STOPPED_SERVICES[@]}"; do
+  if ! running_services="$(compose_cmd ps --status running --services "$service")"; then
+    echo "Unable to determine whether writer service '$service' is running; refusing to restore." >&2
+    echo "No services were stopped and no live schema or volume was changed." >&2
+    exit 1
   fi
-}
-trap warn_partial_restore EXIT
+  if [[ -n "$running_services" && "$running_services" != "$service" ]]; then
+    echo "Unexpected writer service probe output for '$service'; refusing to restore." >&2
+    echo "No services were stopped and no live schema or volume was changed." >&2
+    exit 1
+  fi
+  if [[ "$running_services" == "$service" ]]; then
+    RUNNING_SERVICES+=("$service")
+  fi
+done
+if ((${#RUNNING_SERVICES[@]})); then
+  RUNNING_SERVICE_LIST="$(IFS=,; printf '%s' "${RUNNING_SERVICES[*]}")"
+fi
+RESTORE_PHASE=quiescing
+write_journal quiescing services-running "none"
+SERVICES_STOPPED=true
+compose_cmd stop -t "$STOP_TIMEOUT" "${STOPPED_SERVICES[@]}"
+write_journal quiesced services-stopped "none"
 
+RESTORE_PHASE=database-reset
 psql_exec -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
+RESTORE_PHASE=database-import
 psql_exec -v ON_ERROR_STOP=1 --single-transaction < "$BACKUP_DIR/postgres.sql"
 
-RESTORE_OK=true
+RESTORE_PHASE=agent-state
 
 if [[ -f "$BACKUP_DIR/hostlet-agent-state.tar.gz" ]]; then
   docker volume create "$AGENT_VOLUME" >/dev/null
@@ -240,4 +327,10 @@ if [[ -f "$BACKUP_DIR/hostlet-agent-state.tar.gz" ]]; then
     sh -lc 'rm -rf /data/* && tar -xzf /backup/hostlet-agent-state.tar.gz -C /data'
 fi
 
+RESTORE_PHASE=restart
+if ((${#RUNNING_SERVICES[@]})); then
+  compose_cmd start "${RUNNING_SERVICES[@]}"
+fi
+write_journal complete services-running "none"
+RESTORE_OK=true
 echo "Restore complete."

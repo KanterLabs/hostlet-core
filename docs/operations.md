@@ -51,6 +51,14 @@ raw secret values, private keys, or plaintext app environment files.
 
 Restores require the original `ENCRYPTION_KEY`. Without it, encrypted GitHub tokens and app environment variables cannot be decrypted.
 
+Before changing the database or agent state, restore fences the API, web, local
+agent, and Caddy containers. A failed restore restarts those writers when it
+can and leaves `.hostlet/restore-state` with the phase, backup path, and
+recovery status; if restart fails, keep the stack stopped and inspect that
+journal before retrying. The script blocks a new restore while that journal
+exists; after inspection and an operator-verified recovery, remove the journal
+to acknowledge it before retrying.
+
 `scripts/backup.sh` can also push the snapshot off-host: set `HOSTLET_BACKUP_BUCKET`
 (a `gs://` path) to sync via `gsutil`, or `HOSTLET_BACKUP_S3_BUCKET` (an `s3://` path,
 optionally with `HOSTLET_BACKUP_S3_ENDPOINT` for a non-AWS S3-compatible endpoint such as
