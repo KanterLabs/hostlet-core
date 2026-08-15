@@ -4,7 +4,11 @@
 //! provide the fencing and two-phase activation needed to make those effects
 //! recoverable without allowing an expired worker to overwrite newer state.
 
-use crate::{agent::authenticated_server_id, deploy::ACTIVE_DEPLOYMENT_STATUSES, state::AppState};
+use crate::{
+    agent::{authenticated_server_id, locks},
+    deploy::ACTIVE_DEPLOYMENT_STATUSES,
+    state::AppState,
+};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -19,6 +23,32 @@ use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
 const LEASE_MINUTES: i64 = 5;
+
+/// Lock activation state in the shared lifecycle order before any authority
+/// mutation.  The joined `FOR UPDATE` queries that used to serve this purpose
+/// left lock acquisition to the planner, which allowed activation and owner
+/// cancellation to take deployment/app/job rows in opposite orders.
+async fn lock_activation_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    deployment_id: Uuid,
+    job_id: Uuid,
+    server_id: Uuid,
+) -> anyhow::Result<Option<Uuid>> {
+    let app_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT app_id FROM deployments WHERE id=$1 AND server_id=$2",
+    )
+    .bind(deployment_id)
+    .bind(server_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(app_id) = app_id else {
+        return Ok(None);
+    };
+    crate::agent::locks::app(tx, app_id).await?;
+    crate::agent::locks::deployment(tx, deployment_id, app_id).await?;
+    crate::agent::locks::job(tx, job_id, Some(app_id), Some(deployment_id)).await?;
+    Ok(Some(app_id))
+}
 
 pub async fn heartbeat(
     State(state): State<AppState>,
@@ -38,13 +68,48 @@ pub async fn heartbeat(
         Ok(tx) => tx,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    let ids = sqlx::query(
+        "SELECT app_id,deployment_id
+         FROM agent_jobs
+         WHERE id=$1 AND server_id=$2 AND claim_token=$3",
+    )
+    .bind(job_id)
+    .bind(server_id)
+    .bind(request.claim_token)
+    .fetch_optional(&mut *tx)
+    .await;
+    let Some(ids) = (match ids {
+        Ok(ids) => ids,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }) else {
+        return StatusCode::CONFLICT.into_response();
+    };
+    let app_id = ids.get::<Option<Uuid>, _>("app_id");
+    let deployment_id = ids.get::<Option<Uuid>, _>("deployment_id");
+    if let Some(app_id) = app_id {
+        if locks::app(&mut tx, app_id).await.is_err() {
+            return StatusCode::CONFLICT.into_response();
+        }
+        if let Some(deployment_id) = deployment_id {
+            if locks::deployment(&mut tx, deployment_id, app_id)
+                .await
+                .is_err()
+            {
+                return StatusCode::CONFLICT.into_response();
+            }
+        }
+    }
     let job = sqlx::query(
         "UPDATE agent_jobs
          SET status='running', updated_at=now(),
-             lease_expires_at=now() + make_interval(mins => $1)
+             lease_expires_at=CASE
+               WHEN cancel_requested_at IS NULL
+               THEN now() + make_interval(mins => $1)
+               ELSE lease_expires_at
+             END
          WHERE id=$2 AND server_id=$3 AND claim_token=$4
            AND status IN ('claimed','running')
-           AND lease_expires_at >= now()
+           AND lease_expires_at > clock_timestamp()
          RETURNING deployment_id,cancel_requested_at,lease_expires_at",
     )
     .bind(LEASE_MINUTES as i32)
@@ -56,20 +121,25 @@ pub async fn heartbeat(
     let Ok(Some(job)) = job else {
         return StatusCode::CONFLICT.into_response();
     };
-    if let Some(deployment_id) = job.get::<Option<Uuid>, _>("deployment_id") {
-        if sqlx::query(
-            "UPDATE deployments SET status=$1,last_heartbeat_at=now()
+    if job
+        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("cancel_requested_at")
+        .is_none()
+    {
+        if let Some(deployment_id) = job.get::<Option<Uuid>, _>("deployment_id") {
+            if sqlx::query(
+                "UPDATE deployments SET status=$1,last_heartbeat_at=now()
              WHERE id=$2 AND server_id=$3 AND status = ANY($4)",
-        )
-        .bind(request.phase.as_str())
-        .bind(deployment_id)
-        .bind(server_id)
-        .bind(ACTIVE_DEPLOYMENT_STATUSES)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-        {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            )
+            .bind(request.phase.as_str())
+            .bind(deployment_id)
+            .bind(server_id)
+            .bind(ACTIVE_DEPLOYMENT_STATUSES)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+            {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
     }
     if tx.commit().await.is_err() {
@@ -98,16 +168,21 @@ pub async fn prepare_activation(
         Ok(tx) => tx,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    if !matches!(
+        lock_activation_rows(&mut tx, deployment_id, request.job_id, server_id).await,
+        Ok(Some(_))
+    ) {
+        return StatusCode::CONFLICT.into_response();
+    }
     let row = sqlx::query(
         "SELECT d.app_id,a.current_deployment_id,a.pending_deployment_id,a.route_generation,
-                j.cancel_requested_at
+                a.suspended_at,j.cancel_requested_at
          FROM deployments d
          JOIN apps a ON a.id=d.app_id
          JOIN agent_jobs j ON j.id=$1 AND j.deployment_id=d.id
          WHERE d.id=$2 AND d.server_id=$3 AND j.server_id=$3
            AND j.claim_token=$4 AND j.status IN ('claimed','running')
-           AND j.lease_expires_at >= now()
-         FOR UPDATE OF d,a,j",
+           AND j.lease_expires_at > clock_timestamp()",
     )
     .bind(request.job_id)
     .bind(deployment_id)
@@ -127,6 +202,12 @@ pub async fn prepare_activation(
             "deployment cancellation was requested",
         )
             .into_response();
+    }
+    if row
+        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("suspended_at")
+        .is_some()
+    {
+        return (StatusCode::CONFLICT, "app is paused").into_response();
     }
     let current = row.get::<Option<Uuid>, _>("current_deployment_id");
     if current != request.expected_current_deployment_id {
@@ -218,13 +299,19 @@ pub async fn commit_activation(
         Ok(tx) => tx,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    match lock_activation_rows(&mut tx, deployment_id, request.job_id, server_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
     let row = sqlx::query(
         "SELECT d.app_id,d.status,a.current_deployment_id,a.pending_deployment_id,
-                a.route_generation,j.status AS job_status,j.claim_token,j.result_json
+                a.route_generation,a.suspended_at,j.status AS job_status,j.claim_token,
+                j.cancel_requested_at,j.lease_expires_at,j.result_json,
+                COALESCE(j.lease_expires_at > clock_timestamp(),false) AS lease_current
          FROM deployments d JOIN apps a ON a.id=d.app_id
          JOIN agent_jobs j ON j.id=$1 AND j.deployment_id=d.id
-         WHERE d.id=$2 AND d.server_id=$3 AND j.server_id=$3
-         FOR UPDATE OF d,a,j",
+         WHERE d.id=$2 AND d.server_id=$3 AND j.server_id=$3",
     )
     .bind(request.job_id)
     .bind(deployment_id)
@@ -234,13 +321,24 @@ pub async fn commit_activation(
     let Ok(Some(row)) = row else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if matches!(
-        row.get::<String, _>("status").as_str(),
-        "success" | "rolled_back"
-    ) && row.get::<String, _>("job_status") == "success"
+    let terminal_status = if request.rolled_back {
+        "rolled_back"
+    } else {
+        "success"
+    };
+    if row.get::<String, _>("status") == terminal_status
+        && row.get::<String, _>("job_status") == "success"
         && row.get::<Option<Uuid>, _>("current_deployment_id") == Some(deployment_id)
+        && row.get::<Option<Uuid>, _>("claim_token") == Some(request.claim_token)
+        && row.get::<i64, _>("route_generation") == request.route_generation
     {
         return StatusCode::NO_CONTENT.into_response();
+    }
+    if !matches!(
+        row.get::<String, _>("job_status").as_str(),
+        "claimed" | "running"
+    ) {
+        return (StatusCode::CONFLICT, "job is no longer active").into_response();
     }
     if row.get::<Option<Uuid>, _>("claim_token") != Some(request.claim_token)
         || row.get::<Option<Uuid>, _>("pending_deployment_id") != Some(deployment_id)
@@ -248,58 +346,98 @@ pub async fn commit_activation(
     {
         return StatusCode::CONFLICT.into_response();
     }
+    if row
+        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("cancel_requested_at")
+        .is_some()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "deployment cancellation was requested",
+        )
+            .into_response();
+    }
+    if row
+        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("suspended_at")
+        .is_some()
+    {
+        return (StatusCode::CONFLICT, "app is paused").into_response();
+    }
+    let lease_current = row.get::<bool, _>("lease_current");
+    if !lease_current {
+        return (StatusCode::CONFLICT, "job lease has expired").into_response();
+    }
     let app_id = row.get::<Uuid, _>("app_id");
-    let terminal_status = if request.rolled_back {
-        "rolled_back"
-    } else {
-        "success"
-    };
     let candidate = row
         .get::<Option<serde_json::Value>, _>("result_json")
         .and_then(|value| {
             serde_json::from_value::<hostlet_contracts::CandidateRuntime>(value).ok()
         });
-    if sqlx::query(
+    // Consume the execution authority before changing the app or deployment.
+    // The strict lease predicate is repeated in the write, so a lease that
+    // expires after the SELECT cannot still cross the activation boundary.
+    let job_completed = sqlx::query(
+        "UPDATE agent_jobs
+         SET status='success',payload_json=payload_json-'env'-'github_token'-'artifact_registry',
+             lease_expires_at=NULL,updated_at=now(),finished_at=now()
+         WHERE id=$1 AND server_id=$2 AND status IN ('claimed','running')
+           AND claim_token=$3 AND lease_expires_at > clock_timestamp()
+           AND cancel_requested_at IS NULL",
+    )
+    .bind(request.job_id)
+    .bind(server_id)
+    .bind(request.claim_token)
+    .execute(&mut *tx)
+    .await;
+    match job_completed {
+        Ok(done) if done.rows_affected() == 1 => {}
+        Ok(_) => return (StatusCode::CONFLICT, "activation authority expired").into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+    let app_updated = sqlx::query(
         "UPDATE apps SET current_deployment_id=$1,pending_deployment_id=NULL,
-                domain=COALESCE($2,domain),updated_at=now() WHERE id=$3",
+                domain=COALESCE($2,domain),updated_at=now()
+         WHERE id=$3 AND pending_deployment_id=$1 AND route_generation=$4",
     )
     .bind(deployment_id)
     .bind(request.local_url.as_deref())
     .bind(app_id)
+    .bind(request.route_generation)
+    .execute(&mut *tx)
+    .await;
+    match app_updated {
+        Ok(done) if done.rows_affected() == 1 => {}
+        Ok(_) => return (StatusCode::CONFLICT, "pending activation changed").into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+    let deployment_updated = sqlx::query(
+        "UPDATE deployments SET status=$2,failure_summary=NULL,failure_code=NULL,
+                runtime_metadata=COALESCE($3,runtime_metadata),
+                finished_at=now(),last_heartbeat_at=now()
+         WHERE id=$1 AND status = ANY($4)",
+    )
+    .bind(deployment_id)
+    .bind(terminal_status)
+    .bind(&request.runtime_metadata)
+    .bind(ACTIVE_DEPLOYMENT_STATUSES)
+    .execute(&mut *tx)
+    .await;
+    match deployment_updated {
+        Ok(done) if done.rows_affected() == 1 => {}
+        Ok(_) => return (StatusCode::CONFLICT, "deployment activation changed").into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+    if sqlx::query(
+        "INSERT INTO audit_events(actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
+         VALUES ('agent',$1,'deployment_activation_committed',$2,$3,$4,jsonb_build_object('routeGeneration',$5))",
+    )
+    .bind(server_id.to_string())
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(request.job_id)
+    .bind(request.route_generation)
     .execute(&mut *tx)
     .await
     .is_err()
-        || sqlx::query(
-            "UPDATE deployments SET status=$2,failure_summary=NULL,failure_code=NULL,
-                    runtime_metadata=COALESCE($3,runtime_metadata),
-                    finished_at=now(),last_heartbeat_at=now() WHERE id=$1",
-        )
-        .bind(deployment_id)
-        .bind(terminal_status)
-        .bind(&request.runtime_metadata)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-        || sqlx::query(
-            "UPDATE agent_jobs SET status='success',payload_json=payload_json-'env'-'github_token'-'artifact_registry',
-                    lease_expires_at=NULL,updated_at=now(),finished_at=now() WHERE id=$1",
-        )
-        .bind(request.job_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-        || sqlx::query(
-            "INSERT INTO audit_events(actor_type,actor_id,event_type,app_id,deployment_id,job_id,metadata_json)
-             VALUES ('agent',$1,'deployment_activation_committed',$2,$3,$4,jsonb_build_object('routeGeneration',$5))",
-        )
-        .bind(server_id.to_string())
-        .bind(app_id)
-        .bind(deployment_id)
-        .bind(request.job_id)
-        .bind(request.route_generation)
-        .execute(&mut *tx)
-        .await
-        .is_err()
     {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }

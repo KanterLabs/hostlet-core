@@ -209,11 +209,29 @@ pub(crate) async fn complete_successful_build(
     manifest: &Value,
 ) -> anyhow::Result<()> {
     validate_build_manifest(original_payload, manifest)?;
+    // Lifecycle transactions lock app -> deployment -> job -> server. The
+    // completion route already owns the job lock; direct DB helpers acquire
+    // the first two rows here before runtime-capacity admission.
+    crate::agent::locks::app(tx, app_id).await?;
+    crate::agent::locks::deployment(tx, deployment_id, app_id).await?;
     let runner_server_id: Uuid =
-        sqlx::query_scalar("SELECT server_id FROM deployments WHERE id=$1 FOR UPDATE")
+        sqlx::query_scalar("SELECT server_id FROM deployments WHERE id=$1 AND app_id=$2")
             .bind(deployment_id)
+            .bind(app_id)
             .fetch_one(&mut **tx)
             .await?;
+    crate::agent::locks::server(tx, runner_server_id).await?;
+
+    // A successful build is not permission to release a paused app.  The
+    // build and release jobs are separate leases, so this check closes the
+    // pause-during-build race before the release reservation is committed.
+    let app_suspended: bool =
+        sqlx::query_scalar("SELECT suspended_at IS NOT NULL FROM apps WHERE id=$1")
+            .bind(app_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
+    anyhow::ensure!(!app_suspended, "app is paused; release is not permitted");
 
     let mut release_payload = original_payload.clone();
     let object = release_payload

@@ -695,7 +695,9 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
                      payload_json=CASE WHEN $1 IN ('success','failed') THEN payload_json - 'env' - 'github_token' - 'artifact_registry' ELSE payload_json END,
                      updated_at=now(),
                      lease_expires_at=CASE
-                       WHEN $1 IN ('claimed','running') THEN now() + interval '5 minutes'
+                       WHEN $1 IN ('claimed','running')
+                            AND cancel_requested_at IS NULL
+                         THEN now() + interval '5 minutes'
                        WHEN $1 IN ('success','failed') THEN NULL
                        ELSE lease_expires_at
                      END,
@@ -703,6 +705,18 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
                  WHERE id=$3 AND server_id=$4
                    AND (job_type <> 'build' OR $1 IN ('claimed','running'))
                    AND status IN ('queued','claimed','running')
+                   AND NOT (
+                     $1 IN ('success','failed')
+                     AND (
+                       cancel_requested_at IS NOT NULL
+                       OR EXISTS (
+                         SELECT 1 FROM apps a
+                         WHERE a.id=agent_jobs.app_id
+                           AND a.suspended_at IS NOT NULL
+                           AND agent_jobs.job_type IN ('deploy','rollback','build','release')
+                       )
+                     )
+                   )
                  RETURNING job_type,app_id,deployment_id",
     )
     .bind(status)

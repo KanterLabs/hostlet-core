@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::{agent::locks, state::AppState};
 use hostlet_contracts::HostResourceSnapshot;
 use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction};
@@ -381,7 +381,7 @@ pub fn spawn_capacity_scheduler_task(state: AppState) {
 
 pub async fn admit_waiting_deployments(state: &AppState) -> anyhow::Result<u64> {
     let waiting = sqlx::query(
-        "SELECT id,server_id,app_id
+        "SELECT id,server_id,app_id,deployment_id
          FROM agent_jobs
          WHERE status='queued'
            AND job_type IN ('deploy','rollback','release')
@@ -398,6 +398,12 @@ pub async fn admit_waiting_deployments(state: &AppState) -> anyhow::Result<u64> 
             continue;
         };
         let mut tx = state.db.begin().await?;
+        locks::app(&mut tx, app_id).await?;
+        let deployment_id = row.get::<Option<Uuid>, _>("deployment_id");
+        if let Some(deployment_id) = deployment_id {
+            locks::deployment(&mut tx, deployment_id, app_id).await?;
+        }
+        locks::job(&mut tx, job_id, Some(app_id), deployment_id).await?;
         let decision =
             capacity_decision_in_transaction(&mut tx, server_id, app_id, Some(job_id)).await?;
         if decision == CapacityDecision::Admitted {
