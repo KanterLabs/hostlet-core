@@ -162,6 +162,31 @@ export const emptySettings: SettingsForm = {
   auto_deploy: false,
 };
 
+/** Build the editable draft from the latest server snapshot. */
+export function settingsFromApp(app: App): SettingsForm {
+  return {
+    domain: app.domain || "",
+    health_path: app.healthPath || "/",
+    runtime_kind: app.runtimeKind || "single",
+    hostlet_config_path: app.hostletConfigPath || "hostlet.yml",
+    packaging_strategy: app.packagingStrategy || "auto",
+    root_directory: app.rootDirectory || ".",
+    install_command: app.installCommand || "",
+    build_command: app.buildCommand || "",
+    start_command: app.startCommand || "",
+    container_port: String(app.containerPort || 3000),
+    memory_limit_mb: app.memoryLimitMb ? String(app.memoryLimitMb) : "",
+    cpu_limit: app.cpuLimit ? String(app.cpuLimit) : "",
+    public_exposure: !!app.publicExposure,
+    auto_deploy: !!app.autoDeploy,
+  };
+}
+
+/** Compare drafts field-by-field so explicit clears remain dirty. */
+export function settingsEqual(left: SettingsForm, right: SettingsForm) {
+  return (Object.keys(emptySettings) as Array<keyof SettingsForm>).every((key) => left[key] === right[key]);
+}
+
 /**
  * Discrete set of in-flight operations on the app detail page. The empty
  * string is the idle state; a non-empty value gates every button (truthiness)

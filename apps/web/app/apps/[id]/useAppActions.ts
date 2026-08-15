@@ -3,6 +3,7 @@ import type { useRouter } from "next/navigation";
 import { useConfirm } from "@/components/ui";
 import { api } from "@/lib/api";
 import { isActiveDeploy, waitForAgentJob } from "./appDetailHelpers";
+import { emptySettings, settingsEqual, settingsFromApp } from "./appDetail.types";
 import type { App, BusyAction, RuntimeHealth, SettingsForm } from "./appDetail.types";
 
 type Router = ReturnType<typeof useRouter>;
@@ -29,6 +30,14 @@ function buildCriticalSettingsChanged(app: App | null, settings: SettingsForm) {
   );
 }
 
+function mergeDirtySettings(current: SettingsForm, previousServer: SettingsForm, loaded: App) {
+  const next = settingsFromApp(loaded);
+  (Object.keys(emptySettings) as Array<keyof SettingsForm>).forEach((key) => {
+    if (current[key] !== previousServer[key]) Object.assign(next, { [key]: current[key] });
+  });
+  return next;
+}
+
 type UseAppActionsArgs = {
   id: string;
   app: App | null;
@@ -41,6 +50,8 @@ type UseAppActionsArgs = {
   setEnvValues: (updater: (current: Record<string, string>) => Record<string, string>) => void;
   setNewEnv: (next: { key: string; value: string }) => void;
   refreshScreenshot: () => Promise<void>;
+  settingsDirty: boolean;
+  confirmNavigation: () => boolean;
 };
 
 /**
@@ -61,6 +72,8 @@ export function useAppActions({
   setEnvValues,
   setNewEnv,
   refreshScreenshot,
+  settingsDirty,
+  confirmNavigation,
 }: UseAppActionsArgs) {
   const confirmAction = useConfirm();
   const [message, setMessage] = useState("");
@@ -78,60 +91,78 @@ export function useAppActions({
   // Tracks whether the component that owns this hook is still mounted; used to
   // guard state updates and navigation after async operations complete.
   const mountedRef = useRef(true);
+  const appRef = useRef(app);
+  const settingsRef = useRef(settings);
+  appRef.current = app;
+  settingsRef.current = settings;
   useEffect(() => () => { mountedRef.current = false; }, []);
 
-  const refreshApp = useCallback(async () => {
+  const refreshApp = useCallback(async (options: { syncSettings?: boolean; expectedSettings?: SettingsForm } = {}) => {
     try {
       const loaded = await api<App>(`/api/apps/${id}`);
+      const previousServerDraft = appRef.current ? settingsFromApp(appRef.current) : emptySettings;
+      const currentDraft = settingsRef.current;
+      const draftDirty = !settingsEqual(currentDraft, previousServerDraft);
+      const expectedStillCurrent = !options.expectedSettings || settingsEqual(currentDraft, options.expectedSettings);
       setApp(loaded);
+      appRef.current = loaded;
       if (loaded.health) setHealth(loaded.health);
-      setSettings({
-        domain: loaded.domain || "",
-        health_path: loaded.healthPath || "/",
-        runtime_kind: loaded.runtimeKind || "single",
-        hostlet_config_path: loaded.hostletConfigPath || "hostlet.yml",
-        packaging_strategy: loaded.packagingStrategy || "auto",
-        root_directory: loaded.rootDirectory || ".",
-        install_command: loaded.installCommand || "",
-        build_command: loaded.buildCommand || "",
-        start_command: loaded.startCommand || "",
-        container_port: String(loaded.containerPort || 3000),
-        memory_limit_mb: loaded.memoryLimitMb ? String(loaded.memoryLimitMb) : "",
-        cpu_limit: loaded.cpuLimit ? String(loaded.cpuLimit) : "",
-        public_exposure: !!loaded.publicExposure,
-        auto_deploy: !!loaded.autoDeploy,
-      });
+      // Auxiliary refreshes update the server snapshot but only refill a clean
+      // form. A dirty draft is merged field-by-field, so server-side changes
+      // (for example publishing or pausing) update clean controls without
+      // replacing values the user has edited. Explicit save/initial-load syncs
+      // are conditional on the submitted draft still being current, so a
+      // keystroke during a request can never be lost.
+      if (options.syncSettings && expectedStillCurrent && (!draftDirty || !!options.expectedSettings)) {
+        setSettings(settingsFromApp(loaded));
+      } else if (!draftDirty) {
+        setSettings(settingsFromApp(loaded));
+      } else {
+        setSettings(mergeDirtySettings(currentDraft, previousServerDraft, loaded));
+      }
+      return loaded;
     } catch {
       setMessage("Could not load app. Sign in and check that it still exists.");
+      return null;
     }
   }, [id, setApp, setHealth, setSettings]);
 
   const deploy = useCallback(async () => {
     if (busyAction || isActiveDeploy(app?.latestDeployment?.status)) return;
     setBusyAction("deploy");
-    setMessage("Starting deployment...");
+    setMessage(settingsDirty ? "Starting deployment. Unsaved settings remain in this form and are not included in this action." : "Starting deployment...");
     try {
       const res = await api<{ deploymentId: string }>(`/api/apps/${id}/deploy`, { method: "POST", body: "{}" });
       setSettingsChangedSinceDeploy(false);
+      if (!confirmNavigation()) {
+        setMessage("Deployment started. Unsaved settings remain in this form and were not included.");
+        setBusyAction("");
+        return;
+      }
       router.push(`/deployments/${res.deploymentId}`);
     } catch (error) {
       setMessage(`Deploy failed to start. ${error instanceof Error ? error.message : ""}`);
       setBusyAction("");
     }
-  }, [busyAction, app?.latestDeployment?.status, id, router]);
+  }, [app?.latestDeployment?.status, busyAction, confirmNavigation, id, router, settingsDirty]);
 
   const rollback = useCallback(async () => {
     if (busyAction) return;
     setBusyAction("rollback");
-    setMessage("Starting rollback...");
+    setMessage(settingsDirty ? "Starting rollback. Unsaved settings remain in this form and are not included in this action." : "Starting rollback...");
     try {
       const res = await api<{ rollbackDeploymentId: string }>(`/api/apps/${id}/rollback`, { method: "POST", body: "{}" });
+      if (!confirmNavigation()) {
+        setMessage("Rollback started. Unsaved settings remain in this form and were not included.");
+        setBusyAction("");
+        return;
+      }
       router.push(`/deployments/${res.rollbackDeploymentId}`);
     } catch (error) {
       setMessage(`Rollback could not start. ${error instanceof Error ? error.message : ""}`);
       setBusyAction("");
     }
-  }, [busyAction, id, router]);
+  }, [busyAction, confirmNavigation, id, router, settingsDirty]);
 
   const deleteApp = useCallback(async () => {
     if (!(await confirmAction({
@@ -140,6 +171,7 @@ export function useAppActions({
       confirmLabel: "Delete",
       destructive: true,
     }))) return;
+    if (!confirmNavigation()) return;
     if (busyAction) return;
     setBusyAction("delete");
     setMessage("Deleting app and requesting server cleanup...");
@@ -155,7 +187,7 @@ export function useAppActions({
       setMessage(`Delete failed. ${error instanceof Error ? error.message : ""}`);
       setBusyAction("");
     }
-  }, [busyAction, confirmAction, id, router]);
+  }, [busyAction, confirmAction, confirmNavigation, id, router]);
 
   const toggleExposure = useCallback(async () => {
     if (!app || busyAction) return;
@@ -165,13 +197,13 @@ export function useAppActions({
     try {
       await api(`/api/apps/${id}`, { method: "PATCH", body: JSON.stringify({ public_exposure: next }) });
       await refreshApp();
-      setMessage(next ? "App URL published. DNS may take a moment to propagate." : "App URL is private.");
+      setMessage(`${next ? "App URL published. DNS may take a moment to propagate." : "App URL is private."}${settingsDirty ? " Unsaved settings remain in this form and were not included." : ""}`);
     } catch (error) {
       setMessage(`${next ? "Publish" : "Unpublish"} failed. ${error instanceof Error ? error.message : ""}`);
     } finally {
       setBusyAction("");
     }
-  }, [app, busyAction, id, refreshApp]);
+  }, [app, busyAction, id, refreshApp, settingsDirty]);
 
   const saveSettings = useCallback(async () => {
     if (busyAction) return;
@@ -199,7 +231,7 @@ export function useAppActions({
         body: JSON.stringify(payload),
       });
       if (buildCriticalSettingsChanged(app, settings)) setSettingsChangedSinceDeploy(true);
-      await refreshApp();
+      await refreshApp({ syncSettings: true, expectedSettings: settings });
       setMessage("Settings saved. Redeploy for runtime changes to reach the container.");
     } catch (error) {
       setMessage(`Save failed. ${error instanceof Error ? error.message : ""}`);
@@ -257,13 +289,15 @@ export function useAppActions({
       await waitForAgentJob(result.jobId, setHealthMessage, () => mountedRef.current);
       if (!mountedRef.current) return;
       await refreshApp();
-      setHealthMessage("Browser check completed.");
+      setHealthMessage(settingsDirty
+        ? "Browser check completed. Unsaved settings remain in this form and were not included."
+        : "Browser check completed.");
     } catch (error) {
       setHealthMessage(`Browser check failed. ${error instanceof Error ? error.message : ""}`);
     } finally {
       if (mountedRef.current) setBusyAction("");
     }
-  }, [busyAction, id, refreshApp]);
+  }, [busyAction, id, refreshApp, settingsDirty]);
 
   const restartContainer = useCallback(async () => {
     if (busyAction || !(await confirmAction({
@@ -275,13 +309,15 @@ export function useAppActions({
     setHealthMessage("Requesting container restart...");
     try {
       await api(`/api/apps/${id}/restart`, { method: "POST", body: "{}" });
-      setHealthMessage("Container restart requested. Waiting for the agent health result...");
+      setHealthMessage(settingsDirty
+        ? "Container restart requested. Unsaved settings remain in this form and were not included. Waiting for the agent health result..."
+        : "Container restart requested. Waiting for the agent health result...");
     } catch (error) {
       setHealthMessage(`Restart could not start. ${error instanceof Error ? error.message : ""}`);
     } finally {
       setBusyAction("");
     }
-  }, [busyAction, confirmAction, id]);
+  }, [busyAction, confirmAction, id, settingsDirty]);
 
   const togglePause = useCallback(async () => {
     if (!app || busyAction) return;
@@ -301,7 +337,7 @@ export function useAppActions({
         body: "{}",
       });
       await refreshApp();
-      setHealthMessage(paused ? "App resume requested." : "App paused.");
+      setHealthMessage(`${paused ? "App resume requested." : "App paused."}${settingsDirty ? " Unsaved settings remain in this form and were not included." : ""}`);
     } catch (error) {
       setHealthMessage(
         `${paused ? "Resume" : "Pause"} could not start. ${error instanceof Error ? error.message : ""}`,
@@ -309,7 +345,7 @@ export function useAppActions({
     } finally {
       if (mountedRef.current) setBusyAction("");
     }
-  }, [app, busyAction, confirmAction, id, refreshApp]);
+  }, [app, busyAction, confirmAction, id, refreshApp, settingsDirty]);
 
   const captureScreenshot = useCallback(async () => {
     if (busyAction) return;
