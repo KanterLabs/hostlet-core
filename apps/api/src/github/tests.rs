@@ -4,6 +4,7 @@ use super::{
     webhook_app_event_is_terminal, webhook_processing_status, StatusCode, WebhookClaim,
     WebhookFailpoint,
 };
+use hostlet_contracts::compose::{compose_subset_warnings, HostletComposeManifest};
 use hostlet_contracts::{parse_github_repo, valid_commit_sha};
 use sqlx::Row;
 use uuid::Uuid;
@@ -34,6 +35,28 @@ fn parses_github_repo_inputs() {
     );
     assert_eq!(parse_github_repo("owner/repo"), Some("owner/repo".into()));
     assert_eq!(parse_github_repo("https://example.com/owner/repo"), None);
+}
+
+#[test]
+fn api_compose_manifest_rejects_github_url_delimiters() {
+    for file in ["config/compose?.yml", "config/compose#.yml"] {
+        let yaml_file = serde_yaml::to_string(file).unwrap();
+        let manifest =
+            format!("runtime: compose\ncompose:\n  web_service: web\n  file: {yaml_file}");
+        assert!(
+            HostletComposeManifest::parse_compose_checked(&manifest).is_err(),
+            "API inspection must reject manifest path {file:?}"
+        );
+    }
+}
+
+#[test]
+fn api_compose_preview_rejects_invalid_top_level_volume_name() {
+    let compose = "services:\n  web:\n    image: app\nvolumes:\n  Cache_Data:\n";
+    let warnings = compose_subset_warnings(compose, "web");
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("invalid volume Cache_Data")));
 }
 
 #[test]

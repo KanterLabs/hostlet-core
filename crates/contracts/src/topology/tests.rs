@@ -1,4 +1,12 @@
 use super::*;
+use crate::{
+    repository_inventory_entry_count_within_bound, repository_inventory_file_content_within_bound,
+    repository_inventory_relevant_file_count_within_bound,
+    repository_inventory_response_is_complete, repository_inventory_select_candidates,
+    RepositoryInventoryCandidate, REPOSITORY_INVENTORY_MAX_CONTENT_BYTES,
+    REPOSITORY_INVENTORY_MAX_ENTRIES, REPOSITORY_INVENTORY_MAX_FILE_BYTES,
+    REPOSITORY_INVENTORY_MAX_RELEVANT_FILES,
+};
 
 fn inventory(files: &[(&str, &str)]) -> RepositoryInventory {
     RepositoryInventory {
@@ -37,6 +45,83 @@ fn noise_directories_do_not_become_candidates() {
         r#"{"scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#,
     )]));
     assert_eq!(plan.readiness, TopologyReadiness::Unsupported);
+}
+
+#[test]
+fn repository_inventory_bounds_accept_exact_and_reject_overflow() {
+    assert!(repository_inventory_entry_count_within_bound(
+        REPOSITORY_INVENTORY_MAX_ENTRIES
+    ));
+    assert!(!repository_inventory_entry_count_within_bound(
+        REPOSITORY_INVENTORY_MAX_ENTRIES + 1
+    ));
+    assert!(repository_inventory_relevant_file_count_within_bound(
+        REPOSITORY_INVENTORY_MAX_RELEVANT_FILES
+    ));
+    assert!(!repository_inventory_relevant_file_count_within_bound(
+        REPOSITORY_INVENTORY_MAX_RELEVANT_FILES + 1
+    ));
+}
+
+#[test]
+fn repository_inventory_provider_and_content_bounds_match_both_builders() {
+    assert!(repository_inventory_response_is_complete(false));
+    assert!(!repository_inventory_response_is_complete(true));
+    assert!(repository_inventory_file_content_within_bound(
+        0,
+        REPOSITORY_INVENTORY_MAX_FILE_BYTES
+    ));
+    assert!(!repository_inventory_file_content_within_bound(
+        0,
+        REPOSITORY_INVENTORY_MAX_FILE_BYTES + 1
+    ));
+    assert!(repository_inventory_file_content_within_bound(
+        REPOSITORY_INVENTORY_MAX_CONTENT_BYTES - REPOSITORY_INVENTORY_MAX_FILE_BYTES,
+        REPOSITORY_INVENTORY_MAX_FILE_BYTES
+    ));
+    assert!(!repository_inventory_file_content_within_bound(
+        REPOSITORY_INVENTORY_MAX_CONTENT_BYTES - REPOSITORY_INVENTORY_MAX_FILE_BYTES + 1,
+        REPOSITORY_INVENTORY_MAX_FILE_BYTES
+    ));
+}
+
+#[test]
+fn inventory_selection_preserves_sorted_files_for_the_same_topology_plan() {
+    let selected = repository_inventory_select_candidates(vec![
+        RepositoryInventoryCandidate::new("z.js", REPOSITORY_INVENTORY_MAX_FILE_BYTES),
+        RepositoryInventoryCandidate::new("a.js", REPOSITORY_INVENTORY_MAX_CONTENT_BYTES),
+        RepositoryInventoryCandidate::new("pnpm-lock.yaml", REPOSITORY_INVENTORY_MAX_FILE_BYTES),
+        RepositoryInventoryCandidate::new("package.json", 64),
+    ])
+    .unwrap();
+    assert_eq!(
+        selected
+            .iter()
+            .map(|file| (file.path.as_str(), file.include_contents))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a.js", false),
+            ("package.json", true),
+            ("pnpm-lock.yaml", false),
+            ("z.js", true),
+        ]
+    );
+
+    let inventory = RepositoryInventory {
+        files: selected
+            .into_iter()
+            .map(|file| RepositoryFile {
+                path: file.path.clone(),
+                contents: (file.path == "package.json").then(|| {
+                    r#"{"scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#
+                        .to_string()
+                }),
+            })
+            .collect(),
+    };
+    let plan = plan_repository_topology(&inventory);
+    assert_eq!(plan.readiness, TopologyReadiness::Ready);
+    assert_eq!(plan.services[0].provider, "node");
 }
 
 #[test]
