@@ -233,7 +233,10 @@ AGENT_CLI_MOUNTS=(
 # packages inside each agent raced the registration deadline on fresh runners.
 docker network create "${NETWORK}" >/dev/null
 start_postgres_container postgres:16-alpine
-wait_postgres_ready
+if ! wait_postgres_ready; then
+  echo "PostgreSQL readiness failed; aborting remote-build E2E before registry startup" >&2
+  exit 1
+fi
 POSTGRES_PORT="$(discover_postgres_port)"
 
 docker run --rm httpd:2.4-alpine htpasswd -Bnb \

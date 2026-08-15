@@ -51,6 +51,7 @@ jobs:
           components: rustfmt, clippy
       - run: scripts/check-line-cap.sh
       - run: bash scripts/ci-db-tests-selftest.sh
+      - run: scripts/ci-self-hosted-lib-selftest.sh
       - run: bash scripts/ci-release-mainline-gate-selftest.sh
       - run: scripts/ci-core-workflow-contracts.sh
       - run: scripts/ci-verify-runner-selftest.sh
