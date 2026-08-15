@@ -244,12 +244,17 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // socket connection. An old collection therefore cannot overlap one started
     // immediately after reconnecting.
     let runtime_log_slot = Arc::new(AtomicBool::new(false));
+    // Resource telemetry is also single-flight and outlives a socket connection.
+    // A stalled event endpoint therefore cannot create an unbounded backlog after
+    // reconnecting, or hold up the new WebSocket loop.
+    let resource_stats_scheduler = ResourceStatsScheduler::default();
     loop {
         if let Err(err) = connect_loop(
             cfg.clone(),
             job_slot.clone(),
             claim_slots.clone(),
             runtime_log_slot.clone(),
+            resource_stats_scheduler.clone(),
         )
         .await
         {
@@ -264,6 +269,7 @@ pub(crate) async fn connect_loop(
     job_slot: Arc<AtomicBool>,
     claim_slots: Arc<tokio::sync::Semaphore>,
     runtime_log_slot: Arc<AtomicBool>,
+    resource_stats_scheduler: ResourceStatsScheduler,
 ) -> anyhow::Result<()> {
     let ws_url = cfg
         .api_url
@@ -313,7 +319,13 @@ pub(crate) async fn connect_loop(
                     });
                 }
             }
-            _ = resource_stats.tick() => publish_resource_stats(&cfg).await,
+            _ = resource_stats.tick() => {
+                if !resource_stats_scheduler.schedule(cfg.clone()) {
+                    tracing::debug!(
+                        "skipping resource stats tick while a previous publish is still running"
+                    );
+                }
+            }
             _ = storage_stats.tick() => {
                 // `docker system df -v` scans every volume's size, so measure off
                 // the select loop to keep heartbeat/job-claim responsive.
