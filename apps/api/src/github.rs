@@ -1,10 +1,18 @@
 mod access_token;
 mod inference;
+mod webhook;
+
+#[cfg(test)]
+use webhook::{
+    claim_webhook_event, finalize_webhook_event, process_webhook_app, process_webhook_faulted,
+    release_webhook_claim, renew_webhook_claim, webhook_app_event_is_terminal, WebhookClaim,
+    WebhookFailpoint,
+};
+use webhook::{process_webhook, webhook_processing_status};
 
 use crate::{
     auth::{current_user_id, request_context},
     crypto::verify_signature,
-    deploy::create_and_send_deploy,
     state::AppState,
 };
 use axum::{
@@ -17,8 +25,8 @@ use axum::{
 use hostlet_contracts::compose::{detect_data_mount_path, with_data_mount_path};
 use hostlet_contracts::{
     attach_topology_plan, detect_start_command, parse_github_repo, plan_repository_topology,
-    valid_commit_sha, with_command_suggestion, RepoCommandFiles, RepositoryFile,
-    RepositoryInventory, TopologyReadiness,
+    with_command_suggestion, RepoCommandFiles, RepositoryFile, RepositoryInventory,
+    TopologyReadiness,
 };
 use inference::{
     compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
@@ -28,14 +36,12 @@ use inference::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
 use uuid::Uuid;
 
 const GITHUB_INSPECTION_FILE_MAX_BYTES: u64 = 128 * 1024;
 const GITHUB_INVENTORY_MAX_FILES: usize = 10_000;
 const GITHUB_INVENTORY_MAX_RELEVANT_FILES: usize = 256;
 const GITHUB_INVENTORY_MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
-
 #[derive(Deserialize)]
 pub struct RepoInspectRequest {
     repo_url: Option<String>,
@@ -789,10 +795,16 @@ pub async fn webhook(
         .get("x-github-event")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let delivery = headers
+    let Some(delivery) = headers
         .get("x-github-delivery")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .filter(|value| !value.trim().is_empty())
+    else {
+        // Without GitHub's delivery id there is no safe idempotency key. A
+        // malformed request must not create an event that every retry would
+        // accidentally share.
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -800,183 +812,14 @@ pub async fn webhook(
         .pointer("/repository/full_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let inserted = sqlx::query(
-        "INSERT INTO webhook_events (github_delivery_id,repo_full_name,event_type,payload)
-         VALUES ($1,$2,$3,$4)
-         ON CONFLICT DO NOTHING
-         RETURNING id",
-    )
-    .bind(delivery)
-    .bind(repo)
-    .bind(event)
-    .bind(&payload)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-    let Some(inserted) = inserted else {
-        return StatusCode::ACCEPTED.into_response();
-    };
-    let webhook_event_id: Uuid = inserted.get("id");
-    if event == "push" {
-        let branch = payload
-            .get("ref")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim_start_matches("refs/heads/");
-        let sha = payload
-            .get("after")
-            .and_then(|v| v.as_str())
-            .unwrap_or("HEAD");
-        if payload
-            .get("deleted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            mark_push_processed(&state, delivery, branch, sha, Some("branch was deleted")).await;
-            return StatusCode::ACCEPTED.into_response();
-        }
-        if !valid_commit_sha(sha) {
-            mark_push_processed(
-                &state,
-                delivery,
-                branch,
-                sha,
-                Some("push did not include a valid commit SHA"),
-            )
-            .await;
-            return StatusCode::ACCEPTED.into_response();
-        }
-        let apps = sqlx::query(
-            "SELECT id,user_id,auto_deploy FROM apps WHERE repo_full_name=$1 AND branch=$2",
-        )
-        .bind(repo)
-        .bind(branch)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
-        if apps.is_empty() {
-            mark_push_processed(
-                &state,
-                delivery,
-                branch,
-                sha,
-                Some("no apps matched this repository and branch"),
-            )
-            .await;
-            return StatusCode::ACCEPTED.into_response();
-        }
-        for app in apps {
-            let app_id: Uuid = app.get("id");
-            if !app.get::<bool, _>("auto_deploy") {
-                let _ = insert_webhook_app_event(
-                    &state,
-                    webhook_event_id,
-                    app_id,
-                    None,
-                    repo,
-                    branch,
-                    sha,
-                    "ignored",
-                    Some("auto redeploy is disabled for this app"),
-                )
-                .await;
-                continue;
-            }
-            match create_and_send_deploy(&state, app.get("user_id"), app_id, sha).await {
-                Ok(deployment_id) => {
-                    let _ = insert_webhook_app_event(
-                        &state,
-                        webhook_event_id,
-                        app_id,
-                        Some(deployment_id),
-                        repo,
-                        branch,
-                        sha,
-                        "deployed",
-                        None,
-                    )
-                    .await;
-                }
-                Err(err) => {
-                    let _ = insert_webhook_app_event(
-                        &state,
-                        webhook_event_id,
-                        app_id,
-                        None,
-                        repo,
-                        branch,
-                        sha,
-                        "ignored",
-                        Some(&err.to_string()),
-                    )
-                    .await;
-                }
-            }
-        }
-        mark_push_processed(&state, delivery, branch, sha, None).await;
-    } else {
-        let _ = sqlx::query("UPDATE webhook_events SET ignored_reason='unsupported event type', processed=true, processed_at=now() WHERE github_delivery_id=$1")
-            .bind(delivery)
-            .execute(&state.db)
-            .await;
+    let result = process_webhook(&state, delivery, event, repo, &payload).await;
+    if let Err(err) = &result {
+        // Any failure after signature and payload validation is retryable: in
+        // particular, do not acknowledge a delivery whose event row is still
+        // unprocessed or whose app fan-out is incomplete.
+        tracing::warn!(error = %err, delivery, "GitHub webhook processing failed");
     }
-    StatusCode::ACCEPTED.into_response()
-}
-
-/// Mark a `push` webhook event processed, recording the resolved branch/commit
-/// and an optional reason it produced no deployments. Consolidates the four
-/// previously-inline `UPDATE webhook_events SET ...` statements that differed
-/// only by their `ignored_reason`.
-async fn mark_push_processed(
-    state: &AppState,
-    delivery: &str,
-    branch: &str,
-    sha: &str,
-    ignored_reason: Option<&str>,
-) {
-    let sql = if ignored_reason.is_some() {
-        "UPDATE webhook_events SET branch=$2, commit_sha=$3, ignored_reason=$4, \
-         processed=true, processed_at=now() WHERE github_delivery_id=$1"
-    } else {
-        "UPDATE webhook_events SET branch=$2, commit_sha=$3, \
-         processed=true, processed_at=now() WHERE github_delivery_id=$1"
-    };
-    let mut query = sqlx::query(sql).bind(delivery).bind(branch).bind(sha);
-    if let Some(reason) = ignored_reason {
-        query = query.bind(reason);
-    }
-    let _ = query.execute(&state.db).await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_webhook_app_event(
-    state: &AppState,
-    webhook_event_id: Uuid,
-    app_id: Uuid,
-    deployment_id: Option<Uuid>,
-    repo: &str,
-    branch: &str,
-    sha: &str,
-    status: &str,
-    ignored_reason: Option<&str>,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO webhook_app_events
-         (webhook_event_id,app_id,deployment_id,repo_full_name,branch,commit_sha,status,ignored_reason)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-    )
-    .bind(webhook_event_id)
-    .bind(app_id)
-    .bind(deployment_id)
-    .bind(repo)
-    .bind(branch)
-    .bind(sha)
-    .bind(status)
-    .bind(ignored_reason)
-    .execute(&state.db)
-    .await?;
-    Ok(())
+    webhook_processing_status(&result).into_response()
 }
 
 #[cfg(test)]
