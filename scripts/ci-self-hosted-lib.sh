@@ -121,7 +121,8 @@ wait_postgres_ready() {
     fi
     sleep 1
   done
-  return 0
+  echo "Timed out waiting for PostgreSQL readiness after 60 attempts" >&2
+  return 1
 }
 
 # discover_postgres_port: print the host port mapped to the container's 5432,

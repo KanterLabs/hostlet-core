@@ -68,6 +68,7 @@ jobs:
       - run: scripts/check-migration-versions.sh
       - run: bash scripts/ci-db-tests-selftest.sh
       - run: bash scripts/ci-backup-selftest.sh
+      - run: scripts/ci-self-hosted-lib-selftest.sh
       - run: bash scripts/ci-release-mainline-gate-selftest.sh
       - run: scripts/ci-core-workflow-contracts.sh
       - run: scripts/ci-verify-runner-selftest.sh
