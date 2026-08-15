@@ -8,6 +8,21 @@
 
 import { formatTimestamp } from "@/lib/time";
 
+const ACTIVE_DEPLOYMENT_STATUSES = [
+  "queued",
+  "queued_for_build",
+  "running",
+  "building",
+  "publishing",
+  "queued_for_release",
+  "pulling",
+  "starting",
+  "health_checking",
+  "routing",
+] as const;
+
+const TERMINAL_DEPLOYMENT_STATUSES = ["success", "failed", "canceled", "cancelled", "rolled_back"] as const;
+
 // Minimal webhook shape required by webhookSummary.
 export type Webhook = {
   status: string;
@@ -44,7 +59,11 @@ export function webhookSummary(webhook?: Webhook | null) {
 }
 
 export function isActiveDeploy(status?: string | null) {
-  return !!status && ["queued", "queued_for_build", "running", "building", "publishing", "queued_for_release", "pulling", "starting", "health_checking", "routing"].includes(status);
+  return !!status && ACTIVE_DEPLOYMENT_STATUSES.includes(status as (typeof ACTIVE_DEPLOYMENT_STATUSES)[number]);
+}
+
+export function isTerminalDeploy(status?: string | null) {
+  return !!status && TERMINAL_DEPLOYMENT_STATUSES.includes(status as (typeof TERMINAL_DEPLOYMENT_STATUSES)[number]);
 }
 
 export function shortSha(sha?: string | null) {

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
 import { AppShell, DataList, LogViewer, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
 import { useDeploymentLogs } from "@/lib/useDeploymentLogs";
-import { shortSha } from "@/lib/app-status";
+import { isTerminalDeploy, shortSha } from "@/lib/app-status";
 import { api } from "@/lib/api";
 import {
   formatBytes,
@@ -104,7 +104,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
   const { deployment, logs, socketState, socketMessage } = useDeploymentLogs<Deployment>(id);
 
   const status = deployment?.status || "loading";
-  const finished = status === "success" || status === "failed";
+  const finished = isTerminalDeploy(status);
   const steps = statusSteps(status);
   const metadata = deployment?.runtimeMetadata;
   const isCompose = metadata?.runtime === "compose";

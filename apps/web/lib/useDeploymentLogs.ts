@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, apiUrl } from "@/lib/api";
+import { isTerminalDeploy } from "@/lib/app-status";
 import { useVisibilityPoll } from "@/lib/useVisibilityPoll";
 
 export type SocketState = "connecting" | "connected" | "reconnecting" | "closed";
@@ -72,6 +73,17 @@ export function useDeploymentLogs<TDeployment extends BaseDeployment>(
   const [logs, setLogs] = useState<string[]>([]);
   const [socketState, setSocketState] = useState<SocketState>("connecting");
   const [socketMessage, setSocketMessage] = useState("");
+  const terminal = isTerminalDeploy(deployment?.status);
+
+  // A deployment detail route can be reused for a new id by the app router.
+  // Clear the previous terminal snapshot first so it cannot suppress polling
+  // or streaming for the new deployment.
+  useEffect(() => {
+    setDeployment(null);
+    setLogs([]);
+    setSocketState("connecting");
+    setSocketMessage("");
+  }, [id]);
 
   useVisibilityPoll(
     async ({ isActive }) => {
@@ -88,12 +100,14 @@ export function useDeploymentLogs<TDeployment extends BaseDeployment>(
         }
       }
     },
-    { intervalMs: DEPLOYMENT_POLL_MS, deps: [id] },
+    { intervalMs: DEPLOYMENT_POLL_MS, enabled: !terminal, deps: [id, terminal] },
   );
 
   useEffect(() => {
     let active = true;
-    setLogs([]);
+    // The id-only effect owns log resets; terminal transitions must retain live output.
+    setSocketState(terminal ? "closed" : "connecting");
+    setSocketMessage("");
     api<DeploymentLogLine[]>(`/api/deployments/${id}/logs`)
       .then((rows) => {
         if (active) {
@@ -102,11 +116,12 @@ export function useDeploymentLogs<TDeployment extends BaseDeployment>(
       })
       .catch(() => {});
 
-    let closed = false;
+    let closed = terminal;
     let retry: number | undefined;
     let ws: WebSocket | undefined;
     const connect = () => {
-      setSocketState((current) => (current === "closed" ? "connecting" : current));
+      if (!active || closed || terminal) return;
+      setSocketState("connecting");
       ws = new WebSocket(`${apiUrl().replace("http", "ws")}/ws/logs/${id}`);
       ws.onopen = () => {
         if (!active) return;
@@ -127,13 +142,13 @@ export function useDeploymentLogs<TDeployment extends BaseDeployment>(
         setSocketMessage("Live log connection had an error.");
       };
       ws.onclose = () => {
-        if (closed) return;
+        if (closed || terminal) return;
         setSocketState("reconnecting");
         setSocketMessage("Live logs disconnected. Reconnecting...");
         retry = window.setTimeout(connect, SOCKET_RETRY_MS);
       };
     };
-    connect();
+    if (!terminal) connect();
 
     return () => {
       active = false;
@@ -141,7 +156,7 @@ export function useDeploymentLogs<TDeployment extends BaseDeployment>(
       if (retry) window.clearTimeout(retry);
       ws?.close();
     };
-  }, [id]);
+  }, [id, terminal]);
 
   return { deployment, logs, socketState, socketMessage };
 }
