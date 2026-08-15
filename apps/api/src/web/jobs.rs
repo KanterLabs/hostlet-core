@@ -92,7 +92,7 @@ pub async fn agent_job_status(
                j.payload_json->>'capacity_wait' AS capacity_wait,
                j.payload_json->>'capacity_wait_reason' AS capacity_wait_reason
         FROM agent_jobs j
-        JOIN servers s ON s.id = j.server_id
+        LEFT JOIN servers s ON s.id = j.server_id
         WHERE j.id=$1
           {}
         "#,
@@ -142,7 +142,7 @@ pub async fn list_agent_jobs(
                j.payload_json->>'capacity_wait_reason' AS capacity_wait_reason,
                j.attempt,j.max_attempts,j.claimed_by,j.created_at,j.updated_at,j.finished_at
         FROM agent_jobs j
-        JOIN servers s ON s.id = j.server_id
+        LEFT JOIN servers s ON s.id = j.server_id
         WHERE true
           {}
         ORDER BY j.created_at DESC
