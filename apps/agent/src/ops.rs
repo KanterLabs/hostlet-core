@@ -26,7 +26,7 @@ pub(crate) use host_resources::{collect_host_resource_snapshot, HostResourceSamp
 use reconcile::{
     container_actual_from_state, decide_reconcile, ContainerActual, ReconcileDecision,
 };
-pub(crate) use resource_stats::{parse_docker_bytes, publish_resource_stats};
+pub(crate) use resource_stats::{parse_docker_bytes, ResourceStatsScheduler};
 pub(crate) use routes::*;
 use screenshot_router::{
     build_screenshot_router_target, screenshot_create_args_with_router, ScreenshotRouterTarget,
