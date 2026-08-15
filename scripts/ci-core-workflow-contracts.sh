@@ -98,6 +98,7 @@ assert_contains "${CI_WORKFLOW}" 'bash scripts/ci-release-mainline-gate-selftest
 assert_not_contains "${CI_WORKFLOW}" 'pull_request:'
 assert_contains "${PR_WORKFLOW}" 'pull_request_target:'
 assert_contains "${PR_WORKFLOW}" "homelab-ci-approved"
+assert_contains "${PR_WORKFLOW}" 'bash scripts/ci-backup-selftest.sh'
 assert_contains "${PR_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
 assert_contains "${PR_WORKFLOW}" 'persist-credentials: false'
 assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
