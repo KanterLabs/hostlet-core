@@ -19,11 +19,12 @@ pub use inference::{
 };
 pub use protocol::*;
 pub use topology::{
-    attach_topology_plan, plan_repository_topology, validate_generated_topology_config,
+    attach_topology_plan, plan_repository_topology, runtime_config_has_generated_topology_addons,
+    validate_generated_topology_config, validate_runtime_config_compatibility,
     GeneratedTopologyConfig, HealthProbe, HealthProbeKind, InferenceConfidence, InferredRouting,
     InferredService, RepositoryFile, RepositoryInventory, ServiceCandidate, ServiceRole,
     TopologyPlan, TopologyReadiness, DEFAULT_BACKEND_PATH_PREFIXES,
-    GENERATED_TOPOLOGY_SCHEMA_VERSION,
+    GENERATED_TOPOLOGY_ADDONS_WARNING, GENERATED_TOPOLOGY_SCHEMA_VERSION,
 };
 pub use validation::{
     clean_hostlet_config_path, clean_runtime_config, dangerous_host_process_env_key, domain_host,
