@@ -113,6 +113,46 @@ mkdir -m 700 "$screenshot_archive_extract"
 tar -xzf "$screenshot_backup/hostlet-screenshots-state.tar.gz" -C "$screenshot_archive_extract"
 cmp "$screenshot_source/screenshot.webp" "$screenshot_archive_extract/screenshot.webp"
 
+identity_env="$TMP_DIR/custom-compose.env"
+printf '%s\n' POSTGRES_USER=selected_owner POSTGRES_DB=selected_database > "$identity_env"
+identity_log="$TMP_DIR/identity.log"
+cat > "$FAKE_BIN/docker" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${HOSTLET_IDENTITY_TEST_LOG:?}"
+if [[ "$*" == *"ps --status running --services"* ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == compose && "$*" == *pg_dump* ]]; then
+  printf '%s\n' '-- PostgreSQL database dump' '-- Hostlet backup self-test'
+  exit 0
+fi
+if [[ "${1:-}" == volume && "${2:-}" == inspect ]]; then
+  exit 1
+fi
+exit 0
+SHIM
+chmod 700 "$FAKE_BIN/docker"
+identity_backup_root="$TMP_DIR/identity-backups"
+identity_backup="$identity_backup_root/snapshot"
+POSTGRES_USER=inherited_owner POSTGRES_DB=inherited_database \
+  PATH="$FAKE_BIN:$PATH" HOSTLET_BACKUP_ROOT="$identity_backup_root" \
+  HOSTLET_IDENTITY_TEST_LOG="$identity_log" \
+  bash "$ROOT_DIR/scripts/backup.sh" --env-file "$identity_env" "$identity_backup" >/dev/null
+grep -q 'pg_dump -U selected_owner selected_database' "$identity_log"
+
+identity_restore="$TMP_DIR/identity-restore"
+mkdir -m 700 "$identity_restore"
+printf '%s\n' '-- PostgreSQL database dump' 'SET client_encoding = '\''UTF8'\'';' \
+  '-- PostgreSQL database dump complete' > "$identity_restore/postgres.sql"
+identity_journal="$TMP_DIR/identity-journal"
+POSTGRES_USER=inherited_owner POSTGRES_DB=inherited_database \
+  PATH="$FAKE_BIN:$PATH" HOSTLET_RESTORE_CONFIRM=yes \
+  HOSTLET_RESTORE_JOURNAL="$identity_journal" HOSTLET_IDENTITY_TEST_LOG="$identity_log" \
+  bash "$ROOT_DIR/scripts/restore.sh" --env-file "$identity_env" "$identity_restore" >/dev/null
+grep -q 'psql -U selected_owner -d selected_database' "$identity_log"
+[[ ! -e "$identity_journal" ]]
+
 restore_log="$TMP_DIR/restore.log"
 cat > "$FAKE_BIN/docker" <<'SHIM'
 #!/usr/bin/env bash

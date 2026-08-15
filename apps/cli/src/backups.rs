@@ -16,10 +16,27 @@ pub(crate) fn script_compose_env(root: &Path, dev: bool) -> Vec<(String, String)
     } else {
         "infra/docker-compose.prod.yml"
     };
-    let mut env = vec![(
-        "HOSTLET_COMPOSE_FILE".to_string(),
-        root.join(compose_file).display().to_string(),
-    )];
+    let parsed = read_env_file(&root.join(".env")).unwrap_or_default();
+    let postgres_user = parsed
+        .get("POSTGRES_USER")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "hostlet".into());
+    let postgres_db = parsed
+        .get("POSTGRES_DB")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "hostlet".into());
+    let mut env = vec![
+        (
+            "HOSTLET_COMPOSE_FILE".to_string(),
+            root.join(compose_file).display().to_string(),
+        ),
+        ("HOSTLET_POSTGRES_USER".to_string(), postgres_user.clone()),
+        ("HOSTLET_POSTGRES_DB".to_string(), postgres_db.clone()),
+        ("POSTGRES_USER".to_string(), postgres_user),
+        ("POSTGRES_DB".to_string(), postgres_db),
+    ];
     // Mirror `compose_args`: only pass the env file when it exists so pre-init
     // flows do not point compose at a missing file.
     let env_file = root.join(".env");
@@ -162,7 +179,11 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join(".env"), "POSTGRES_PASSWORD=secret\n").unwrap();
+        fs::write(
+            root.join(".env"),
+            "POSTGRES_PASSWORD=secret\nPOSTGRES_USER=backup_owner\nPOSTGRES_DB=hostlet_production\n",
+        )
+        .unwrap();
 
         // Backup/restore always run in production mode (dev=false).
         let env: std::collections::BTreeMap<String, String> =
@@ -178,6 +199,11 @@ mod tests {
         assert_eq!(
             env.get("HOSTLET_COMPOSE_ENV_FILE"),
             Some(&expected_env_file)
+        );
+        assert_eq!(env.get("POSTGRES_USER"), Some(&"backup_owner".to_string()));
+        assert_eq!(
+            env.get("POSTGRES_DB"),
+            Some(&"hostlet_production".to_string())
         );
 
         let _ = fs::remove_dir_all(&root);

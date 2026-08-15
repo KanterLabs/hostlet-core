@@ -51,6 +51,9 @@ environment variables. Backups intentionally do not copy `.env`, `.env.prod`,
 raw secret values, private keys, or plaintext app environment files.
 
 Restores require the original `ENCRYPTION_KEY`. Without it, encrypted GitHub tokens and app environment variables cannot be decrypted.
+Backup and restore read `POSTGRES_USER` and `POSTGRES_DB` from the selected
+Compose env file, so installations using non-default database identities are
+restored against the same database.
 
 Before changing the database or agent state, restore fences the API, web, local
 agent, and Caddy containers. A failed restore restarts those writers when it

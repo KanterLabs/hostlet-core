@@ -4,8 +4,8 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${HOSTLET_COMPOSE_FILE:-$ROOT_DIR/infra/docker-compose.yml}"
-POSTGRES_USER="${POSTGRES_USER:-hostlet}"
-POSTGRES_DB="${POSTGRES_DB:-hostlet}"
+POSTGRES_USER="${POSTGRES_USER:-}"
+POSTGRES_DB="${POSTGRES_DB:-}"
 AGENT_VOLUME="${HOSTLET_AGENT_VOLUME:-infra_hostlet-agent}"
 SCREENSHOT_VOLUME="${HOSTLET_SCREENSHOT_VOLUME:-infra_hostlet-screenshots}"
 AGENT_IMAGE="${HOSTLET_AGENT_IMAGE:-alpine:3.22}"
@@ -50,6 +50,43 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+read_env_value() {
+  local key="$1" file="$2" line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*=(.*)$ ]] || continue
+    value="${BASH_REMATCH[1]}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ "$value" == \"* && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+      value="${value//\\\"/\"}"
+      value="${value//\\\\/\\}"
+    elif [[ "$value" == \'* && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    printf '%s' "$value"
+    return 0
+  done < "$file"
+  return 1
+}
+
+if [[ -n "$COMPOSE_ENV_FILE" ]]; then
+  [[ -f "$COMPOSE_ENV_FILE" && ! -L "$COMPOSE_ENV_FILE" ]] || {
+    echo "Compose env file is missing or is not a regular file: $COMPOSE_ENV_FILE" >&2
+    exit 1
+  }
+  if [[ "$COMPOSE_ENV_FILE" != /* ]]; then
+    COMPOSE_ENV_FILE="$PWD/$COMPOSE_ENV_FILE"
+  fi
+  selected_user="$(read_env_value POSTGRES_USER "$COMPOSE_ENV_FILE" || true)"
+  selected_db="$(read_env_value POSTGRES_DB "$COMPOSE_ENV_FILE" || true)"
+  POSTGRES_USER="${selected_user:-$POSTGRES_USER}"
+  POSTGRES_DB="${selected_db:-$POSTGRES_DB}"
+fi
+POSTGRES_USER="${POSTGRES_USER:-hostlet}"
+POSTGRES_DB="${POSTGRES_DB:-hostlet}"
+
 if [[ -z "$BACKUP_DIR" ]]; then
   echo "Usage: $0 [--env-file <path>] /path/to/hostlet-backup" >&2
   exit 1
