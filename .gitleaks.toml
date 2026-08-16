@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated code-map fingerprints are content hashes, not credentials"
+paths = [
+  '''(?:^|/)docs/codemap/codemap\.lock$''',
+]
