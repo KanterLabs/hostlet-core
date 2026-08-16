@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "hostlet"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "base64",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "hostlet-agent"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "base64",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "hostlet-api"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "aes-gcm",
  "anyhow",
