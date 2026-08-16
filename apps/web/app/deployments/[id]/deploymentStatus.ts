@@ -30,19 +30,20 @@ export type StepState = {
 };
 
 export function statusSteps(status: string): StepState[] {
-  const failed = status === "failed";
-  const currentStep = failed ? "success" : status;
+  const terminalFailure = status === "failed" || status === "canceled" || status === "cancelled" || status === "rolled_back";
+  const currentStep = terminalFailure ? "success" : status;
   const activeIndex = DEPLOYMENT_STEPS.indexOf(currentStep as DeploymentStep);
 
   return DEPLOYMENT_STEPS.map((step, index) => ({
     step,
     current: step === currentStep,
-    done: failed ? index < DEPLOYMENT_STEPS.length - 1 : activeIndex >= index,
-    failed: failed && step === currentStep,
+    done: terminalFailure ? index < DEPLOYMENT_STEPS.length - 1 : activeIndex >= index,
+    failed: terminalFailure && step === currentStep,
   }));
 }
 
 export function humanStatus(status: string) {
+  if (status === "cancelled") return "canceled";
   return status.replaceAll("_", " ");
 }
 
@@ -56,7 +57,11 @@ export function statusHelp(status: string) {
     case "health_checking": return "Hostlet is waiting for the app to answer on the configured port and health path.";
     case "routing": return "The app passed health checks. Hostlet is making it reachable.";
     case "success": return "Deployment succeeded.";
+    case "rolled_back": return "Deployment rolled back to the previous working version.";
     case "failed": return "Deployment failed. The previous working version was preserved.";
+    case "canceled":
+    case "cancelled": return "Deployment was canceled before activation.";
+    case "waiting_capacity": return "Deployment is waiting for available server/runtime capacity.";
     default: return "Deployment is queued or running.";
   }
 }

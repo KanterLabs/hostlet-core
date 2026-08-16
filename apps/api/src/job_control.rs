@@ -1,4 +1,4 @@
-use crate::{deploy, state::AppState};
+use crate::{agent::locks, deploy, state::AppState};
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use sqlx::Row;
 use uuid::Uuid;
@@ -167,13 +167,16 @@ pub async fn enqueue_interactive_agent_job_for_actor(
     let mut transaction = state.db.begin().await?;
     // Keep the same teardown fence protocol as deploy::enqueue_agent_job.
     // The app row lock serializes this enqueue with start_app_teardown.
-    let queue_priority_offset = sqlx::query_scalar::<_, i32>(
-        "SELECT queue_priority_offset FROM apps WHERE id=$1 FOR KEY SHARE",
-    )
-    .bind(job.app_id)
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
+    locks::app(&mut transaction, job.app_id).await?;
+    if let Some(deployment_id) = job.deployment_id {
+        locks::deployment(&mut transaction, deployment_id, job.app_id).await?;
+    }
+    let queue_priority_offset =
+        sqlx::query_scalar::<_, i32>("SELECT queue_priority_offset FROM apps WHERE id=$1")
+            .bind(job.app_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
     let deletion_fenced = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(
            SELECT 1 FROM agent_jobs
@@ -379,6 +382,30 @@ async fn fence_app_jobs_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     app_id: Uuid,
 ) -> anyhow::Result<u64> {
+    let rows = sqlx::query(
+        "SELECT id,deployment_id
+         FROM agent_jobs
+         WHERE app_id=$1 AND job_type<>'delete_app'
+           AND status IN ('queued','claimed','running')
+         ORDER BY id",
+    )
+    .bind(app_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut deployment_ids = rows
+        .iter()
+        .filter_map(|row| row.get::<Option<Uuid>, _>("deployment_id"))
+        .collect::<Vec<_>>();
+    deployment_ids.sort_unstable();
+    deployment_ids.dedup();
+    locks::deployments(transaction, &deployment_ids).await?;
+    let mut job_ids = rows
+        .iter()
+        .map(|row| row.get::<Uuid, _>("id"))
+        .collect::<Vec<_>>();
+    job_ids.sort_unstable();
+    job_ids.dedup();
+    locks::jobs(transaction, &job_ids).await?;
     let active_jobs = sqlx::query_scalar::<_, i64>(
         "WITH fenced AS (
            UPDATE agent_jobs
@@ -568,22 +595,129 @@ pub async fn cancel_agent_job_for_actor(
     id: Uuid,
     actor: JobAuditActor<'_>,
 ) -> anyhow::Result<AgentJobCancelOutcome> {
-    let update = cancel_agent_job_update_sql(actor);
-    match run_job_mutation_for_actor(
-        state,
-        id,
-        visibility,
-        &update,
-        JobMutationAudit {
-            event_type: "agent_job_cancelled",
-            actor,
-        },
-    )
-    .await?
-    {
-        JobMutationOutcome::Mutated => Ok(AgentJobCancelOutcome::Cancelled),
-        JobMutationOutcome::NotFound => Ok(AgentJobCancelOutcome::NotFound),
+    let select = format!(
+        "SELECT j.app_id,j.deployment_id,j.job_type
+         FROM agent_jobs j
+         WHERE j.id=$1
+           {}
+           AND j.status IN ('queued','claimed','running')",
+        agent_job_visibility_predicate(2, 3)
+    );
+    let mut transaction = state.db.begin().await?;
+    let Some(target) = sqlx::query(&select)
+        .bind(id)
+        .bind(visibility.user_id)
+        .bind(visibility.cloud_mode)
+        .fetch_optional(&mut *transaction)
+        .await?
+    else {
+        transaction.commit().await?;
+        return Ok(AgentJobCancelOutcome::NotFound);
+    };
+    let target_app_id = target.get::<Option<Uuid>, _>("app_id");
+    let deployment_id = target.get::<Option<Uuid>, _>("deployment_id");
+    let lock_app_id = match (target_app_id, deployment_id) {
+        (Some(app_id), _) => Some(app_id),
+        (None, Some(deployment_id)) => {
+            sqlx::query_scalar::<_, Uuid>("SELECT app_id FROM deployments WHERE id=$1")
+                .bind(deployment_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+        }
+        (None, None) => None,
+    };
+    if let Some(app_id) = lock_app_id {
+        locks::app(&mut transaction, app_id).await?;
+        if let Some(deployment_id) = deployment_id {
+            locks::deployment(&mut transaction, deployment_id, app_id).await?;
+        }
     }
+    // The app/deployment rows are held before the job row, matching activation,
+    // suspension, and capacity admission. This is the cancellation fence.
+    locks::job(&mut transaction, id, target_app_id, deployment_id).await?;
+    let update = cancel_agent_job_update_sql(actor);
+    let Some(updated) = sqlx::query(&update)
+        .bind(id)
+        .bind(visibility.user_id)
+        .bind(visibility.cloud_mode)
+        .fetch_optional(&mut *transaction)
+        .await?
+    else {
+        transaction.commit().await?;
+        return Ok(AgentJobCancelOutcome::NotFound);
+    };
+    let app_id = updated.get::<Option<Uuid>, _>("app_id").or(lock_app_id);
+    let job_status = updated.get::<String, _>("status");
+    if job_status == "cancelled" {
+        if let Some(deployment_id) = deployment_id {
+            sqlx::query(
+                "UPDATE deployments
+                 SET status='canceled',failure_code=$2,
+                     failure_summary=COALESCE(failure_summary,$3),finished_at=clock_timestamp()
+                 WHERE id=$1 AND status=ANY($4)",
+            )
+            .bind(deployment_id)
+            .bind(if actor.actor_type == "owner" {
+                "cancelled_by_owner"
+            } else {
+                "cancelled_by_requester"
+            })
+            .bind(if actor.actor_type == "owner" {
+                "Cancelled by owner before the agent started work."
+            } else {
+                "Cancelled by requester before the agent started work."
+            })
+            .bind(deploy::ACTIVE_DEPLOYMENT_STATUSES)
+            .execute(&mut *transaction)
+            .await?;
+            if target.get::<String, _>("job_type") == "build" {
+                sqlx::query(
+                    "UPDATE deployment_builds
+                     SET status='canceled',failure_code=COALESCE(failure_code,$2),
+                         failure_summary=COALESCE(failure_summary,$3),
+                         finished_at=clock_timestamp(),updated_at=clock_timestamp()
+                     WHERE deployment_id=$1
+                       AND status NOT IN ('succeeded','failed','canceled')",
+                )
+                .bind(deployment_id)
+                .bind(if actor.actor_type == "owner" {
+                    "cancelled_by_owner"
+                } else {
+                    "cancelled_by_requester"
+                })
+                .bind(if actor.actor_type == "owner" {
+                    "Cancelled by owner before the agent started work."
+                } else {
+                    "Cancelled by requester before the agent started work."
+                })
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+    }
+    // Clear the activation fence for every direct cancellation, including an
+    // active build whose agent must still acknowledge the cancellation.
+    if let (Some(app_id), Some(deployment_id)) = (app_id, deployment_id) {
+        sqlx::query(
+            "UPDATE apps SET pending_deployment_id=NULL,updated_at=clock_timestamp()
+             WHERE id=$1 AND pending_deployment_id=$2",
+        )
+        .bind(app_id)
+        .bind(deployment_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    record_agent_job_audit_event_in_transaction(
+        &mut transaction,
+        actor,
+        "agent_job_cancelled",
+        app_id,
+        deployment_id,
+        Some(id),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(AgentJobCancelOutcome::Cancelled)
 }
 
 fn retry_creates_fresh_deployment(job_type: &str) -> bool {
@@ -638,42 +772,25 @@ async fn retry_deployment_job_for_actor(
 fn cancel_agent_job_update_sql(actor: JobAuditActor<'_>) -> String {
     // These are fixed SQL literals selected from actor type, never caller
     // supplied text interpolated into the query.
-    let (summary, failure_code) = if actor.actor_type == "owner" {
-        (
-            "Cancelled by owner before the agent started work.",
-            "cancelled_by_owner",
-        )
+    let summary = if actor.actor_type == "owner" {
+        "Cancelled by owner before the agent started work."
     } else {
-        (
-            "Cancelled by requester before the agent started work.",
-            "cancelled_by_requester",
-        )
+        "Cancelled by requester before the agent started work."
     };
     format!(
         r#"
-        WITH updated AS (
-          UPDATE agent_jobs j
-          SET status=CASE WHEN j.status='queued' THEN 'cancelled' ELSE j.status END,
-              cancel_requested_at=CASE WHEN j.status IN ('claimed','running') THEN now() ELSE j.cancel_requested_at END,
-              failure_summary=CASE WHEN j.status='queued' THEN '{summary}' ELSE j.failure_summary END,
-              last_error=CASE WHEN j.status='queued' THEN '{summary}' ELSE j.last_error END,
-              payload_json=CASE WHEN j.status='queued' THEN j.payload_json - 'env' - 'github_token' - 'artifact_registry' ELSE j.payload_json END,
-              finished_at=CASE WHEN j.status='queued' THEN now() ELSE j.finished_at END,
-              updated_at=now()
-          WHERE j.id=$1
-            {}
-            AND j.status IN ('queued','claimed','running')
-          RETURNING j.app_id,j.deployment_id,j.status
-        ), cancelled_deployment AS (
-          UPDATE deployments d
-          SET status='canceled',failure_code='{failure_code}',
-              failure_summary='{summary}',finished_at=now()
-          FROM updated u
-          WHERE u.status='cancelled' AND d.id=u.deployment_id
-            AND d.status = ANY(ARRAY['queued','queued_for_build','running','building','publishing','queued_for_release','pulling','starting','health_checking','routing'])
-          RETURNING d.id
-        )
-        SELECT app_id,deployment_id FROM updated
+        UPDATE agent_jobs j
+        SET status=CASE WHEN j.status='queued' THEN 'cancelled' ELSE j.status END,
+            cancel_requested_at=CASE WHEN j.status IN ('claimed','running') THEN clock_timestamp() ELSE j.cancel_requested_at END,
+            failure_summary=CASE WHEN j.status='queued' THEN '{summary}' ELSE j.failure_summary END,
+            last_error=CASE WHEN j.status='queued' THEN '{summary}' ELSE j.last_error END,
+            payload_json=CASE WHEN j.status='queued' THEN j.payload_json - 'env' - 'github_token' - 'artifact_registry' ELSE j.payload_json END,
+            finished_at=CASE WHEN j.status='queued' THEN clock_timestamp() ELSE j.finished_at END,
+            updated_at=clock_timestamp()
+        WHERE j.id=$1
+          {}
+          AND j.status IN ('queued','claimed','running')
+        RETURNING j.app_id,j.deployment_id,j.status
         "#,
         agent_job_visibility_predicate(2, 3)
     )
@@ -787,14 +904,12 @@ mod tests {
     fn cancel_sql_uses_actor_accurate_fixed_messages() {
         let owner_sql = cancel_agent_job_update_sql(JobAuditActor::owner());
         assert!(owner_sql.contains("Cancelled by owner before the agent started work."));
-        assert!(owner_sql.contains("failure_code='cancelled_by_owner'"));
         assert!(owner_sql.contains("j.payload_json - 'env' - 'github_token' - 'artifact_registry'"));
         assert!(owner_sql.contains("cancel_requested_at"));
 
         let operator_sql =
             cancel_agent_job_update_sql(JobAuditActor::new("operator", Some("admin-123")));
         assert!(operator_sql.contains("Cancelled by requester before the agent started work."));
-        assert!(operator_sql.contains("failure_code='cancelled_by_requester'"));
         assert!(!operator_sql.contains("Cancelled by owner"));
         assert!(!operator_sql.contains("cancelled_by_owner"));
     }

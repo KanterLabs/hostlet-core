@@ -472,18 +472,6 @@ pub(crate) fn add_routing_runtime_metadata(
     }
 }
 
-pub(crate) async fn stream_lines<R: tokio::io::AsyncRead + Unpin>(
-    cfg: Config,
-    deployment_id: Uuid,
-    stream: &str,
-    reader: R,
-) {
-    let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        log(&cfg, deployment_id, stream, &redact(&line)).await;
-    }
-}
-
 pub(crate) async fn wait_health(
     cfg: &Config,
     deployment_id: Uuid,

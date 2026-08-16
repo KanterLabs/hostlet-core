@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { firstErrorLine } from "@/components/ui";
-import { statusSteps } from "@/app/deployments/[id]/deploymentStatus";
+import { statusHelp, statusSteps } from "@/app/deployments/[id]/deploymentStatus";
+import { mergeDeploymentLogHistory } from "@/lib/useDeploymentLogs";
 
 const validRuntimeMetadata = {
   packagingStrategy: "generated",
@@ -92,6 +93,110 @@ test("deployment detail shows queue position while waiting", async ({ page }) =>
   await expect(page.getByText("3 deploys ahead of you")).toBeVisible();
 });
 
+test("terminal deployment stops polling and closes its live socket", async ({ page }) => {
+  let deploymentRequests = 0;
+  await page.addInitScript(() => {
+    const stats = { opened: 0, closed: 0 };
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+
+      constructor() {
+        stats.opened += 1;
+        queueMicrotask(() => this.onopen?.());
+      }
+
+      close() {
+        stats.closed += 1;
+        this.onclose?.();
+      }
+    }
+
+    Object.defineProperty(window, "__hostletSocketStats", {
+      configurable: true,
+      value: stats,
+    });
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: FakeWebSocket,
+    });
+  });
+  await mockDeploymentApi(page, validRuntimeMetadata, { status: "success" }, undefined, {
+    onDeploymentRequest: () => { deploymentRequests += 1; },
+  });
+  await page.goto("/deployments/deploy-1");
+
+  await expect(page.getByText("stream ended")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as typeof window & {
+    __hostletSocketStats: { opened: number; closed: number };
+  }).__hostletSocketStats)).toEqual({ opened: 1, closed: 1 });
+  await page.waitForTimeout(3_000);
+  expect(deploymentRequests).toBe(1);
+});
+
+test("terminal transition retains live logs when history requests are delayed and fail", async ({ page }) => {
+  const deployment = { status: "building" };
+  let deploymentRequests = 0;
+  await page.addInitScript(() => {
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+
+      constructor() {
+        queueMicrotask(() => {
+          this.onopen?.();
+          this.onmessage?.({ data: JSON.stringify({ stream: "stdout", line: "live before terminal" }) });
+        });
+      }
+
+      close() {
+        this.onclose?.();
+      }
+    }
+
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: FakeWebSocket,
+    });
+  });
+  await mockDeploymentApi(page, validRuntimeMetadata, deployment, [], {
+    logDelayMs: 100,
+    logStatus: 500,
+    onDeploymentRequest: () => {
+      deploymentRequests += 1;
+      if (deploymentRequests >= 2) deployment.status = "failed";
+    },
+  });
+  await page.goto("/deployments/deploy-1");
+
+  await expect(page.getByText("live before terminal", { exact: true })).toBeVisible();
+  await expect(page.getByText("stream ended")).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByText("live before terminal", { exact: true })).toBeVisible();
+});
+
+test("capacity waiting help names server/runtime capacity", () => {
+  expect(statusHelp("waiting_capacity")).toBe("Deployment is waiting for available server/runtime capacity.");
+});
+
+for (const [status, label, help] of [
+  ["canceled", "canceled", "Deployment was canceled before activation."],
+  ["cancelled", "canceled", "Deployment was canceled before activation."],
+  ["rolled_back", "rolled back", "Deployment rolled back to the previous working version."],
+] as const) {
+  test(`deployment detail treats ${status} as terminal log output`, async ({ page }) => {
+    await mockDeploymentApi(page, validRuntimeMetadata, { status });
+    await page.goto("/deployments/deploy-1");
+
+    await expect(page.getByRole("heading", { name: "Deployment logs" })).toBeVisible();
+    await expect(page.getByText(label, { exact: true })).toBeVisible();
+    await expect(page.getByText(help)).toBeVisible();
+    await expect(page.getByText("stream ended")).toBeVisible();
+  });
+}
+
 test("deployment log first error ignores railpack command flags", async ({ page }) => {
   await mockDeploymentApi(page, validRuntimeMetadata, { status: "failed", failure: "Generated image build failed." }, [
     { stream: "stdout", line: "$ railpack build --name hostlet/app-demo:image --progress plain --error-missing-start /var/lib/hostlet/repos/app-demo" },
@@ -101,6 +206,130 @@ test("deployment log first error ignores railpack command flags", async ({ page 
 
   await expect(page.getByText("First error in the log")).toBeVisible();
   await expect(page.locator(".border-red-300").getByText("stderr: error: no start command could be inferred")).toBeVisible();
+});
+
+test("deployment logs merge delayed history with live lines exactly once", async ({ page }) => {
+  await page.addInitScript(() => {
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      readyState = 0;
+
+      constructor() {
+        setTimeout(() => {
+          this.readyState = 1;
+          this.onopen?.();
+          this.onmessage?.({ data: JSON.stringify({ stream: "stdout", line: "during request" }) });
+          this.onmessage?.({ data: JSON.stringify({ stream: "stdout", line: "after snapshot" }) });
+        }, 0);
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+    }
+
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: FakeWebSocket,
+    });
+  });
+  await mockDeploymentApi(
+    page,
+    validRuntimeMetadata,
+    { status: "building" },
+    [
+      { stream: "stdout", line: "history start" },
+      { stream: "stdout", line: "during request" },
+    ],
+    { logDelayMs: 100 },
+  );
+  await page.goto("/deployments/deploy-1");
+
+  await expect(page.getByText("history start", { exact: true })).toBeVisible();
+  await expect(page.getByText("during request", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("after snapshot", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("3 lines", { exact: true })).toBeVisible();
+});
+
+test("deployment log history merge preserves repeated lines outside the overlap", () => {
+  expect(mergeDeploymentLogHistory(
+    ["stdout: same", "stdout: same"],
+    ["stdout: same", "stdout: same", "stdout: same"],
+  )).toEqual(["stdout: same", "stdout: same", "stdout: same"]);
+});
+
+test("deployment logs reset when the deployment id changes", async ({ page }) => {
+  await page.addInitScript(() => {
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+
+      constructor() {
+        setTimeout(() => this.onopen?.(), 0);
+      }
+
+      close() {}
+    }
+
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: FakeWebSocket,
+    });
+  });
+  await mockDeploymentApi(page, { ...validRuntimeMetadata, backingSpecHash: "approved" }, {
+    status: "failed",
+    appId: "app-1",
+    failure: "Maintenance update requires approval.",
+    failureCode: "compose_backing_change_requires_approval",
+  }, [
+    { stream: "stdout", line: "first deployment line" },
+  ]);
+  await page.route("**/api/apps/app-1/deploy", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ deploymentId: "deploy-2" }),
+    });
+  });
+  await page.route("**/api/deployments/deploy-2", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "deploy-2",
+        appId: "app-1",
+        status: "success",
+        commitSha: "def5678",
+        failure: null,
+        runtimeMetadata: validRuntimeMetadata,
+      }),
+    });
+  });
+  await page.route("**/api/deployments/deploy-2/logs", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ stream: "stdout", line: "second deployment line" }]),
+    });
+  });
+  let documentNavigations = 0;
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) documentNavigations += 1;
+  });
+  await page.goto("/deployments/deploy-1");
+  await expect(page.getByText("first deployment line", { exact: true })).toBeVisible();
+
+  const nextDeployment = page.waitForResponse((response) => response.url().endsWith("/api/deployments/deploy-2"));
+  await page.getByRole("button", { name: "Approve maintenance update" }).click();
+  await nextDeployment;
+
+  expect(documentNavigations).toBe(1);
+  await expect(page.getByText("second deployment line", { exact: true })).toBeVisible();
+  await expect(page.getByText("first deployment line", { exact: true })).toHaveCount(0);
 });
 
 test("successful deployment does not promote transient health check retries", async ({ page }) => {
@@ -141,6 +370,20 @@ test("deployment status steps mark the terminal success step as failed", () => {
   expect(steps.at(-1)).toMatchObject({ step: "success", current: true, done: false, failed: true });
 });
 
+for (const status of ["canceled", "cancelled"]) {
+  test(`deployment status steps mark ${status} as terminal`, () => {
+    const steps = statusSteps(status);
+    expect(steps.slice(0, -1).every((step) => step.done && !step.failed)).toBe(true);
+    expect(steps.at(-1)).toMatchObject({ step: "success", current: true, done: false, failed: true });
+  });
+}
+
+test("deployment status steps treat rolled back deploys as terminal failure", () => {
+  const steps = statusSteps("rolled_back");
+  expect(steps.slice(0, -1).every((step) => step.done && !step.failed)).toBe(true);
+  expect(steps.at(-1)).toMatchObject({ step: "success", current: true, done: false, failed: true });
+});
+
 test("deployment status steps keep active in-progress states focused", () => {
   const steps = statusSteps("health_checking");
   expect(steps.find((step) => step.step === "health_checking")).toMatchObject({ current: true, done: true, failed: false });
@@ -152,6 +395,7 @@ async function mockDeploymentApi(
   runtimeMetadata: Record<string, unknown> = validRuntimeMetadata,
   deployment: Record<string, unknown> = {},
   logs: Array<{ stream: string; line: string }> = [{ stream: "stdout", line: "Health check passed." }],
+  options: { logDelayMs?: number; logStatus?: number; onDeploymentRequest?: () => void } = {},
 ) {
   await page.route("**/*", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -163,6 +407,7 @@ async function mockDeploymentApi(
       });
     }
     if (path === "/api/deployments/deploy-1") {
+      options.onDeploymentRequest?.();
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -178,8 +423,11 @@ async function mockDeploymentApi(
       });
     }
     if (path === "/api/deployments/deploy-1/logs") {
+      if (options.logDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.logDelayMs));
+      }
       return route.fulfill({
-        status: 200,
+        status: options.logStatus ?? 200,
         contentType: "application/json",
         body: JSON.stringify(logs),
       });

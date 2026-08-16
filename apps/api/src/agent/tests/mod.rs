@@ -4,6 +4,8 @@ use crate::deployment_policy::{
     DeploymentStatusDecision, DeploymentStatusEvent, DeploymentStatusPolicy,
 };
 
+mod authority;
+mod concurrency;
 mod deletion_fence;
 mod health;
 mod health_targets;
@@ -129,6 +131,11 @@ async fn assert_complete_success_marks_job_succeeded(
     headers: &HeaderMap,
     job_id: Uuid,
 ) {
+    let claim_token: Uuid = sqlx::query_scalar("SELECT claim_token FROM agent_jobs WHERE id=$1")
+        .bind(job_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     let status = complete_job_status(
         state,
         headers,
@@ -137,7 +144,7 @@ async fn assert_complete_success_marks_job_succeeded(
             status: "success".into(),
             failure: None,
             result: Some(serde_json::json!({"ok": true})),
-            claim_token: None,
+            claim_token: Some(claim_token),
         },
     )
     .await;

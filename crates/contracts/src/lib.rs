@@ -6,29 +6,42 @@ mod artifacts;
 pub mod compose;
 pub mod crypto;
 mod inference;
+mod inventory;
 mod protocol;
 mod topology;
 mod validation;
 pub use artifacts::*;
 pub use inference::{
-    compose_inspection, detect_start_command, dockerfile_inspection, gitea_inspection,
-    infer_addons_from_compose, infer_dockerfile, infer_package_json, infer_package_manager,
-    infer_service_addons, manifest_dependency_tokens, node_inspection, package_json_dependencies,
-    railpack_inspection, unknown_inspection, with_command_suggestion, with_detected_services,
-    CommandSuggestion, DetectedServices, DockerfileInference, PackageInference, RepoCommandFiles,
+    compose_inspection, compose_rejection_inspection, detect_start_command, dockerfile_inspection,
+    gitea_inspection, infer_addons_from_compose, infer_dockerfile, infer_package_json,
+    infer_package_manager, infer_service_addons, manifest_dependency_tokens, node_inspection,
+    package_json_dependencies, railpack_inspection, unknown_inspection, with_command_suggestion,
+    with_detected_services, CommandSuggestion, DetectedServices, DockerfileInference,
+    PackageInference, RepoCommandFiles,
+};
+pub use inventory::{
+    repository_inventory_entry_count_within_bound, repository_inventory_entry_is_visible,
+    repository_inventory_file_content_within_bound, repository_inventory_lock_file,
+    repository_inventory_noise_directory, repository_inventory_path,
+    repository_inventory_relevant_file_count_within_bound,
+    repository_inventory_response_is_complete, repository_inventory_select_candidates,
+    RepositoryInventoryCandidate, RepositoryInventorySelection,
+    REPOSITORY_INVENTORY_MAX_CONTENT_BYTES, REPOSITORY_INVENTORY_MAX_ENTRIES,
+    REPOSITORY_INVENTORY_MAX_FILE_BYTES, REPOSITORY_INVENTORY_MAX_RELEVANT_FILES,
 };
 pub use protocol::*;
 pub use topology::{
-    attach_topology_plan, plan_repository_topology, validate_generated_topology_config,
+    attach_topology_plan, plan_repository_topology, runtime_config_has_generated_topology_addons,
+    validate_generated_topology_config, validate_runtime_config_compatibility,
     GeneratedTopologyConfig, HealthProbe, HealthProbeKind, InferenceConfidence, InferredRouting,
     InferredService, RepositoryFile, RepositoryInventory, ServiceCandidate, ServiceRole,
     TopologyPlan, TopologyReadiness, DEFAULT_BACKEND_PATH_PREFIXES,
-    GENERATED_TOPOLOGY_SCHEMA_VERSION,
+    GENERATED_TOPOLOGY_ADDONS_WARNING, GENERATED_TOPOLOGY_SCHEMA_VERSION,
 };
 pub use validation::{
     clean_hostlet_config_path, clean_runtime_config, dangerous_host_process_env_key, domain_host,
     valid_app_name, valid_cpu_limit, valid_host_process_env_key, valid_memory_limit,
-    validate_env_pairs,
+    valid_relative_file_path, validate_env_pairs,
 };
 
 /// Defines a `snake_case` status enum whose wire string is shared by serde, the

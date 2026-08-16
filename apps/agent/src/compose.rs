@@ -787,30 +787,50 @@ async fn run_log_streamed(
     };
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let c1 = cfg.clone();
-    let c2 = cfg.clone();
+    let stdout_transport = LogTransport::new(cfg.clone(), deployment_id, "stdout");
+    let stderr_transport = LogTransport::new(cfg.clone(), deployment_id, "stderr");
+    let stdout_sender = stdout_transport.sender();
+    let stderr_sender = stderr_transport.sender();
     let stdout_task = tokio::spawn(async move {
-        stream_lines(c1, deployment_id, "stdout", stdout).await;
+        read_stream_lines(stdout, stdout_sender).await;
     });
     let stderr_task = tokio::spawn(async move {
-        stream_lines(c2, deployment_id, "stderr", stderr).await;
+        read_stream_lines(stderr, stderr_sender).await;
     });
-    let status = match tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await {
-        Ok(status) => status?,
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            bail!("{bin} timed out after 1800 seconds");
-        }
-    };
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    let wait_result = tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await;
+    let timed_out = wait_result.is_err();
+    if timed_out {
+        let _ = child.kill().await;
+        let _ = tokio::time::timeout(LOG_SHUTDOWN_TIMEOUT, child.wait()).await;
+    }
+    await_log_reader(stdout_task, "stdout").await;
+    await_log_reader(stderr_task, "stderr").await;
+    stdout_transport.shutdown().await;
+    stderr_transport.shutdown().await;
+    if timed_out {
+        bail!("{bin} timed out after 1800 seconds");
+    }
+    let status = wait_result
+        .expect("non-timeout wait result")
+        .with_context(|| format!("failed waiting for {bin}"))?;
     if !status.success() {
         bail!("{bin} exited with {status}");
     }
     Ok(())
+}
+
+async fn await_log_reader(mut task: tokio::task::JoinHandle<()>, stream: &'static str) {
+    if tokio::time::timeout(LOG_SHUTDOWN_TIMEOUT, &mut task)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            stream,
+            "discarding child output after reader shutdown deadline"
+        );
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 /// Hardens a host Docker/Compose command so a repo-controlled compose file can

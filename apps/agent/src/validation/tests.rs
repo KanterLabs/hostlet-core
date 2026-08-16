@@ -424,6 +424,48 @@ volumes:
 }
 
 #[test]
+fn compose_validation_rejects_invalid_shapes_and_service_names() {
+    let uppercase = "services:\n  Web:\n    image: app\n";
+    assert!(validate_compose_subset(uppercase, "Web").is_err());
+
+    let null_service = "services:\n  web: null\n";
+    assert!(validate_compose_subset(null_service, "web").is_err());
+
+    let non_mapping_volumes = "services:\n  web:\n    image: app\nvolumes: []\n";
+    assert!(validate_compose_subset(non_mapping_volumes, "web").is_err());
+
+    let invalid_volume_name = "services:\n  web:\n    image: app\nvolumes:\n  Cache_Data:\n";
+    assert!(validate_compose_subset(invalid_volume_name, "web").is_err());
+
+    let service_volume_mapping = "services:\n  web:\n    image: app\n    volumes: {}\n";
+    assert!(validate_compose_subset(service_volume_mapping, "web").is_err());
+
+    let malformed_volume_entry = "services:\n  web:\n    image: app\n    volumes:\n      - null\n";
+    assert!(validate_compose_subset(malformed_volume_entry, "web").is_err());
+
+    let missing_volume_target = "services:\n  web:\n    image: app\n    volumes:\n      - type: volume\n        source: app-data\n";
+    assert!(validate_compose_subset(missing_volume_target, "web").is_err());
+
+    for entry in ["", "app-data", "app-data:", "app-data:relative"] {
+        let yaml_entry = serde_yaml::to_string(entry).unwrap();
+        let compose =
+            format!("services:\n  web:\n    image: app\n    volumes:\n      - {yaml_entry}");
+        assert!(validate_compose_subset(&compose, "web").is_err());
+    }
+
+    let relative_long_target = "services:\n  web:\n    image: app\n    volumes:\n      - type: volume\n        source: app-data\n        target: data\n";
+    assert!(validate_compose_subset(relative_long_target, "web").is_err());
+}
+
+#[test]
+fn relative_file_path_rejects_repeated_slashes() {
+    assert!(validate_relative_file_path("config/hostlet.yml").is_ok());
+    assert!(validate_relative_file_path("config//hostlet.yml").is_err());
+    assert!(validate_relative_file_path("config/compose?.yml").is_err());
+    assert!(validate_relative_file_path("config/compose#.yml").is_err());
+}
+
+#[test]
 fn remap_moves_relative_bind_to_named_volume_and_passes_subset() {
     // Mirrors homebase: a single web service persisting to ./data.
     let compose = r#"
@@ -442,7 +484,9 @@ services:
     assert!(value
         .get("volumes")
         .and_then(|v| v.as_mapping())
-        .is_some_and(|m| yaml_contains_key(m, "hostlet-app-data")));
+        .is_some_and(|m| {
+            m.contains_key(serde_yaml::Value::String("hostlet-app-data".to_string()))
+        }));
     // ...and the result now satisfies the very gate that rejected the bind.
     validate_compose_subset(&remapped, "web").unwrap();
 }
@@ -457,6 +501,14 @@ fn compose_named_volumes_use_stable_project_names() {
             "hostlet-app-123_cache-data".to_string()
         ]
     );
+
+    for name in ["Cache_Data", "CACHE-DATA", "cache_data"] {
+        let invalid = format!("services:\n  web:\n    image: app\nvolumes:\n  {name}:\n");
+        assert!(
+            compose_named_volume_names(&invalid, "hostlet-app-123").is_err(),
+            "volume name {name:?} must use the shared Compose grammar"
+        );
+    }
 }
 
 #[test]

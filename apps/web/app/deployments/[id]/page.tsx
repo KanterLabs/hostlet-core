@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Clock, RefreshCw, ScrollText, TerminalSquare, XCircle } from "lucide-react";
 import { AppShell, DataList, LogViewer, Notice, PageHeader, Panel, SectionHeader, StatusPill, SummaryItem } from "@/components/ui";
 import { useDeploymentLogs } from "@/lib/useDeploymentLogs";
-import { shortSha } from "@/lib/app-status";
+import { isTerminalDeploy, shortSha } from "@/lib/app-status";
 import { api } from "@/lib/api";
 import {
   formatBytes,
@@ -93,6 +93,20 @@ function queueMessage(queue?: DeploymentQueue | null) {
     return messages[queue.reason || ""] || "Waiting for a compatible build server";
   }
   const deploysAhead = Math.max(0, queue.deploysAhead ?? 0);
+  if (queue.status === "waiting_capacity") {
+    const capacityMessages: Record<string, string> = {
+      app_slots: "Waiting for an available app slot",
+      build_slot: "Waiting for an available build slot",
+      runtime_memory: "Waiting for available runtime memory",
+      service_slots: "Waiting for available service slots",
+      telemetry_stale: "Waiting for fresh server capacity telemetry",
+      live_memory: "Waiting for available memory",
+      disk: "Waiting for available disk space",
+    };
+    const message = capacityMessages[queue.reason || ""] || "Waiting for available server/runtime capacity";
+    if (deploysAhead === 0) return `${message}. You're next in line`;
+    return `${message}. ${deploysAhead} ${deploysAhead === 1 ? "deploy" : "deploys"} ahead of you`;
+  }
   if (deploysAhead === 0) return "You're next in line";
   return `${deploysAhead} ${deploysAhead === 1 ? "deploy" : "deploys"} ahead of you`;
 }
@@ -104,7 +118,7 @@ export default function DeploymentDetail({ params }: { params: Promise<{ id: str
   const { deployment, logs, socketState, socketMessage } = useDeploymentLogs<Deployment>(id);
 
   const status = deployment?.status || "loading";
-  const finished = status === "success" || status === "failed";
+  const finished = isTerminalDeploy(status);
   const steps = statusSteps(status);
   const metadata = deployment?.runtimeMetadata;
   const isCompose = metadata?.runtime === "compose";

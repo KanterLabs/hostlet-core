@@ -91,3 +91,37 @@ test("shows a danger notice when cleanup fails", async ({ page }) => {
   // lib/api throws Error(responseText) on a non-OK response; the hook surfaces it.
   await expect(page.getByText("docker daemon unreachable")).toBeVisible();
 });
+
+test("shows capacity-waiting jobs and sends their cancel action", async ({ page }) => {
+  const cancelRequests: string[] = [];
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/agent-jobs" && route.request().method() === "GET") {
+      await jsonRoute(route, [{
+        id: "job-capacity",
+        type: "deploy",
+        status: "waiting_capacity",
+        capacityWaitReason: "build_slot",
+        failure: null,
+        attempt: 1,
+        maxAttempts: 3,
+        createdAt: "2026-06-20T00:00:00Z",
+      }]);
+      return true;
+    }
+    if (path === "/api/agent-jobs/job-capacity/cancel" && route.request().method() === "POST") {
+      cancelRequests.push(path);
+      await jsonRoute(route, {});
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/settings");
+
+  await expect(page.getByText("waiting capacity", { exact: true })).toBeVisible();
+  await expect(page.getByText("Waiting for an available build slot.")).toBeVisible();
+  const cancel = page.getByRole("button", { name: "Cancel" });
+  await expect(cancel).toBeVisible();
+
+  await cancel.click();
+  await expect.poll(() => cancelRequests.length).toBe(1);
+});

@@ -16,10 +16,27 @@ pub(crate) fn script_compose_env(root: &Path, dev: bool) -> Vec<(String, String)
     } else {
         "infra/docker-compose.prod.yml"
     };
-    let mut env = vec![(
-        "HOSTLET_COMPOSE_FILE".to_string(),
-        root.join(compose_file).display().to_string(),
-    )];
+    let parsed = read_env_file(&root.join(".env")).unwrap_or_default();
+    let postgres_user = parsed
+        .get("POSTGRES_USER")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "hostlet".into());
+    let postgres_db = parsed
+        .get("POSTGRES_DB")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "hostlet".into());
+    let mut env = vec![
+        (
+            "HOSTLET_COMPOSE_FILE".to_string(),
+            root.join(compose_file).display().to_string(),
+        ),
+        ("HOSTLET_POSTGRES_USER".to_string(), postgres_user.clone()),
+        ("HOSTLET_POSTGRES_DB".to_string(), postgres_db.clone()),
+        ("POSTGRES_USER".to_string(), postgres_user),
+        ("POSTGRES_DB".to_string(), postgres_db),
+    ];
     // Mirror `compose_args`: only pass the env file when it exists so pre-init
     // flows do not point compose at a missing file.
     let env_file = root.join(".env");
@@ -106,7 +123,11 @@ pub(crate) fn record_latest_backup_metadata(root: &Path) -> anyhow::Result<()> {
 
 pub(crate) fn restore(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
     ensure_repo_root(root)?;
-    restore_preflight(root, backup_dir)?;
+    // Resolve the operator's path while the process still has the caller's
+    // working directory. The child script runs with `current_dir(root)`, so a
+    // relative path must never be reinterpreted against the repository.
+    let backup_dir = canonical_restore_path(backup_dir)?;
+    restore_preflight(root, &backup_dir)?;
     if !Confirm::new()
         .with_prompt("Restore replaces the current Hostlet database. Continue?")
         .default(false)
@@ -114,21 +135,33 @@ pub(crate) fn restore(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
     {
         bail!("restore canceled");
     }
-    let script = root.join("scripts/restore.sh");
-    let status = Command::new("bash")
-        .current_dir(root)
-        .env("HOSTLET_RESTORE_CONFIRM", "yes")
-        .envs(script_compose_env(root, false))
-        .arg(script)
-        .arg(backup_dir)
-        .status()?;
+    let status = restore_script_command(root, &backup_dir).status()?;
     if !status.success() {
         bail!("restore failed with {status}");
     }
     Ok(())
 }
 
+pub(crate) fn canonical_restore_path(backup_dir: &Path) -> anyhow::Result<PathBuf> {
+    backup_dir
+        .canonicalize()
+        .with_context(|| format!("backup directory does not exist: {}", backup_dir.display()))
+}
+
+fn restore_script_command(root: &Path, backup_dir: &Path) -> Command {
+    let script = root.join("scripts/restore.sh");
+    let mut command = Command::new("bash");
+    command
+        .current_dir(root)
+        .env("HOSTLET_RESTORE_CONFIRM", "yes")
+        .envs(script_compose_env(root, false))
+        .arg(script)
+        .arg(backup_dir);
+    command
+}
+
 pub(crate) fn restore_preflight(root: &Path, backup_dir: &Path) -> anyhow::Result<()> {
+    let backup_dir = canonical_restore_path(backup_dir)?;
     if !backup_dir.is_dir() {
         bail!("backup directory does not exist: {}", backup_dir.display());
     }
@@ -153,6 +186,9 @@ pub(crate) fn restore_preflight(root: &Path, backup_dir: &Path) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn prod_backup_command_carries_prod_compose_file_and_env_file() {
@@ -162,7 +198,11 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join(".env"), "POSTGRES_PASSWORD=secret\n").unwrap();
+        fs::write(
+            root.join(".env"),
+            "POSTGRES_PASSWORD=secret\nPOSTGRES_USER=backup_owner\nPOSTGRES_DB=hostlet_production\n",
+        )
+        .unwrap();
 
         // Backup/restore always run in production mode (dev=false).
         let env: std::collections::BTreeMap<String, String> =
@@ -178,6 +218,11 @@ mod tests {
         assert_eq!(
             env.get("HOSTLET_COMPOSE_ENV_FILE"),
             Some(&expected_env_file)
+        );
+        assert_eq!(env.get("POSTGRES_USER"), Some(&"backup_owner".to_string()));
+        assert_eq!(
+            env.get("POSTGRES_DB"),
+            Some(&"hostlet_production".to_string())
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -201,6 +246,37 @@ mod tests {
             "env file override must be absent when .env does not exist"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_path_is_canonicalized_before_script_changes_directory() {
+        let _cwd_guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("hostlet-cli-restore-path-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        let outside = root.join("outside");
+        let outside_backup = outside.join("backup");
+        let repo_backup = repo.join("backup");
+        fs::create_dir_all(&outside_backup).unwrap();
+        fs::create_dir_all(&repo_backup).unwrap();
+
+        // Resolve a relative path from the caller's outside-repo directory.
+        // The same spelling would point at repo/backup after the child script
+        // changes cwd, so this catches passing the raw path to the script.
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&outside).unwrap();
+        let relative_backup = Path::new("backup");
+        assert!(relative_backup.is_relative());
+        let canonical_result = canonical_restore_path(relative_backup);
+        std::env::set_current_dir(previous).unwrap();
+        let canonical = canonical_result.unwrap();
+
+        assert_eq!(canonical, outside_backup.canonicalize().unwrap());
+        assert_ne!(canonical, repo_backup.canonicalize().unwrap());
+        let command = restore_script_command(&repo, &canonical);
+        assert_eq!(command.get_args().last(), Some(canonical.as_os_str()));
         let _ = fs::remove_dir_all(&root);
     }
 }

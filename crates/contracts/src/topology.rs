@@ -10,8 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "topology_candidates.rs"]
+mod topology_candidates;
+use topology_candidates::{go_candidates, python_candidates, rust_candidates, static_candidates};
+
 pub const GENERATED_TOPOLOGY_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_BACKEND_PATH_PREFIXES: &[&str] = &["/api", "/graphql", "/socket.io", "/trpc"];
+pub const GENERATED_TOPOLOGY_ADDONS_WARNING: &str =
+    "Managed Postgres/Redis add-ons cannot be combined with generated topology yet. Add a hostlet.yml Compose manifest to run the inferred services and backing services together.";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +200,32 @@ pub fn validate_generated_topology_config(
     Ok(())
 }
 
+/// Returns whether a runtime config asks the generated-topology pipeline to
+/// deploy alongside managed Compose add-ons. Those pipelines have different
+/// service/network lifecycles, so accepting both would silently drop the
+/// add-ons when the agent selects generated topology first.
+pub fn runtime_config_has_generated_topology_addons(runtime_config: &Value) -> bool {
+    runtime_config.get("generatedTopology").is_some()
+        && runtime_config_has_managed_addons(runtime_config)
+}
+
+fn runtime_config_has_managed_addons(runtime_config: &Value) -> bool {
+    runtime_config
+        .pointer("/compose/addOns")
+        .and_then(Value::as_array)
+        .is_some_and(|add_ons| !add_ons.is_empty())
+}
+
+/// Rejects runtime combinations that cannot be represented by one agent
+/// deployment pipeline. Keep this shared by API input validation and the agent
+/// because queued jobs can outlive the inspection response or be replayed.
+pub fn validate_runtime_config_compatibility(runtime_config: &Value) -> Result<(), &'static str> {
+    if runtime_config_has_generated_topology_addons(runtime_config) {
+        return Err("managed add-ons require an explicit Compose runtime; generated topology cannot deploy them together");
+    }
+    Ok(())
+}
+
 fn valid_route_prefix(value: &str) -> bool {
     value.starts_with('/')
         && value != "/"
@@ -212,15 +244,30 @@ pub fn attach_topology_plan(mut inspection: Value, plan: &TopologyPlan) -> Value
     let Some(map) = inspection.as_object_mut() else {
         return inspection;
     };
+    let managed_addons = map
+        .get("runtimeConfig")
+        .is_some_and(runtime_config_has_managed_addons);
+    let generated_topology_addons = managed_addons && plan.readiness == TopologyReadiness::Ready;
     map.insert(
         "inferencePlan".to_string(),
         serde_json::to_value(plan).unwrap_or_else(|_| serde_json::json!({})),
     );
     map.insert(
         "deployable".to_string(),
-        serde_json::json!(plan.readiness == TopologyReadiness::Ready),
+        serde_json::json!(plan.readiness == TopologyReadiness::Ready && !generated_topology_addons),
     );
     map.insert("summary".to_string(), serde_json::json!(plan.summary));
+    if managed_addons && plan.readiness != TopologyReadiness::Unsupported {
+        let warnings = map
+            .entry("warnings")
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(warnings) = warnings.as_array_mut() {
+            let warning = serde_json::json!(GENERATED_TOPOLOGY_ADDONS_WARNING);
+            if !warnings.iter().any(|existing| existing == &warning) {
+                warnings.push(warning);
+            }
+        }
+    }
     if plan.readiness == TopologyReadiness::Ready {
         let config = GeneratedTopologyConfig::default();
         let runtime_config = map
@@ -611,173 +658,6 @@ fn source_file(path: &str) -> bool {
     )
 }
 
-fn static_candidates(files: &BTreeMap<String, String>) -> Vec<ServiceCandidate> {
-    files
-        .keys()
-        .filter(|path| path.ends_with("index.html"))
-        .filter_map(|path| {
-            let directory = parent_directory(path);
-            let has_manifest = files.contains_key(&join_directory(&directory, "package.json"));
-            (!has_manifest).then(|| ServiceCandidate {
-                selector: format!("static:{path}"),
-                name: directory.rsplit('/').next().unwrap_or("static").to_string(),
-                role: ServiceRole::Frontend,
-                root_directory: directory.clone(),
-                provider: "staticfile".to_string(),
-                package_manager: None,
-                build_command: None,
-                start_command: None,
-                output_directory: Some(directory),
-                container_port: 80,
-                health_probe: HealthProbe {
-                    kind: HealthProbeKind::Http,
-                    path: Some("/health".to_string()),
-                },
-                public_env: Vec::new(),
-                evidence: vec!["index.html".to_string()],
-            })
-        })
-        .collect()
-}
-
-fn python_candidates(files: &BTreeMap<String, String>) -> Vec<ServiceCandidate> {
-    files
-        .iter()
-        .filter(|(path, _)| path.ends_with("pyproject.toml") || path.ends_with("requirements.txt"))
-        .filter_map(|(path, contents)| {
-            let lower = contents.to_ascii_lowercase();
-            let framework = [
-                "fastapi",
-                "starlette",
-                "flask",
-                "django",
-                "gunicorn",
-                "uvicorn",
-            ]
-            .into_iter()
-            .find(|framework| lower.contains(framework))?;
-            let directory = parent_directory(path);
-            let (start, health) = if lower.contains("django") {
-                (
-                    "gunicorn --bind 0.0.0.0:$PORT config.wsgi:application".to_string(),
-                    HealthProbeKind::Http,
-                )
-            } else if lower.contains("flask") {
-                (
-                    "gunicorn --bind 0.0.0.0:$PORT app:app".to_string(),
-                    HealthProbeKind::Http,
-                )
-            } else {
-                (
-                    "uvicorn main:app --host 0.0.0.0 --port $PORT".to_string(),
-                    HealthProbeKind::Http,
-                )
-            };
-            Some(ServiceCandidate {
-                selector: format!("python:{path}"),
-                name: directory
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("python-app")
-                    .to_string(),
-                role: ServiceRole::Backend,
-                root_directory: directory.clone(),
-                provider: "python".to_string(),
-                package_manager: None,
-                build_command: None,
-                start_command: Some(in_directory(&directory, &start)),
-                output_directory: None,
-                container_port: 3000,
-                health_probe: HealthProbe {
-                    kind: health,
-                    path: Some("/".to_string()),
-                },
-                public_env: Vec::new(),
-                evidence: vec![format!("dependency {framework}")],
-            })
-        })
-        .collect()
-}
-
-fn go_candidates(files: &BTreeMap<String, String>) -> Vec<ServiceCandidate> {
-    files
-        .keys()
-        .filter(|path| path.ends_with("go.mod"))
-        .filter_map(|path| {
-            let directory = parent_directory(path);
-            let has_main = files.iter().any(|(candidate, contents)| {
-                candidate.starts_with(&format!("{}/", directory.trim_end_matches('.')))
-                    && candidate.ends_with(".go")
-                    && contents.contains("package main")
-            }) || (directory == "."
-                && files.iter().any(|(candidate, contents)| {
-                    candidate.ends_with(".go") && contents.contains("package main")
-                }));
-            has_main.then(|| ServiceCandidate {
-                selector: format!("golang:{path}"),
-                name: directory.rsplit('/').next().unwrap_or("go-app").to_string(),
-                role: ServiceRole::Backend,
-                root_directory: directory.clone(),
-                provider: "golang".to_string(),
-                package_manager: None,
-                build_command: Some(in_directory(&directory, "go build -o /app/hostlet-go .")),
-                start_command: Some("/app/hostlet-go".to_string()),
-                output_directory: None,
-                container_port: 3000,
-                health_probe: HealthProbe {
-                    kind: HealthProbeKind::Http,
-                    path: Some("/".to_string()),
-                },
-                public_env: Vec::new(),
-                evidence: vec!["go.mod and package main".to_string()],
-            })
-        })
-        .collect()
-}
-
-fn rust_candidates(files: &BTreeMap<String, String>) -> Vec<ServiceCandidate> {
-    files
-        .iter()
-        .filter(|(path, _)| path.ends_with("Cargo.toml"))
-        .filter_map(|(path, contents)| {
-            let directory = parent_directory(path);
-            let main_path = join_directory(&directory, "src/main.rs");
-            let has_main = files.contains_key(&main_path);
-            if !has_main || contents.contains("[workspace]") && !contents.contains("[package]") {
-                return None;
-            }
-            let name = toml_string(contents, "name").unwrap_or_else(|| {
-                directory
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("rust-app")
-                    .to_string()
-            });
-            Some(ServiceCandidate {
-                selector: format!("rust:{path}:{name}"),
-                name: name.clone(),
-                role: ServiceRole::Backend,
-                root_directory: directory.clone(),
-                provider: "rust".to_string(),
-                package_manager: None,
-                build_command: Some(in_directory(&directory, "cargo build --release")),
-                start_command: Some(format!(
-                    "/app/{}/target/release/{name}",
-                    directory.trim_start_matches("./")
-                )),
-                output_directory: None,
-                container_port: 3000,
-                health_probe: HealthProbe {
-                    kind: HealthProbeKind::Http,
-                    path: Some("/".to_string()),
-                },
-                public_env: Vec::new(),
-                evidence: vec!["Cargo binary target".to_string()],
-            })
-        })
-        .collect()
-}
-
 fn toml_string(contents: &str, key: &str) -> Option<String> {
     contents.lines().find_map(|line| {
         let (candidate, value) = line.split_once('=')?;
@@ -814,143 +694,5 @@ fn in_directory(directory: &str, command: &str) -> String {
 mod patchwork_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn inventory(files: &[(&str, &str)]) -> RepositoryInventory {
-        RepositoryInventory {
-            files: files
-                .iter()
-                .map(|(path, contents)| RepositoryFile {
-                    path: (*path).to_string(),
-                    contents: Some((*contents).to_string()),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn competing_backends_require_selection() {
-        let plan = plan_repository_topology(&inventory(&[
-            ("package.json", "{}"),
-            (
-                "apps/one/package.json",
-                r#"{"name":"one","scripts":{"start":"node one.js"},"dependencies":{"express":"1"}}"#,
-            ),
-            (
-                "apps/two/package.json",
-                r#"{"name":"two","scripts":{"start":"node two.js"},"dependencies":{"fastify":"1"}}"#,
-            ),
-        ]));
-        assert_eq!(plan.readiness, TopologyReadiness::NeedsSelection);
-        assert!(plan.services.is_empty());
-        assert_eq!(plan.candidates.len(), 2);
-    }
-
-    #[test]
-    fn noise_directories_do_not_become_candidates() {
-        let plan = plan_repository_topology(&inventory(&[(
-            "examples/demo/package.json",
-            r#"{"scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#,
-        )]));
-        assert_eq!(plan.readiness, TopologyReadiness::Unsupported);
-    }
-
-    #[test]
-    fn selected_config_requires_safe_prefixes_and_selector() {
-        let mut config = GeneratedTopologyConfig {
-            mode: "selected".to_string(),
-            ..GeneratedTopologyConfig::default()
-        };
-        assert!(validate_generated_topology_config(&config).is_err());
-        config.backend_selector = Some("node:apps/api/package.json:api".to_string());
-        assert!(validate_generated_topology_config(&config).is_ok());
-        config.backend_path_prefixes = vec!["/api/*".to_string()];
-        assert!(validate_generated_topology_config(&config).is_err());
-    }
-
-    #[test]
-    fn workspace_commands_follow_the_detected_package_manager() {
-        for (manager_file, manager_contents, expected) in [
-            ("package-lock.json", "{}", "npm run start --workspace api"),
-            ("yarn.lock", "", "yarn workspace api run start"),
-            ("bun.lock", "", "bun run --filter api start"),
-            (
-                "pnpm-lock.yaml",
-                "lockfileVersion: '9.0'",
-                "pnpm --filter api run start",
-            ),
-        ] {
-            let plan = plan_repository_topology(&inventory(&[
-                (manager_file, manager_contents),
-                (
-                    "apps/api/package.json",
-                    r#"{"name":"api","scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#,
-                ),
-            ]));
-            assert_eq!(plan.readiness, TopologyReadiness::Ready, "{manager_file}");
-            assert_eq!(
-                plan.services[0].start_command.as_deref(),
-                Some(expected),
-                "{manager_file}"
-            );
-        }
-    }
-
-    #[test]
-    fn supported_non_node_runtimes_are_inferred() {
-        let cases: &[(&[(&str, &str)], &str)] = &[
-            (
-                &[
-                    ("service/requirements.txt", "fastapi\nuvicorn"),
-                    ("service/main.py", "app = 1"),
-                ],
-                "python",
-            ),
-            (
-                &[
-                    ("service/go.mod", "module example.test/service"),
-                    ("service/main.go", "package main\nfunc main() {}"),
-                ],
-                "golang",
-            ),
-            (
-                &[
-                    (
-                        "service/Cargo.toml",
-                        "[package]\nname = \"service\"\nversion = \"0.1.0\"",
-                    ),
-                    ("service/src/main.rs", "fn main() {}"),
-                ],
-                "rust",
-            ),
-            (&[("site/index.html", "<h1>ok</h1>")], "staticfile"),
-        ];
-        for (files, provider) in cases {
-            let plan = plan_repository_topology(&inventory(files));
-            assert_eq!(plan.readiness, TopologyReadiness::Ready, "{provider}");
-            assert_eq!(plan.services[0].provider, *provider);
-        }
-    }
-
-    #[test]
-    fn attach_plan_preserves_existing_runtime_config_and_adds_auto_selection() {
-        let plan = plan_repository_topology(&inventory(&[(
-            "package.json",
-            r#"{"scripts":{"start":"node index.js"},"dependencies":{"express":"1"}}"#,
-        )]));
-        let inspection = attach_topology_plan(
-            serde_json::json!({"runtimeConfig":{"compose":{"addOns":[{"key":"postgres"}]}}}),
-            &plan,
-        );
-        assert_eq!(inspection["deployable"], true);
-        assert_eq!(
-            inspection["runtimeConfig"]["generatedTopology"]["mode"],
-            "auto"
-        );
-        assert_eq!(
-            inspection["runtimeConfig"]["compose"]["addOns"][0]["key"],
-            "postgres"
-        );
-    }
-}
+#[path = "topology/tests.rs"]
+mod tests;

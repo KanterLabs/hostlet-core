@@ -787,6 +787,40 @@ pub fn compose_inspection(
     Value::Object(result)
 }
 
+/// Builds a fail-closed inspection payload when an explicit Compose marker is
+/// present but its manifest cannot satisfy the agent's deploy-time contract.
+/// Keeping this shape in contracts lets API callers report a stable
+/// `runtimeKind: compose` result without inventing a second inspection schema.
+pub fn compose_rejection_inspection(
+    repo: &str,
+    branch: &str,
+    default_branch: &str,
+    hostlet_config_path: &str,
+    reason: &str,
+) -> Value {
+    let mut result = object_map(inspection_base(InspectionBaseInput {
+        repo,
+        branch,
+        default_branch,
+        deployable: false,
+        container_port: serde_json::json!(3000),
+        packaging_options: serde_json::json!(["auto"]),
+        recommended_packaging_strategy: "auto",
+        env: serde_json::json!([]),
+        warnings: serde_json::json!([format!(
+            "Hostlet Compose manifest is not deployable: {reason}"
+        )]),
+        summary: "Hostlet found a Compose marker but the manifest is invalid.".to_string(),
+    }));
+    result.insert("runtimeKind".into(), serde_json::json!("compose"));
+    result.insert(
+        "hostletConfigPath".into(),
+        serde_json::json!(hostlet_config_path),
+    );
+    result.insert("services".into(), serde_json::json!([]));
+    Value::Object(result)
+}
+
 pub fn unknown_inspection(repo: &str, branch: &str, default_branch: &str) -> Value {
     inspection_base(InspectionBaseInput {
         repo,

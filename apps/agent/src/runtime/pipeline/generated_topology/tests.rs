@@ -43,6 +43,24 @@ async fn topology_inventory_is_scoped_to_the_validated_project_root() {
     tokio::fs::remove_dir_all(checkout).await.unwrap();
 }
 
+#[tokio::test]
+async fn topology_inventory_rejects_url_delimiters_in_relevant_paths() {
+    let checkout = temp_checkout("url-delimiters");
+    tokio::fs::create_dir_all(checkout.join("src"))
+        .await
+        .unwrap();
+    for filename in ["app?.js", "app#.js"] {
+        tokio::fs::write(checkout.join("src").join(filename), "console.log(1);")
+            .await
+            .unwrap();
+    }
+
+    let inventory = checkout_inventory(&checkout).await.unwrap();
+    assert!(inventory.files.is_empty());
+
+    tokio::fs::remove_dir_all(checkout).await.unwrap();
+}
+
 #[test]
 fn semver_proof_accepts_patchwork_metadata_only_change() {
     assert!(resolved_satisfies("^1.61.1", "1.61.1"));
@@ -151,4 +169,24 @@ snapshots: {}
     assert!(err.contains("run pnpm install"));
     assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), lock);
     tokio::fs::remove_dir_all(checkout).await.unwrap();
+}
+
+#[test]
+fn deployment_planning_rejects_generated_topology_managed_addons() {
+    for add_ons in [
+        json!([{"key": "postgres"}]),
+        json!([{"key": "redis"}]),
+        json!([{"key": "postgres"}, {"key": "redis"}]),
+    ] {
+        let payload = json!({
+            "runtime_config": {
+                "generatedTopology": {"schemaVersion": 1, "mode": "auto"},
+                "compose": {"addOns": add_ons}
+            }
+        });
+        let error = super::super::validate_runtime_config_for_deploy(&payload)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("managed add-ons"), "{error}");
+    }
 }

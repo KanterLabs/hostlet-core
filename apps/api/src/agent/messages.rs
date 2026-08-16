@@ -233,11 +233,41 @@ async fn handle_deployment_status(state: &AppState, server_id: Uuid, msg: &serde
         }
     }
     if matches!(status.as_str(), "success" | "rolled_back") && updated == 1 {
-        let _ = sqlx::query("UPDATE apps SET current_deployment_id=$1, domain=COALESCE($2, domain) WHERE id=(SELECT app_id FROM deployments WHERE id=$1)")
+        // Switch the app and clear app-keyed health state in one transaction.
+        // The app-row lock prevents a health event from being accepted between
+        // the deployment switch and the reset.
+        let activated = async {
+            let mut tx = state.db.begin().await?;
+            let Some(app_id) = sqlx::query_scalar::<_, Uuid>(
+                "SELECT app_id FROM deployments WHERE id=$1 AND server_id=$2",
+            )
+            .bind(id)
+            .bind(server_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            else {
+                anyhow::bail!("deployment disappeared during activation");
+            };
+            crate::agent::locks::app(&mut tx, app_id).await?;
+            crate::agent::locks::deployment(&mut tx, id, app_id).await?;
+            sqlx::query(
+                "UPDATE apps
+                 SET current_deployment_id=$1,domain=COALESCE($2,domain)
+                 WHERE id=$3",
+            )
             .bind(id)
             .bind(msg.get("local_url").and_then(|v| v.as_str()))
-            .execute(&state.db)
-            .await;
+            .bind(app_id)
+            .execute(&mut *tx)
+            .await?;
+            crate::browser_health::reset_for_activation(&mut tx, app_id).await?;
+            tx.commit().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if activated.is_err() {
+            return;
+        }
         if let Err(err) =
             crate::screenshots::enqueue_auto_screenshot_for_deployment(state, id).await
         {
@@ -695,7 +725,9 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
                      payload_json=CASE WHEN $1 IN ('success','failed') THEN payload_json - 'env' - 'github_token' - 'artifact_registry' ELSE payload_json END,
                      updated_at=now(),
                      lease_expires_at=CASE
-                       WHEN $1 IN ('claimed','running') THEN now() + interval '5 minutes'
+                       WHEN $1 IN ('claimed','running')
+                            AND cancel_requested_at IS NULL
+                         THEN now() + interval '5 minutes'
                        WHEN $1 IN ('success','failed') THEN NULL
                        ELSE lease_expires_at
                      END,
@@ -703,6 +735,18 @@ async fn handle_job_status(state: &AppState, server_id: Uuid, msg: &serde_json::
                  WHERE id=$3 AND server_id=$4
                    AND (job_type <> 'build' OR $1 IN ('claimed','running'))
                    AND status IN ('queued','claimed','running')
+                   AND NOT (
+                     $1 IN ('success','failed')
+                     AND (
+                       cancel_requested_at IS NOT NULL
+                       OR EXISTS (
+                         SELECT 1 FROM apps a
+                         WHERE a.id=agent_jobs.app_id
+                           AND a.suspended_at IS NOT NULL
+                           AND agent_jobs.job_type IN ('deploy','rollback','build','release')
+                       )
+                     )
+                   )
                  RETURNING job_type,app_id,deployment_id",
     )
     .bind(status)

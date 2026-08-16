@@ -323,7 +323,10 @@ PY
 # ---------------------------------------------------------------------------
 ensure_railpack
 start_postgres_container postgres:16-alpine
-wait_postgres_ready
+if ! wait_postgres_ready; then
+  echo "PostgreSQL readiness failed; aborting self-hosted deploy E2E before registry startup" >&2
+  exit 1
+fi
 POSTGRES_PORT="$(discover_postgres_port)"
 start_test_artifact_registry
 
