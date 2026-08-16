@@ -51,6 +51,94 @@ fn activation_candidate(app_id: Uuid) -> hostlet_contracts::CandidateRuntime {
 }
 
 #[tokio::test]
+async fn db_generic_heartbeat_preserves_specific_deployment_phase() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+    let deployment_id = insert_deployment(&state, app_id).await;
+    let job_id = insert_job_with_payload(
+        &state,
+        app_id,
+        deployment_id,
+        "build",
+        "running",
+        serde_json::json!({"type":"build"}),
+    )
+    .await;
+    let claim_token = Uuid::new_v4();
+    sqlx::query(
+        "UPDATE agent_jobs
+         SET claim_token=$2,lease_expires_at=now()+interval '5 minutes'
+         WHERE id=$1",
+    )
+    .bind(job_id)
+    .bind(claim_token)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE deployments SET status='publishing' WHERE id=$1")
+        .bind(deployment_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let heartbeat_status = crate::deployment_execution::heartbeat(
+        State(state.clone()),
+        agent_headers(&state, TEST_SERVER_ID),
+        Path(job_id),
+        Json(hostlet_contracts::AgentJobHeartbeat {
+            claim_token,
+            phase: DeploymentStatus::Running,
+        }),
+    )
+    .await
+    .into_response()
+    .status();
+    assert_eq!(heartbeat_status, StatusCode::OK);
+    assert_eq!(
+        deployment_status_by_id(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("publishing")
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT last_heartbeat_at IS NOT NULL FROM deployments WHERE id=$1",
+    )
+    .bind(deployment_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap());
+
+    sqlx::query("UPDATE deployments SET status='queued' WHERE id=$1")
+        .bind(deployment_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let queued_status = crate::deployment_execution::heartbeat(
+        State(state.clone()),
+        agent_headers(&state, TEST_SERVER_ID),
+        Path(job_id),
+        Json(hostlet_contracts::AgentJobHeartbeat {
+            claim_token,
+            phase: DeploymentStatus::Running,
+        }),
+    )
+    .await
+    .into_response()
+    .status();
+    assert_eq!(queued_status, StatusCode::OK);
+    assert_eq!(
+        deployment_status_by_id(&state, deployment_id)
+            .await
+            .as_deref(),
+        Some("running")
+    );
+}
+
+#[tokio::test]
 async fn db_completion_requires_current_claim_and_live_lease() {
     let Some(state) = crate::state::db_test_state_from_env().await else {
         return;
