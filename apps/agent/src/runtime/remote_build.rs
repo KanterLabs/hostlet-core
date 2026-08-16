@@ -579,6 +579,7 @@ pub(super) async fn build_artifact(cfg: Config, payload: Value) -> anyhow::Resul
         .unwrap_or(".");
     let project_dir = safe_project_dir(&checkout, root_directory).await?;
     let target = registry_target(&payload, true)?;
+    super::pipeline::validate_runtime_config_for_deploy(&payload)?;
     let (images, runtime, compose) = if payload
         .pointer("/runtime_config/generatedTopology")
         .is_some()
@@ -809,6 +810,7 @@ fn validate_bundle(
 pub(super) async fn release_artifact(cfg: Config, mut payload: Value) -> anyhow::Result<()> {
     let deployment_id =
         Uuid::parse_str(payload["deployment_id"].as_str().context("deployment_id")?)?;
+    super::pipeline::validate_runtime_config_for_deploy(&payload)?;
     if payload
         .pointer("/artifact_manifest/schemaVersion")
         .and_then(Value::as_u64)

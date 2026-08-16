@@ -9,10 +9,7 @@ use std::{
     process::{Output, Stdio},
     time::{Duration, Instant},
 };
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-};
+use tokio::process::Command;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Message},
@@ -23,6 +20,7 @@ mod build;
 mod compose;
 mod git;
 mod journal;
+mod log_transport;
 mod ops;
 mod railpack;
 mod runtime;
@@ -33,6 +31,7 @@ pub(crate) use build::*;
 pub(crate) use compose::*;
 pub(crate) use git::*;
 pub(crate) use journal::*;
+pub(crate) use log_transport::*;
 pub(crate) use ops::*;
 pub(crate) use railpack::*;
 pub(crate) use runtime::{

@@ -9,10 +9,13 @@ import { AppShell, Badge, DataList, Field, Notice, PageHeader, Panel, SectionHea
 import { WebhookNotice } from "@/components/WebhookNotice";
 import {
   CreateAppForm,
+  MANAGED_ADDONS_TOPOLOGY_MESSAGE,
   RepoInspection,
   createAppDisabledReason,
   defaultCreateAppForm,
   envValuesFromInspection,
+  hasManagedAddOns,
+  managedAddOnsBlockTopologySelection,
   mergeInspectionIntoForm,
   parseGitHubRepo,
   selectedTopologyRuntimeConfig,
@@ -146,7 +149,13 @@ export default function CreateApp() {
       setEnvValues(envValuesFromInspection(result));
       setForm(merged);
       setInspectionKey(inspectionKeyOf(merged));
-      setMessage(result.deployable ? "Repository inspected. Create and deploy when ready." : "Hostlet could not infer a deployable runtime.");
+      setMessage(
+        managedAddOnsBlockTopologySelection(result.runtimeConfig, result.inferencePlan?.readiness)
+          ? MANAGED_ADDONS_TOPOLOGY_MESSAGE
+          : result.deployable
+            ? "Repository inspected. Create and deploy when ready."
+            : "Hostlet could not infer a deployable runtime.",
+      );
     } catch (error) {
       setMessage(`Inspect failed. ${error instanceof Error ? error.message : "Check the public GitHub URL."}`);
     } finally {
@@ -156,6 +165,10 @@ export default function CreateApp() {
 
   function applyTopologySelection() {
     if (!inspection?.inferencePlan || (!frontendSelector && !backendSelector)) return;
+    if (hasManagedAddOns(inspection.runtimeConfig)) {
+      setMessage(MANAGED_ADDONS_TOPOLOGY_MESSAGE);
+      return;
+    }
     const prefixes = backendPrefixes
       .split(",")
       .map((value) => value.trim())
@@ -238,6 +251,8 @@ export default function CreateApp() {
   const agentUpgradeRequired = !!inspection?.inferencePlan
     && inspection.inferencePlan.readiness !== "unsupported"
     && (selectedServer?.agentProtocolVersion || 1) < 3;
+  const managedAddOnsTopologyBlocked = inspection?.inferencePlan?.readiness === "needs_selection"
+    && hasManagedAddOns(inspection.runtimeConfig);
   const createDisabledReason = inspectionStale
     ? "Re-inspect this repo and branch before deploying."
     : agentUpgradeRequired
@@ -337,22 +352,25 @@ export default function CreateApp() {
                     {inspection.inferencePlan?.readiness === "needs_selection" && (
                       <div className="mt-4 space-y-3 rounded-md border border-amber-300 bg-amber-50 p-3">
                         <div className="font-medium text-ink">Choose the runnable services</div>
-                        <SelectField label="Frontend" value={frontendSelector} onChange={setFrontendSelector}>
+                        {managedAddOnsTopologyBlocked && (
+                          <p className="text-sm text-amber-900" role="alert">{MANAGED_ADDONS_TOPOLOGY_MESSAGE} The detected service preview remains above so you can verify both backing services before adding the manifest.</p>
+                        )}
+                        <SelectField label="Frontend" value={frontendSelector} disabled={managedAddOnsTopologyBlocked} onChange={setFrontendSelector}>
                           <option value="">No frontend</option>
                           {inspection.inferencePlan.candidates.filter((candidate) => candidate.role === "frontend").map((candidate) => (
                             <option key={candidate.selector} value={candidate.selector}>{candidate.name} · {candidate.rootDirectory}</option>
                           ))}
                         </SelectField>
-                        <SelectField label="Backend" value={backendSelector} onChange={setBackendSelector}>
+                        <SelectField label="Backend" value={backendSelector} disabled={managedAddOnsTopologyBlocked} onChange={setBackendSelector}>
                           <option value="">No backend</option>
                           {inspection.inferencePlan.candidates.filter((candidate) => candidate.role === "backend").map((candidate) => (
                             <option key={candidate.selector} value={candidate.selector}>{candidate.name} · {candidate.rootDirectory}</option>
                           ))}
                         </SelectField>
-                        {backendSelector && (
+                        {backendSelector && !managedAddOnsTopologyBlocked && (
                           <Field label="Backend path prefixes" value={backendPrefixes} onChange={setBackendPrefixes} placeholder="/api, /graphql" />
                         )}
-                        <button className="button-secondary" type="button" disabled={!frontendSelector && !backendSelector} onClick={applyTopologySelection}>
+                        <button className="button-secondary" type="button" disabled={managedAddOnsTopologyBlocked || (!frontendSelector && !backendSelector)} onClick={applyTopologySelection}>
                           Use selected topology
                         </button>
                       </div>

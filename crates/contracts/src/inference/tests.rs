@@ -1,4 +1,8 @@
 use super::*;
+use crate::{
+    attach_topology_plan, plan_repository_topology, RepositoryFile, RepositoryInventory,
+    TopologyReadiness,
+};
 
 fn set(items: &[&str]) -> std::collections::HashSet<String> {
     items.iter().map(|item| item.to_string()).collect()
@@ -256,4 +260,72 @@ fn with_detected_services_leaves_single_apps_single_but_surfaces_skip_notes() {
         .unwrap()
         .iter()
         .any(|w| w.as_str().unwrap().contains("mongodb")));
+}
+
+fn generated_topology_inspection_with_dependencies(dependencies: &str) -> serde_json::Value {
+    let root_manifest = format!(r#"{{"dependencies":{{{dependencies}}}}}"#);
+    let inventory = RepositoryInventory {
+        files: vec![
+            RepositoryFile {
+                path: "package.json".into(),
+                contents: Some(root_manifest.clone()),
+            },
+            RepositoryFile {
+                path: "apps/api/package.json".into(),
+                contents: Some(
+                    r#"{"name":"api","scripts":{"start":"node server.js"},"dependencies":{"express":"1"}}"#
+                        .into(),
+                ),
+            },
+        ],
+    };
+    let plan = plan_repository_topology(&inventory);
+    assert_eq!(plan.readiness, TopologyReadiness::Ready);
+    let base = node_inspection(
+        "owner/workspace",
+        "main",
+        "main",
+        infer_package_json(&root_manifest, false, false, false),
+        false,
+    );
+    let detected = infer_service_addons(&package_json_dependencies(&root_manifest));
+    attach_topology_plan(with_detected_services(base, &detected), &plan)
+}
+
+#[test]
+fn generated_topology_with_postgres_is_explicitly_not_deployable() {
+    let inspection = generated_topology_inspection_with_dependencies(r#""pg":"8""#);
+    assert_eq!(inspection["deployable"], false);
+    assert_eq!(
+        inspection.pointer("/runtimeConfig/compose/addOns").unwrap(),
+        &serde_json::json!([{"key":"postgres"}])
+    );
+    assert!(inspection["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning.as_str().unwrap().contains("cannot be combined")));
+}
+
+#[test]
+fn generated_topology_with_redis_is_explicitly_not_deployable() {
+    let inspection = generated_topology_inspection_with_dependencies(r#""ioredis":"5""#);
+    assert_eq!(inspection["deployable"], false);
+    assert_eq!(
+        inspection.pointer("/runtimeConfig/compose/addOns").unwrap(),
+        &serde_json::json!([{"key":"redis"}])
+    );
+}
+
+#[test]
+fn generated_topology_with_postgres_and_redis_keeps_both_promises_visible() {
+    let inspection = generated_topology_inspection_with_dependencies(r#""pg":"8","ioredis":"5""#);
+    assert_eq!(inspection["deployable"], false);
+    assert_eq!(
+        inspection.pointer("/runtimeConfig/compose/addOns").unwrap(),
+        &serde_json::json!([{"key":"postgres"},{"key":"redis"}])
+    );
+    let services = inspection["services"].as_array().unwrap();
+    assert!(services.iter().any(|service| service["name"] == "postgres"));
+    assert!(services.iter().any(|service| service["name"] == "redis"));
 }

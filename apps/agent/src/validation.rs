@@ -181,7 +181,7 @@ pub(crate) fn compose_release_override_yaml(
     {
         let mut volumes = serde_yaml::Mapping::new();
         for name in source_volumes.keys().filter_map(serde_yaml::Value::as_str) {
-            validate_service_name(name)?;
+            validate_volume_name(name)?;
             let mut definition = serde_yaml::Mapping::new();
             definition.insert("name".into(), format!("{stable_project}_{name}").into());
             definition.insert("external".into(), true.into());
@@ -204,7 +204,7 @@ pub(crate) fn compose_named_volume_names(
         .flatten()
         .filter_map(|(key, _)| key.as_str())
         .map(|name| {
-            validate_service_name(name)?;
+            validate_volume_name(name)?;
             Ok(format!("{stable_project}_{name}"))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -314,50 +314,6 @@ pub(crate) fn compose_override_yaml(
     out
 }
 
-/// Look up a string key in a YAML mapping without repeatedly allocating a
-/// `serde_yaml::Value::String` at every call site.
-fn yaml_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
-    mapping.get(serde_yaml::Value::String(key.to_string()))
-}
-
-fn yaml_contains_key(mapping: &serde_yaml::Mapping, key: &str) -> bool {
-    mapping.contains_key(serde_yaml::Value::String(key.to_string()))
-}
-
-fn validate_compose_top_level_volumes(value: &serde_yaml::Value) -> anyhow::Result<()> {
-    let volumes = value
-        .as_mapping()
-        .context("compose top-level volumes must be a mapping")?;
-    for (name, volume) in volumes {
-        let Some(volume_name) = name.as_str() else {
-            bail!("compose volume names must be strings");
-        };
-        match volume {
-            serde_yaml::Value::Null => {}
-            serde_yaml::Value::Mapping(mapping) => {
-                for key in hostlet_contracts::compose::FORBIDDEN_TOP_LEVEL_VOLUME_FIELDS
-                    .iter()
-                    .copied()
-                {
-                    if yaml_contains_key(mapping, key) {
-                        bail!("compose volume {volume_name} uses unsupported field {key}");
-                    }
-                }
-            }
-            _ => bail!("compose volume {volume_name} must be an object"),
-        }
-    }
-    Ok(())
-}
-
-fn is_docker_socket_path(value: &str) -> bool {
-    value == "/var/run/docker.sock"
-}
-
-fn is_host_bind_source(value: &str) -> bool {
-    value.starts_with('/') || value.starts_with('.') || value.contains('/') || value.contains('\\')
-}
-
 fn yaml_get_mut<'a>(
     mapping: &'a mut serde_yaml::Mapping,
     key: &str,
@@ -369,9 +325,7 @@ fn yaml_get_mut<'a>(
 /// onto a managed named volume. Absolute paths, parent-escaping (`..`) paths, and
 /// the Docker socket are deliberately excluded so they keep failing the subset.
 fn is_mappable_relative_bind(source: &str) -> bool {
-    is_host_bind_source(source)
-        && !source.starts_with('/')
-        && !source.split('/').any(|part| part == "..")
+    hostlet_contracts::compose::is_mappable_relative_bind(source)
 }
 
 /// A stable managed volume name derived from the container mount target, so the
@@ -466,98 +420,25 @@ pub(crate) fn remap_host_binds_to_named_volumes(contents: &str) -> anyhow::Resul
 }
 
 pub(crate) fn validate_compose_subset(contents: &str, web_service: &str) -> anyhow::Result<()> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(contents).context("compose file is not valid YAML")?;
-    if let Some(volumes) = value.get("volumes") {
-        validate_compose_top_level_volumes(volumes)?;
-    }
-    let services = value
-        .get("services")
-        .and_then(|v| v.as_mapping())
-        .context("compose file must define services")?;
-    if !yaml_contains_key(services, web_service) {
-        bail!("compose file does not contain declared web service {web_service}");
-    }
-    for (name, raw_service) in services {
-        let Some(service_name) = name.as_str() else {
-            bail!("compose service names must be strings");
-        };
-        validate_service_name(service_name)?;
-        let service = raw_service
-            .as_mapping()
-            .context("compose services must be objects")?;
-        for key in hostlet_contracts::compose::FORBIDDEN_SERVICE_FIELDS
-            .iter()
-            .copied()
-        {
-            if yaml_contains_key(service, key) {
-                bail!("compose service {service_name} uses unsupported field {key}");
-            }
-        }
-        if let Some(volumes) = yaml_get(service, "volumes").and_then(|v| v.as_sequence()) {
-            for volume in volumes {
-                if let Some(value) = volume.as_str() {
-                    let source = value.split(':').next().unwrap_or("");
-                    if is_host_bind_source(source) {
-                        bail!("compose service {service_name} uses an unsupported host bind mount");
-                    }
-                    if value.split(':').nth(1).is_some_and(is_docker_socket_path) {
-                        bail!("compose service {service_name} mounts the Docker socket");
-                    }
-                    continue;
-                }
-                if let Some(mapping) = volume.as_mapping() {
-                    let volume_type = yaml_get(mapping, "type")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    let source = yaml_get(mapping, "source")
-                        .or_else(|| yaml_get(mapping, "src"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    if volume_type == "bind" || is_host_bind_source(source) {
-                        bail!("compose service {service_name} uses an unsupported host bind mount");
-                    }
-                    let target = yaml_get(mapping, "target")
-                        .or_else(|| yaml_get(mapping, "dst"))
-                        .or_else(|| yaml_get(mapping, "destination"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    if is_docker_socket_path(target) {
-                        bail!("compose service {service_name} mounts the Docker socket");
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
+    hostlet_contracts::compose::validate_compose_subset(contents, web_service)
+        .map_err(|message| anyhow::anyhow!(message))
 }
 
 pub(crate) fn validate_relative_file_path(value: &str) -> anyhow::Result<()> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 256
-        || value.starts_with('/')
-        || value.starts_with('\\')
-        || value.split('/').any(|part| part.is_empty() || part == "..")
-        || value.chars().any(|c| c.is_control() || c == '\\')
-    {
+    if !hostlet_contracts::valid_relative_file_path(value) {
         bail!("path must be a relative file path inside the repository");
     }
     Ok(())
 }
 
 pub(crate) fn validate_service_name(value: &str) -> anyhow::Result<()> {
-    if value.is_empty()
-        || value.len() > 48
-        || !value
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        || value.starts_with('-')
-        || value.ends_with('-')
-    {
-        bail!("compose service names must use lowercase letters, numbers, and hyphens");
-    }
-    Ok(())
+    hostlet_contracts::compose::validate_compose_service_name(value)
+        .map_err(|message| anyhow::anyhow!(message))
+}
+
+pub(crate) fn validate_volume_name(value: &str) -> anyhow::Result<()> {
+    hostlet_contracts::compose::validate_compose_volume_name(value)
+        .map_err(|message| anyhow::anyhow!(message))
 }
 
 pub(crate) fn env_args(p: &Value) -> Vec<String> {

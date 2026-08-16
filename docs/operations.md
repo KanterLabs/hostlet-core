@@ -44,12 +44,24 @@ Then pull and restart with `--no-build`.
 
 ## Backup And Restore
 
-Backups include a Postgres dump and agent state volume when available. The dump
+Backups include a Postgres dump, agent state volume, and API screenshot storage
+volume when available. The dump
 contains encrypted database rows, including encrypted GitHub tokens and app
 environment variables. Backups intentionally do not copy `.env`, `.env.prod`,
 raw secret values, private keys, or plaintext app environment files.
 
 Restores require the original `ENCRYPTION_KEY`. Without it, encrypted GitHub tokens and app environment variables cannot be decrypted.
+Backup and restore read `POSTGRES_USER` and `POSTGRES_DB` from the selected
+Compose env file, so installations using non-default database identities are
+restored against the same database.
+
+Before changing the database or agent state, restore fences the API, web, local
+agent, and Caddy containers. A failed restore restarts those writers when it
+can and leaves `.hostlet/restore-state` with the phase, backup path, and
+recovery status; if restart fails, keep the stack stopped and inspect that
+journal before retrying. The script blocks a new restore while that journal
+exists; after inspection and an operator-verified recovery, remove the journal
+to acknowledge it before retrying.
 
 `scripts/backup.sh` can also push the snapshot off-host: set `HOSTLET_BACKUP_BUCKET`
 (a `gs://` path) to sync via `gsutil`, or `HOSTLET_BACKUP_S3_BUCKET` (an `s3://` path,
@@ -59,6 +71,10 @@ one. S3-compatible credentials/region come from the standard `AWS_ACCESS_KEY_ID`
 `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` environment variables — `hostlet backup`
 inherits your shell's environment, so exporting these before running it (or in a cron/
 systemd unit's environment) is enough; nothing needs to be set in `.env`.
+
+Restore resolves the backup directory to an absolute path before changing into
+the Hostlet repository, so a relative path supplied from another working
+directory cannot select a same-named directory inside the repository.
 
 ## Troubleshooting
 

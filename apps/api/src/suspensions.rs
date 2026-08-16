@@ -1,4 +1,4 @@
-use crate::{auth::request_context, deploy, state::AppState};
+use crate::{agent::locks, auth::request_context, deploy, state::AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -134,6 +134,42 @@ async fn change_reason(
     }
     let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
     let target = load_runtime_target(&mut tx, app_id, owner_id).await?;
+    // `load_runtime_target` holds the app row. Acquire every lifecycle row
+    // that this transition may mutate before touching jobs or deployments so
+    // suspension and activation/cancellation share app -> deployment -> job.
+    let lifecycle_rows = sqlx::query(
+        "SELECT id,deployment_id
+         FROM agent_jobs
+         WHERE app_id=$1
+           AND job_type IN ('deploy','rollback','build','release')
+           AND status IN ('queued','claimed','running')
+         ORDER BY id",
+    )
+    .bind(app_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+    let mut deployment_ids = lifecycle_rows
+        .iter()
+        .filter_map(|row| row.get::<Option<Uuid>, _>("deployment_id"))
+        .collect::<Vec<_>>();
+    if let Some(target) = &target {
+        deployment_ids.push(target.deployment_id);
+    }
+    deployment_ids.sort_unstable();
+    deployment_ids.dedup();
+    locks::deployments(&mut tx, &deployment_ids)
+        .await
+        .map_err(ChangeError::Database)?;
+    let mut job_ids = lifecycle_rows
+        .iter()
+        .map(|row| row.get::<Uuid, _>("id"))
+        .collect::<Vec<_>>();
+    job_ids.sort_unstable();
+    job_ids.dedup();
+    locks::jobs(&mut tx, &job_ids)
+        .await
+        .map_err(ChangeError::Database)?;
     let before: i64 =
         sqlx::query_scalar("SELECT COUNT(*)::bigint FROM app_suspensions WHERE app_id=$1")
             .bind(app_id)
@@ -158,7 +194,9 @@ async fn change_reason(
                  failure_summary='App was paused before this deployment started.',
                  payload_json=payload_json - 'env' - 'github_token' - 'artifact_registry',
                  updated_at=now(),finished_at=now()
-             WHERE app_id=$1 AND job_type IN ('deploy','rollback') AND status='queued'
+             WHERE app_id=$1
+               AND job_type IN ('deploy','rollback','build','release')
+               AND status='queued'
              RETURNING deployment_id",
         )
         .bind(app_id)
@@ -182,11 +220,33 @@ async fn change_reason(
             .execute(&mut *tx)
             .await
             .map_err(anyhow::Error::from)?;
+            sqlx::query(
+                "UPDATE deployment_builds
+                 SET status='canceled',failure_code='app_paused',
+                     failure_summary='App was paused before this deployment started.',
+                     finished_at=now(),updated_at=now()
+                 WHERE deployment_id=ANY($1)
+                   AND status NOT IN ('succeeded','failed','canceled')",
+            )
+            .bind(&deployment_ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(anyhow::Error::from)?;
+            sqlx::query(
+                "UPDATE apps
+                 SET pending_deployment_id=NULL,updated_at=now()
+                 WHERE pending_deployment_id=ANY($1)",
+            )
+            .bind(&deployment_ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(anyhow::Error::from)?;
         }
         sqlx::query(
             "UPDATE agent_jobs
-             SET cancel_requested_at=COALESCE(cancel_requested_at,now()),updated_at=now()
-             WHERE app_id=$1 AND job_type IN ('deploy','rollback')
+             SET cancel_requested_at=COALESCE(cancel_requested_at,clock_timestamp()),updated_at=now()
+             WHERE app_id=$1
+               AND job_type IN ('deploy','rollback','build','release')
                AND status IN ('claimed','running')",
         )
         .bind(app_id)

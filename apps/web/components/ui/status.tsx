@@ -9,7 +9,7 @@ type StatusVariant = "active" | "success" | "failed" | "warning";
 
 const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: LucideIcon; tone: string; chartColor: string }> = {
   active: {
-    values: ["queued", "queued for build", "pending", "waiting", "running", "building", "publishing", "queued for release", "pulling", "starting", "health checking", "routing"],
+    values: ["queued", "queued for build", "pending", "waiting", "waiting capacity", "running", "building", "publishing", "queued for release", "pulling", "starting", "health checking", "routing"],
     icon: Loader2,
     tone: "bg-warning-bg text-warning-fg ring-warning-border",
     chartColor: "hsl(var(--warning-fg))",
@@ -21,7 +21,7 @@ const STATUS_VARIANTS: Record<StatusVariant, { values: readonly string[]; icon: 
     chartColor: "hsl(var(--success-fg))",
   },
   failed: {
-    values: ["failed", "offline", "missing", "closed", "disabled", "not configured", "unhealthy", "rolled_back"],
+    values: ["failed", "offline", "missing", "closed", "disabled", "not configured", "unhealthy", "rolled back", "canceled", "cancelled"],
     icon: XCircle,
     tone: "bg-danger-bg text-danger-fg ring-danger-border",
     chartColor: "hsl(var(--danger-fg))",
@@ -39,8 +39,7 @@ const DEFAULT_STATUS = { icon: CircleDashed, tone: "bg-neutral-100 text-neutral-
 export function statusLabel(status?: string | null) {
   const value = (status || "unknown").replaceAll("_", " ").trim().toLowerCase();
   const labels: Record<string, string> = {
-    health_checking: "health checking",
-    rolled_back: "rolled back",
+    cancelled: "canceled",
     "not deployed": "not deployed",
     "needs attention": "needs attention",
   };

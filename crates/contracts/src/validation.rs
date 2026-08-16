@@ -4,7 +4,7 @@
 //! so that the Hostlet Cloud overlay can validate inputs without forking the web
 //! layer. All items are `pub` so overlay callers can reach them.
 
-use crate::{valid_env_key, valid_env_value, valid_root_directory};
+use crate::{valid_env_key, valid_env_value};
 
 /// Validates a free-text app name: non-empty, at most 80 chars, alphanumerics
 /// plus `-`, `_`, and space only.
@@ -53,6 +53,7 @@ pub fn clean_runtime_config(value: &serde_json::Value) -> Result<(), &'static st
                 .map_err(|_| "runtime config generatedTopology is invalid")?;
         crate::validate_generated_topology_config(&config)?;
     }
+    crate::validate_runtime_config_compatibility(value)?;
     Ok(())
 }
 
@@ -64,11 +65,31 @@ pub fn clean_hostlet_config_path(value: Option<&str>) -> Result<String, &'static
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("hostlet.yml");
-    if valid_root_directory(value) && (value.ends_with(".yml") || value.ends_with(".yaml")) {
+    if valid_relative_file_path(value) && (value.ends_with(".yml") || value.ends_with(".yaml")) {
         Ok(value.to_string())
     } else {
         Err("Hostlet config path must be a relative .yml or .yaml file")
     }
+}
+
+/// Validates a path to a file that must remain inside the repository.
+///
+/// This is intentionally stricter than [`crate::valid_root_directory`]: empty
+/// path components (for example `foo//bar.yml`) are rejected because the
+/// agent passes the path to filesystem and Compose tooling verbatim. The
+/// function trims only for validation, matching the agent's deploy-time
+/// validator; callers that persist a path should store their own canonical
+/// trimmed value.
+pub fn valid_relative_file_path(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('/')
+        && !value.starts_with('\\')
+        && !value.split('/').any(|part| part.is_empty() || part == "..")
+        && !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | '?' | '#'))
 }
 
 /// Extracts the host portion of a `host` or `host:port` value.
@@ -196,6 +217,20 @@ mod tests {
     }
 
     #[test]
+    fn clean_runtime_config_rejects_generated_topology_with_managed_addons() {
+        let config = serde_json::json!({
+            "generatedTopology": {"schemaVersion": 1, "mode": "auto"},
+            "compose": {"addOns": [{"key": "postgres"}]}
+        });
+        let error = clean_runtime_config(&config).unwrap_err();
+        assert!(error.contains("managed add-ons"));
+        assert!(clean_runtime_config(&serde_json::json!({
+            "generatedTopology": {"schemaVersion": 1, "mode": "auto"}
+        }))
+        .is_ok());
+    }
+
+    #[test]
     fn clean_hostlet_config_path_defaults_and_validates() {
         assert_eq!(clean_hostlet_config_path(None), Ok("hostlet.yml".into()));
         assert_eq!(
@@ -203,7 +238,19 @@ mod tests {
             Ok("config.yaml".into())
         );
         assert!(clean_hostlet_config_path(Some("../x.yml")).is_err());
+        assert!(clean_hostlet_config_path(Some("config//hostlet.yml")).is_err());
         assert!(clean_hostlet_config_path(Some("x.txt")).is_err());
+    }
+
+    #[test]
+    fn relative_file_paths_reject_repeated_slashes() {
+        assert!(valid_relative_file_path("hostlet.yml"));
+        assert!(valid_relative_file_path("config/hostlet.yml"));
+        assert!(!valid_relative_file_path("config//hostlet.yml"));
+        assert!(!valid_relative_file_path("/hostlet.yml"));
+        assert!(!valid_relative_file_path("config/../hostlet.yml"));
+        assert!(!valid_relative_file_path("config/compose?.yml"));
+        assert!(!valid_relative_file_path("config/compose#.yml"));
     }
 
     #[test]

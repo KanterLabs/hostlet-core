@@ -1,10 +1,19 @@
 mod access_token;
 mod inference;
+mod inventory;
+mod webhook;
+
+#[cfg(test)]
+use webhook::{
+    claim_webhook_event, finalize_webhook_event, process_webhook_app, process_webhook_faulted,
+    release_webhook_claim, renew_webhook_claim, webhook_app_event_is_terminal, WebhookClaim,
+    WebhookFailpoint,
+};
+use webhook::{process_webhook, webhook_processing_status};
 
 use crate::{
     auth::{current_user_id, request_context},
     crypto::verify_signature,
-    deploy::create_and_send_deploy,
     state::AppState,
 };
 use axum::{
@@ -17,24 +26,18 @@ use axum::{
 use hostlet_contracts::compose::{detect_data_mount_path, with_data_mount_path};
 use hostlet_contracts::{
     attach_topology_plan, detect_start_command, parse_github_repo, plan_repository_topology,
-    valid_commit_sha, with_command_suggestion, RepoCommandFiles, RepositoryFile,
-    RepositoryInventory, TopologyReadiness,
+    with_command_suggestion, RepoCommandFiles, RepositoryFile, RepositoryInventory,
+    TopologyReadiness, REPOSITORY_INVENTORY_MAX_FILE_BYTES,
 };
 use inference::{
-    compose_inspection, dockerfile_inspection, gitea_inspection, infer_addons_from_compose,
-    infer_dockerfile, infer_package_json, infer_service_addons, manifest_dependency_tokens,
-    node_inspection, package_json_dependencies, railpack_inspection, unknown_inspection,
-    with_detected_services, DetectedServices,
+    compose_inspection, compose_rejection_inspection, dockerfile_inspection, gitea_inspection,
+    infer_addons_from_compose, infer_dockerfile, infer_package_json, infer_service_addons,
+    manifest_dependency_tokens, node_inspection, package_json_dependencies, railpack_inspection,
+    unknown_inspection, with_detected_services, DetectedServices,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
 use uuid::Uuid;
-
-const GITHUB_INSPECTION_FILE_MAX_BYTES: u64 = 128 * 1024;
-const GITHUB_INVENTORY_MAX_FILES: usize = 10_000;
-const GITHUB_INVENTORY_MAX_RELEVANT_FILES: usize = 256;
-const GITHUB_INVENTORY_MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct RepoInspectRequest {
@@ -292,38 +295,50 @@ async fn inspect_repo(
     // safe-subset violations the agent would reject at deploy time.
     if let Some(manifest_text) = github_file_text(state, repo, branch, "hostlet.yml", token).await?
     {
-        if let Some(manifest) =
-            hostlet_contracts::compose::HostletComposeManifest::parse_compose(&manifest_text)
-        {
-            let compose_file = manifest.compose_file();
-            let (services, subset_warnings) =
-                match github_file_text(state, repo, branch, compose_file, token).await? {
-                    Some(compose_text) => (
-                        hostlet_contracts::compose::parse_compose_services(
-                            &compose_text,
-                            &manifest.compose.web_service,
+        match hostlet_contracts::compose::HostletComposeManifest::parse_compose_checked(
+            &manifest_text,
+        ) {
+            Err(reason) => {
+                return Ok(compose_rejection_inspection(
+                    repo,
+                    branch,
+                    default_branch,
+                    "hostlet.yml",
+                    &reason,
+                ));
+            }
+            Ok(None) => {}
+            Ok(Some(manifest)) => {
+                let compose_file = manifest.compose_file();
+                let (services, subset_warnings) =
+                    match github_file_text(state, repo, branch, compose_file, token).await? {
+                        Some(compose_text) => (
+                            hostlet_contracts::compose::parse_compose_services(
+                                &compose_text,
+                                &manifest.compose.web_service,
+                            ),
+                            hostlet_contracts::compose::compose_subset_warnings(
+                                &compose_text,
+                                &manifest.compose.web_service,
+                            ),
                         ),
-                        hostlet_contracts::compose::compose_subset_warnings(
-                            &compose_text,
-                            &manifest.compose.web_service,
+                        None => (
+                            Vec::new(),
+                            vec![format!(
+                                "hostlet.yml references compose file {compose_file}, which was not found in the repository."
+                            )],
                         ),
-                    ),
-                    None => (
-                        Vec::new(),
-                        vec![format!(
-                            "hostlet.yml references compose file {compose_file}, which was not found in the repository."
-                        )],
-                    ),
-                };
-            return Ok(compose_inspection(
-                repo,
-                branch,
-                default_branch,
-                "hostlet.yml",
-                &manifest.compose,
-                &services,
-                &subset_warnings,
-            ));
+                    };
+                return Ok(compose_inspection(
+                    repo,
+                    branch,
+                    default_branch,
+                    "hostlet.yml",
+                    &manifest.compose,
+                    &services,
+                    &subset_warnings,
+                ));
+            }
         }
     }
 
@@ -364,7 +379,7 @@ async fn inspect_repo(
     // actual frontend/backend live below packages/. The same pure planner runs
     // again against the immutable checkout in the agent.
     if command_suggestion.is_none() && dockerfile.is_none() && railpack_config.is_none() {
-        let inventory = github_repository_inventory(state, repo, branch, token).await?;
+        let inventory = inventory::github_repository_inventory(state, repo, branch, token).await?;
         let plan = plan_repository_topology(&inventory);
         if plan.readiness != TopologyReadiness::Unsupported {
             let base = if let Some(package_text) = package_json.as_deref() {
@@ -540,7 +555,7 @@ async fn github_file_text(
     if value
         .get("size")
         .and_then(|value| value.as_u64())
-        .is_some_and(|size| size > GITHUB_INSPECTION_FILE_MAX_BYTES)
+        .is_some_and(|size| size > REPOSITORY_INVENTORY_MAX_FILE_BYTES as u64)
     {
         return Ok(None);
     }
@@ -586,98 +601,6 @@ fn inventory_detected_services(inventory: &RepositoryInventory) -> DetectedServi
         detected.merge(&current);
     }
     detected
-}
-
-/// Fetches the recursive tree once and downloads only small files that can
-/// affect topology inference. Lockfiles are represented by path only: manager
-/// detection needs their presence, while dependency resolution remains the
-/// agent's responsibility and large lock contents never enter API memory.
-async fn github_repository_inventory(
-    state: &AppState,
-    repo: &str,
-    branch: &str,
-    token: Option<&str>,
-) -> anyhow::Result<RepositoryInventory> {
-    let encoded_branch =
-        url::form_urlencoded::byte_serialize(branch.as_bytes()).collect::<String>();
-    let mut request = state
-        .http
-        .get(format!(
-            "https://api.github.com/repos/{repo}/git/trees/{encoded_branch}?recursive=1"
-        ))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "Hostlet");
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    let tree: Value = request.send().await?.error_for_status()?.json().await?;
-    let entries = tree
-        .get("tree")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut relevant = entries
-        .into_iter()
-        .take(GITHUB_INVENTORY_MAX_FILES)
-        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("blob"))
-        .filter_map(|entry| {
-            let path = entry.get("path")?.as_str()?.to_string();
-            let size = entry
-                .get("size")
-                .and_then(Value::as_u64)
-                .unwrap_or_default();
-            topology_inventory_path(&path).then_some((path, size))
-        })
-        .take(GITHUB_INVENTORY_MAX_RELEVANT_FILES)
-        .collect::<Vec<_>>();
-    relevant.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut files = Vec::with_capacity(relevant.len());
-    let mut content_bytes = 0usize;
-    for (path, size) in relevant {
-        let filename = path.rsplit('/').next().unwrap_or(&path);
-        let is_lock = matches!(
-            filename,
-            "pnpm-lock.yaml" | "yarn.lock" | "package-lock.json" | "bun.lock" | "bun.lockb"
-        );
-        let contents = if is_lock
-            || size > GITHUB_INSPECTION_FILE_MAX_BYTES
-            || content_bytes + size as usize > GITHUB_INVENTORY_MAX_CONTENT_BYTES
-        {
-            None
-        } else {
-            let contents = github_file_text(state, repo, branch, &path, token).await?;
-            content_bytes += contents.as_ref().map(String::len).unwrap_or_default();
-            contents
-        };
-        files.push(RepositoryFile { path, contents });
-    }
-    Ok(RepositoryInventory { files })
-}
-
-fn topology_inventory_path(path: &str) -> bool {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    matches!(
-        filename,
-        "package.json"
-            | "pnpm-workspace.yaml"
-            | "pnpm-lock.yaml"
-            | "package-lock.json"
-            | "yarn.lock"
-            | "bun.lock"
-            | "bun.lockb"
-            | "pyproject.toml"
-            | "requirements.txt"
-            | "go.mod"
-            | "go.work"
-            | "Cargo.toml"
-            | "index.html"
-            | "main.rs"
-    ) || path.ends_with(".go")
-        || matches!(
-            path.rsplit('.').next(),
-            Some("js" | "jsx" | "ts" | "tsx" | "vue" | "svelte")
-        )
 }
 
 pub async fn ensure_repo_webhook(
@@ -789,10 +712,16 @@ pub async fn webhook(
         .get("x-github-event")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let delivery = headers
+    let Some(delivery) = headers
         .get("x-github-delivery")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .filter(|value| !value.trim().is_empty())
+    else {
+        // Without GitHub's delivery id there is no safe idempotency key. A
+        // malformed request must not create an event that every retry would
+        // accidentally share.
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -800,183 +729,14 @@ pub async fn webhook(
         .pointer("/repository/full_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let inserted = sqlx::query(
-        "INSERT INTO webhook_events (github_delivery_id,repo_full_name,event_type,payload)
-         VALUES ($1,$2,$3,$4)
-         ON CONFLICT DO NOTHING
-         RETURNING id",
-    )
-    .bind(delivery)
-    .bind(repo)
-    .bind(event)
-    .bind(&payload)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-    let Some(inserted) = inserted else {
-        return StatusCode::ACCEPTED.into_response();
-    };
-    let webhook_event_id: Uuid = inserted.get("id");
-    if event == "push" {
-        let branch = payload
-            .get("ref")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim_start_matches("refs/heads/");
-        let sha = payload
-            .get("after")
-            .and_then(|v| v.as_str())
-            .unwrap_or("HEAD");
-        if payload
-            .get("deleted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            mark_push_processed(&state, delivery, branch, sha, Some("branch was deleted")).await;
-            return StatusCode::ACCEPTED.into_response();
-        }
-        if !valid_commit_sha(sha) {
-            mark_push_processed(
-                &state,
-                delivery,
-                branch,
-                sha,
-                Some("push did not include a valid commit SHA"),
-            )
-            .await;
-            return StatusCode::ACCEPTED.into_response();
-        }
-        let apps = sqlx::query(
-            "SELECT id,user_id,auto_deploy FROM apps WHERE repo_full_name=$1 AND branch=$2",
-        )
-        .bind(repo)
-        .bind(branch)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
-        if apps.is_empty() {
-            mark_push_processed(
-                &state,
-                delivery,
-                branch,
-                sha,
-                Some("no apps matched this repository and branch"),
-            )
-            .await;
-            return StatusCode::ACCEPTED.into_response();
-        }
-        for app in apps {
-            let app_id: Uuid = app.get("id");
-            if !app.get::<bool, _>("auto_deploy") {
-                let _ = insert_webhook_app_event(
-                    &state,
-                    webhook_event_id,
-                    app_id,
-                    None,
-                    repo,
-                    branch,
-                    sha,
-                    "ignored",
-                    Some("auto redeploy is disabled for this app"),
-                )
-                .await;
-                continue;
-            }
-            match create_and_send_deploy(&state, app.get("user_id"), app_id, sha).await {
-                Ok(deployment_id) => {
-                    let _ = insert_webhook_app_event(
-                        &state,
-                        webhook_event_id,
-                        app_id,
-                        Some(deployment_id),
-                        repo,
-                        branch,
-                        sha,
-                        "deployed",
-                        None,
-                    )
-                    .await;
-                }
-                Err(err) => {
-                    let _ = insert_webhook_app_event(
-                        &state,
-                        webhook_event_id,
-                        app_id,
-                        None,
-                        repo,
-                        branch,
-                        sha,
-                        "ignored",
-                        Some(&err.to_string()),
-                    )
-                    .await;
-                }
-            }
-        }
-        mark_push_processed(&state, delivery, branch, sha, None).await;
-    } else {
-        let _ = sqlx::query("UPDATE webhook_events SET ignored_reason='unsupported event type', processed=true, processed_at=now() WHERE github_delivery_id=$1")
-            .bind(delivery)
-            .execute(&state.db)
-            .await;
+    let result = process_webhook(&state, delivery, event, repo, &payload).await;
+    if let Err(err) = &result {
+        // Any failure after signature and payload validation is retryable: in
+        // particular, do not acknowledge a delivery whose event row is still
+        // unprocessed or whose app fan-out is incomplete.
+        tracing::warn!(error = %err, delivery, "GitHub webhook processing failed");
     }
-    StatusCode::ACCEPTED.into_response()
-}
-
-/// Mark a `push` webhook event processed, recording the resolved branch/commit
-/// and an optional reason it produced no deployments. Consolidates the four
-/// previously-inline `UPDATE webhook_events SET ...` statements that differed
-/// only by their `ignored_reason`.
-async fn mark_push_processed(
-    state: &AppState,
-    delivery: &str,
-    branch: &str,
-    sha: &str,
-    ignored_reason: Option<&str>,
-) {
-    let sql = if ignored_reason.is_some() {
-        "UPDATE webhook_events SET branch=$2, commit_sha=$3, ignored_reason=$4, \
-         processed=true, processed_at=now() WHERE github_delivery_id=$1"
-    } else {
-        "UPDATE webhook_events SET branch=$2, commit_sha=$3, \
-         processed=true, processed_at=now() WHERE github_delivery_id=$1"
-    };
-    let mut query = sqlx::query(sql).bind(delivery).bind(branch).bind(sha);
-    if let Some(reason) = ignored_reason {
-        query = query.bind(reason);
-    }
-    let _ = query.execute(&state.db).await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_webhook_app_event(
-    state: &AppState,
-    webhook_event_id: Uuid,
-    app_id: Uuid,
-    deployment_id: Option<Uuid>,
-    repo: &str,
-    branch: &str,
-    sha: &str,
-    status: &str,
-    ignored_reason: Option<&str>,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO webhook_app_events
-         (webhook_event_id,app_id,deployment_id,repo_full_name,branch,commit_sha,status,ignored_reason)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-    )
-    .bind(webhook_event_id)
-    .bind(app_id)
-    .bind(deployment_id)
-    .bind(repo)
-    .bind(branch)
-    .bind(sha)
-    .bind(status)
-    .bind(ignored_reason)
-    .execute(&state.db)
-    .await?;
-    Ok(())
+    webhook_processing_status(&result).into_response()
 }
 
 #[cfg(test)]

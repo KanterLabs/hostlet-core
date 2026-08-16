@@ -209,11 +209,29 @@ pub(crate) async fn complete_successful_build(
     manifest: &Value,
 ) -> anyhow::Result<()> {
     validate_build_manifest(original_payload, manifest)?;
+    // Lifecycle transactions lock app -> deployment -> job -> server. The
+    // completion route already owns the job lock; direct DB helpers acquire
+    // the first two rows here before runtime-capacity admission.
+    crate::agent::locks::app(tx, app_id).await?;
+    crate::agent::locks::deployment(tx, deployment_id, app_id).await?;
     let runner_server_id: Uuid =
-        sqlx::query_scalar("SELECT server_id FROM deployments WHERE id=$1 FOR UPDATE")
+        sqlx::query_scalar("SELECT server_id FROM deployments WHERE id=$1 AND app_id=$2")
             .bind(deployment_id)
+            .bind(app_id)
             .fetch_one(&mut **tx)
             .await?;
+    crate::agent::locks::server(tx, runner_server_id).await?;
+
+    // A successful build is not permission to release a paused app.  The
+    // build and release jobs are separate leases, so this check closes the
+    // pause-during-build race before the release reservation is committed.
+    let app_suspended: bool =
+        sqlx::query_scalar("SELECT suspended_at IS NOT NULL FROM apps WHERE id=$1")
+            .bind(app_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("app no longer exists"))?;
+    anyhow::ensure!(!app_suspended, "app is paused; release is not permitted");
 
     let mut release_payload = original_payload.clone();
     let object = release_payload
@@ -255,24 +273,55 @@ pub(crate) async fn complete_successful_build(
     .await?
     .rows_affected();
     anyhow::ensure!(updated == 1, "deployment build is no longer active");
-    sqlx::query(
+    let capacity_decision = crate::server_capacity::capacity_decision_in_transaction(
+        tx,
+        runner_server_id,
+        app_id,
+        None,
+    )
+    .await?;
+    let (capacity_wait, capacity_wait_reason) = match capacity_decision {
+        crate::server_capacity::CapacityDecision::Admitted => (false, None),
+        crate::server_capacity::CapacityDecision::Waiting(reason) => {
+            (true, Some(reason.to_string()))
+        }
+    };
+    if capacity_wait {
+        release_payload["capacity_wait"] = serde_json::Value::Bool(true);
+        release_payload["capacity_wait_reason"] = serde_json::Value::String(
+            capacity_wait_reason
+                .clone()
+                .unwrap_or_else(|| "runtime_capacity".into()),
+        );
+    } else {
+        release_payload["capacity_reserved"] = serde_json::Value::Bool(true);
+    }
+    let deployment_updated = sqlx::query(
         "UPDATE deployments
          SET status='queued_for_release',artifact_manifest_json=$1,last_heartbeat_at=now()
-         WHERE id=$2",
+         WHERE id=$2 AND status IN ('building','publishing')",
     )
     .bind(manifest)
     .bind(deployment_id)
     .execute(&mut **tx)
-    .await?;
+    .await?
+    .rows_affected();
+    anyhow::ensure!(
+        deployment_updated == 1,
+        "deployment is no longer in a build execution phase"
+    );
     sqlx::query(
         "INSERT INTO agent_jobs
-           (server_id,app_id,deployment_id,job_type,status,payload_json,priority,protocol_version)
-         VALUES ($1,$2,$3,'release','queued',$4,10,6)",
+           (server_id,app_id,deployment_id,job_type,status,payload_json,priority,protocol_version,available_at)
+         VALUES ($1,$2,$3,'release','queued',$4,10,$5,
+                 CASE WHEN $6 THEN now() + interval '100 years' ELSE now() END)",
     )
     .bind(runner_server_id)
     .bind(app_id)
     .bind(deployment_id)
     .bind(release_payload)
+    .bind(hostlet_contracts::DEPLOYMENT_PROTOCOL_VERSION)
+    .bind(capacity_wait)
     .execute(&mut **tx)
     .await?;
     Ok(())

@@ -7,6 +7,16 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "compose_addons.rs"]
+mod compose_addons;
+#[path = "compose_preview.rs"]
+mod compose_preview;
+pub use compose_addons::{
+    add_on_catalog, generate_compose, resolve_managed_addons, AddOn, AddOnEnv, AddOnInject,
+    GeneratedCompose, ResolvedAddons, WEB_IMAGE_ENV,
+};
+pub use compose_preview::{parse_compose_services, ServiceSummary};
+
 /// Service-level Compose fields Hostlet refuses to run, because each breaches
 /// the single-web-service + named-volumes safety model: host port exposure
 /// (`ports`), host networking (`network_mode`/`networks`), privilege escalation
@@ -53,8 +63,31 @@ impl HostletComposeManifest {
     /// runtime. Returns `None` for non-compose manifests or unparseable YAML so
     /// inspection can fall through to the next detector.
     pub fn parse_compose(manifest_yaml: &str) -> Option<Self> {
-        let manifest: Self = serde_yaml::from_str(manifest_yaml).ok()?;
-        (manifest.runtime == "compose").then_some(manifest)
+        Self::parse_compose_checked(manifest_yaml).ok().flatten()
+    }
+
+    /// Parses and validates an explicit Compose manifest for API inspection.
+    ///
+    /// `Ok(None)` means the file is valid YAML but does not declare the
+    /// `compose` runtime, so normal single-service detectors may continue. An
+    /// error means the file declares `runtime: compose` but does not satisfy
+    /// the same shape/path constraints enforced by the deploy agent.
+    pub fn parse_compose_checked(manifest_yaml: &str) -> Result<Option<Self>, String> {
+        let value: serde_yaml::Value = serde_yaml::from_str(manifest_yaml)
+            .map_err(|err| format!("hostlet manifest is not valid YAML: {err}"))?;
+        let Some(runtime) = value.get("runtime") else {
+            return Ok(None);
+        };
+        let Some(runtime) = runtime.as_str() else {
+            return Err("hostlet manifest runtime must be a string".into());
+        };
+        if runtime != "compose" {
+            return Ok(None);
+        }
+        let manifest: Self = serde_yaml::from_value(value)
+            .map_err(|err| format!("hostlet Compose manifest has an invalid shape: {err}"))?;
+        validate_compose_manifest(&manifest)?;
+        Ok(Some(manifest))
     }
 
     /// The compose file the manifest points at, defaulting to `compose.yaml`.
@@ -63,18 +96,49 @@ impl HostletComposeManifest {
     }
 }
 
-/// Display-only summary of one Compose service, used to render the per-service
-/// card stack in the UI.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceSummary {
-    pub name: String,
-    /// `"web"` for the routed entrypoint, `"backing"` for internal dependencies.
-    pub role: String,
-    pub image: Option<String>,
-    pub build: bool,
-    pub ports: Vec<String>,
-    pub volumes: Vec<String>,
+/// Validates the manifest fields the deploy agent consumes before it reads the
+/// referenced Compose file. Keep this in contracts so API inspection and agent
+/// deployment reject the same explicit manifest values.
+pub fn validate_compose_manifest(manifest: &HostletComposeManifest) -> Result<(), String> {
+    if manifest.runtime != "compose" {
+        return Err("hostlet manifest runtime must be compose".to_string());
+    }
+    validate_compose_service_name(&manifest.compose.web_service).map_err(|err| err.to_string())?;
+    if !crate::valid_relative_file_path(manifest.compose_file()) {
+        return Err("compose file path must be a relative file path inside the repository".into());
+    }
+    if manifest.compose.port == Some(0) {
+        return Err("compose port must be from 1 to 65535".into());
+    }
+    if let Some(path) = manifest.compose.health_path.as_deref() {
+        if !crate::valid_health_path(path) {
+            return Err("compose health path is invalid".into());
+        }
+    }
+    Ok(())
+}
+
+/// The service-name grammar used when a Compose service is passed to Docker
+/// command arguments. In particular, uppercase names and underscores are not
+/// accepted by the agent.
+pub fn validate_compose_service_name(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value.len() > 48
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || value.starts_with('-')
+        || value.ends_with('-')
+    {
+        return Err("compose service names must use lowercase letters, numbers, and hyphens");
+    }
+    Ok(())
+}
+
+/// Top-level Compose volume names use the same Docker-safe grammar as service
+/// names in the agent's release override (`lowercase`, digits, and hyphens).
+pub fn validate_compose_volume_name(value: &str) -> Result<(), &'static str> {
+    validate_compose_service_name(value)
 }
 
 fn map_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
@@ -168,48 +232,6 @@ pub fn with_data_mount_path(mut inspection: serde_json::Value, path: &str) -> se
     inspection
 }
 
-/// Parses a Compose file into display summaries, tagging `web_service` as the
-/// web role. Returns an empty vec for unparseable YAML or a missing `services:`
-/// block — callers treat that as "no preview available", not an error.
-pub fn parse_compose_services(compose_yaml: &str, web_service: &str) -> Vec<ServiceSummary> {
-    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(compose_yaml) else {
-        return Vec::new();
-    };
-    let Some(services) = value.get("services").and_then(|v| v.as_mapping()) else {
-        return Vec::new();
-    };
-    let mut summaries = Vec::new();
-    for (name, service) in services {
-        let Some(name) = name.as_str() else {
-            continue;
-        };
-        let role = if name == web_service {
-            "web"
-        } else {
-            "backing"
-        };
-        let mapping = service.as_mapping();
-        let image = mapping
-            .and_then(|m| map_get(m, "image"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let build = mapping.is_some_and(|m| map_has(m, "build"));
-        let ports = mapping.map(|m| string_seq(m, "ports")).unwrap_or_default();
-        let volumes = mapping
-            .map(|m| string_seq(m, "volumes"))
-            .unwrap_or_default();
-        summaries.push(ServiceSummary {
-            name: name.to_string(),
-            role: role.to_string(),
-            image,
-            build,
-            ports,
-            volumes,
-        });
-    }
-    summaries
-}
-
 /// Returns the warning tail (everything after the `Service {name} ` prefix) for a
 /// single `volumes:` entry the agent's `validate_compose_subset` would reject at
 /// deploy time, or `None` when the entry is within the safe named-volume subset.
@@ -220,11 +242,16 @@ pub fn parse_compose_services(compose_yaml: &str, web_service: &str) -> Vec<Serv
 /// return `None` because the agent auto-maps them onto a managed volume before
 /// validating; long-form entries are never auto-mapped, so any host-backed
 /// source — relative or absolute — is flagged.
-fn volume_subset_warning(volume: &serde_yaml::Value) -> Option<String> {
+fn volume_subset_warning_for(
+    volume: &serde_yaml::Value,
+    allow_mappable_relative_binds: bool,
+) -> Option<String> {
     if let Some(text) = volume.as_str() {
         let mut parts = text.split(':');
         let source = parts.next().unwrap_or("");
-        if is_host_bind_source(source) && !is_mappable_relative_bind(source) {
+        if is_host_bind_source(source)
+            && (!allow_mappable_relative_binds || !is_mappable_relative_bind(source))
+        {
             return Some(format!(
                 "uses a host bind mount ({text}); only named volumes are allowed."
             ));
@@ -265,368 +292,206 @@ fn volume_subset_warning(volume: &serde_yaml::Value) -> Option<String> {
     None
 }
 
-/// Soft, non-failing mirror of the agent's `validate_compose_subset`. Returns a
-/// human-readable warning for each thing the agent would reject at deploy time,
-/// so inspection can warn before the user commits. An empty result means the
-/// stack is within the safe subset.
-pub fn compose_subset_warnings(compose_yaml: &str, web_service: &str) -> Vec<String> {
+/// Validates the YAML shape of one service-level volume entry before applying
+/// the safety-subset checks. Docker Compose requires the field to be a
+/// sequence, with each entry represented as short-form text or a long-form
+/// object containing a target path; keeping that shape check here prevents the
+/// API preview and agent from deferring malformed input to Docker.
+fn short_volume_target_shape_error(text: &str) -> Option<&'static str> {
+    let mut parts = text.split(':');
+    let source = parts.next().unwrap_or_default();
+    let target = parts.next();
+    let _mode = parts.next();
+    if parts.next().is_some() {
+        return Some("volume short-form entries must have at most source, target, and mode.");
+    }
+    let has_source = target.is_some();
+    let target = target.unwrap_or(source);
+    if target.is_empty() {
+        return Some("volume entries must define a non-empty target.");
+    }
+    // A colon means the first component is a source, so an empty source is
+    // malformed (`:/data`) even when the target itself would be absolute.
+    if has_source && source.is_empty() {
+        return Some("volume entries must define a non-empty source.");
+    }
+    if target.starts_with('/') {
+        return None;
+    }
+    Some("volume targets must be absolute container paths.")
+}
+
+fn volume_entry_shape_error(volume: &serde_yaml::Value) -> Option<&'static str> {
+    if let Some(text) = volume.as_str() {
+        return short_volume_target_shape_error(text);
+    }
+    let Some(mapping) = volume.as_mapping() else {
+        return Some("volume entries must be strings or objects.");
+    };
+    for field in ["type", "source", "src", "target", "dst", "destination"] {
+        if map_get(mapping, field).is_some_and(|value| !value.is_string()) {
+            return Some("volume object fields must be strings.");
+        }
+    }
+    let Some(target) = map_get(mapping, "target")
+        .or_else(|| map_get(mapping, "dst"))
+        .or_else(|| map_get(mapping, "destination"))
+        .and_then(serde_yaml::Value::as_str)
+    else {
+        return Some("volume objects must define a non-empty target.");
+    };
+    if target.is_empty() {
+        return Some("volume objects must define a non-empty target.");
+    }
+    if !target.starts_with('/') {
+        return Some("volume targets must be absolute container paths.");
+    }
+    None
+}
+
+/// Returns every structural and safe-subset violation in a Compose file.
+///
+/// The agent invokes this with `allow_mappable_relative_binds = false` after
+/// it has remapped short-form relative binds to managed named volumes. API
+/// inspection invokes it with `true` against the source file, matching the
+/// agent's pre-validation remap behavior without maintaining a second parser.
+pub fn compose_subset_errors(
+    compose_yaml: &str,
+    web_service: &str,
+    allow_mappable_relative_binds: bool,
+) -> Vec<String> {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(compose_yaml) else {
         return vec!["Compose file is not valid YAML.".to_string()];
     };
-    let mut warnings = Vec::new();
-    if let Some(volumes) = value.get("volumes").and_then(|v| v.as_mapping()) {
-        for (name, volume) in volumes {
-            let name = name.as_str().unwrap_or("?");
-            if let Some(mapping) = volume.as_mapping() {
-                for field in FORBIDDEN_TOP_LEVEL_VOLUME_FIELDS {
-                    if map_has(mapping, field) {
-                        warnings.push(format!(
-                            "Volume {name} uses unsupported field {field}; Hostlet only supports simple named volumes."
-                        ));
+    let mut errors = Vec::new();
+    if validate_compose_service_name(web_service).is_err() {
+        errors.push(format!(
+            "Declared web service {web_service} has an invalid Compose service name."
+        ));
+    }
+
+    match value.get("volumes") {
+        None => {}
+        Some(volumes) => {
+            let Some(volumes) = volumes.as_mapping() else {
+                errors.push("Compose top-level volumes must be a mapping.".to_string());
+                // The agent cannot inspect entries from a non-mapping value.
+                // Continue with services so inspection can surface all useful
+                // violations in one response.
+                return compose_subset_errors_with_services(
+                    &value,
+                    web_service,
+                    allow_mappable_relative_binds,
+                    errors,
+                );
+            };
+            for (name, volume) in volumes {
+                let Some(name) = name.as_str() else {
+                    errors.push("Compose volume names must be strings.".to_string());
+                    continue;
+                };
+                if validate_compose_volume_name(name).is_err() {
+                    errors.push(format!(
+                        "Compose volume names must use lowercase letters, numbers, and hyphens (invalid volume {name})."
+                    ));
+                }
+                match volume {
+                    serde_yaml::Value::Null => {}
+                    serde_yaml::Value::Mapping(mapping) => {
+                        for field in FORBIDDEN_TOP_LEVEL_VOLUME_FIELDS {
+                            if map_has(mapping, field) {
+                                errors.push(format!(
+                                    "Volume {name} uses unsupported field {field}; Hostlet only supports simple named volumes."
+                                ));
+                            }
+                        }
                     }
+                    _ => errors.push(format!("Compose volume {name} must be an object.")),
                 }
             }
         }
     }
+    compose_subset_errors_with_services(&value, web_service, allow_mappable_relative_binds, errors)
+}
+
+fn compose_subset_errors_with_services(
+    value: &serde_yaml::Value,
+    web_service: &str,
+    allow_mappable_relative_binds: bool,
+    mut errors: Vec<String>,
+) -> Vec<String> {
     let Some(services) = value.get("services").and_then(|v| v.as_mapping()) else {
-        warnings.push("Compose file defines no services.".to_string());
-        return warnings;
+        errors.push("Compose file must define services.".to_string());
+        return errors;
     };
     let mut has_web = false;
     for (name, service) in services {
         let Some(name) = name.as_str() else {
+            errors.push("Compose service names must be strings.".to_string());
             continue;
         };
         if name == web_service {
             has_web = true;
         }
+        if validate_compose_service_name(name).is_err() {
+            errors.push(format!(
+                "Compose service names must use lowercase letters, numbers, and hyphens (invalid service {name})."
+            ));
+        }
         let Some(mapping) = service.as_mapping() else {
+            errors.push(format!("Compose service {name} must be an object."));
             continue;
         };
         for field in FORBIDDEN_SERVICE_FIELDS {
             if map_has(mapping, field) {
-                warnings.push(format!(
+                errors.push(format!(
                     "Service {name} uses unsupported field {field}; Hostlet will reject it at deploy. Remove it before deploying."
                 ));
             }
         }
-        if let Some(volumes) = map_get(mapping, "volumes").and_then(|v| v.as_sequence()) {
-            // Covers both short-form strings and the long-form `{type, source,
-            // target}` mappings; relative, within-repo string binds are auto-mapped
-            // by the agent so they intentionally produce no warning.
+        if let Some(volumes) = map_get(mapping, "volumes") {
+            let Some(volumes) = volumes.as_sequence() else {
+                errors.push(format!("Service {name} volumes must be a sequence."));
+                continue;
+            };
             for volume in volumes {
-                if let Some(tail) = volume_subset_warning(volume) {
-                    warnings.push(format!("Service {name} {tail}"));
+                if let Some(shape_error) = volume_entry_shape_error(volume) {
+                    errors.push(format!("Service {name} {shape_error}"));
+                    continue;
+                }
+                if let Some(tail) = volume_subset_warning_for(volume, allow_mappable_relative_binds)
+                {
+                    errors.push(format!("Service {name} {tail}"));
                 }
             }
         }
     }
     if !has_web {
-        warnings.push(format!(
+        errors.push(format!(
             "Declared web service {web_service} is not defined in the compose file."
         ));
     }
-    warnings
+    errors
 }
 
-/// The compose-interpolated environment variable the agent sets to the freshly
-/// built web image at deploy time, so the generated stack references the user's
-/// Railpack/Dockerfile-built app without that image ref being known at create
-/// time. Backing-service secrets are interpolated the same way (`${KEY}`), with
-/// values sourced from the app's encrypted env — never stored in the generated
-/// compose itself.
-pub const WEB_IMAGE_ENV: &str = "HOSTLET_WEB_IMAGE";
-
-/// One environment variable a managed add-on's container needs. `generate`
-/// secrets are minted per app at create time; the rest fall back to `default`.
-/// Either way the value is stored in the app's encrypted env and reaches the
-/// container via `${KEY}` interpolation — it is never embedded in the compose.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddOnEnv {
-    pub key: String,
-    pub generate: bool,
-    pub default: Option<String>,
-}
-
-/// A connection value injected into the *web* service (e.g. `DATABASE_URL`),
-/// rendered from the add-on's env at create time and stored encrypted.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddOnInject {
-    pub key: String,
-    pub template: String,
-}
-
-/// A managed backing-service add-on from the built-in catalog. Generic and
-/// self-hostable: `min_plan` is data the cloud layer enforces as policy; core
-/// ignores it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddOn {
-    pub key: String,
-    pub name: String,
-    pub category: String,
-    pub icon: String,
-    pub image: String,
-    pub service_name: String,
-    pub port: u16,
-    pub volumes: Vec<String>,
-    pub env: Vec<AddOnEnv>,
-    pub inject: Vec<AddOnInject>,
-    pub min_plan: String,
-}
-
-fn env_var(key: &str, generate: bool, default: Option<&str>) -> AddOnEnv {
-    AddOnEnv {
-        key: key.to_string(),
-        generate,
-        default: default.map(str::to_string),
+/// Enforcing counterpart to [`compose_subset_warnings`]. The error text is
+/// intentionally aggregated so API inspection can expose all violations while
+/// the agent can return one context-rich `anyhow` error.
+pub fn validate_compose_subset(compose_yaml: &str, web_service: &str) -> Result<(), String> {
+    let errors = compose_subset_errors(compose_yaml, web_service, false);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
-/// The built-in managed add-on catalog. Start small (Postgres, Redis); each
-/// entry's image is vetted to run under Hostlet's per-service hardening (no host
-/// ports, default caps, `no-new-privileges`).
-pub fn add_on_catalog() -> Vec<AddOn> {
-    vec![
-        AddOn {
-            key: "postgres".to_string(),
-            name: "PostgreSQL".to_string(),
-            category: "database".to_string(),
-            icon: "database".to_string(),
-            image: "postgres:16-alpine".to_string(),
-            service_name: "postgres".to_string(),
-            port: 5432,
-            volumes: vec!["pgdata:/var/lib/postgresql/data".to_string()],
-            env: vec![
-                env_var("POSTGRES_PASSWORD", true, None),
-                env_var("POSTGRES_USER", false, Some("postgres")),
-                env_var("POSTGRES_DB", false, Some("app")),
-            ],
-            inject: vec![AddOnInject {
-                key: "DATABASE_URL".to_string(),
-                template:
-                    "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
-                        .to_string(),
-            }],
-            min_plan: "starter".to_string(),
-        },
-        AddOn {
-            key: "redis".to_string(),
-            name: "Redis".to_string(),
-            category: "cache".to_string(),
-            icon: "zap".to_string(),
-            image: "redis:7-alpine".to_string(),
-            service_name: "redis".to_string(),
-            port: 6379,
-            volumes: vec!["redis-data:/data".to_string()],
-            env: vec![],
-            inject: vec![AddOnInject {
-                key: "REDIS_URL".to_string(),
-                template: "redis://redis:6379".to_string(),
-            }],
-            min_plan: "starter".to_string(),
-        },
-    ]
-}
-
-/// The generated Compose runtime for a managed-add-ons app, matching the
-/// `generatedCompose` shape the agent already consumes in
-/// `resolve_compose_manifest` (composeFile/webService/port/healthPath/compose).
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GeneratedCompose {
-    pub compose_file: String,
-    pub web_service: String,
-    pub port: u16,
-    pub health_path: String,
-    pub compose: String,
-}
-
-/// Generates the Compose YAML for a web app plus managed add-ons.
-///
-/// The web service references the agent-built image via `${HOSTLET_WEB_IMAGE}`
-/// (so the built image ref need not be known at create time); each add-on
-/// service references its env via `${KEY}` interpolation. No service declares a
-/// host `ports:` mapping — the web service's loopback publish is added by the
-/// agent's compose override — so the output is always within the safe subset.
-pub fn generate_compose(
-    web_service: &str,
-    port: u16,
-    health_path: &str,
-    addons: &[AddOn],
-) -> GeneratedCompose {
-    use serde_yaml::{Mapping, Value};
-
-    let mut services = Mapping::new();
-    let mut web = Mapping::new();
-    web.insert(
-        Value::from("image"),
-        Value::from(format!("${{{WEB_IMAGE_ENV}}}")),
-    );
-    if !addons.is_empty() {
-        web.insert(
-            Value::from("depends_on"),
-            Value::Sequence(
-                addons
-                    .iter()
-                    .map(|addon| Value::from(addon.service_name.clone()))
-                    .collect(),
-            ),
-        );
-    }
-    services.insert(Value::from(web_service), Value::Mapping(web));
-
-    let mut volumes = Mapping::new();
-    for addon in addons {
-        let mut service = Mapping::new();
-        service.insert(Value::from("image"), Value::from(addon.image.clone()));
-        if !addon.env.is_empty() {
-            let mut env = Mapping::new();
-            for entry in &addon.env {
-                env.insert(
-                    Value::from(entry.key.clone()),
-                    Value::from(format!("${{{}}}", entry.key)),
-                );
-            }
-            service.insert(Value::from("environment"), Value::Mapping(env));
-        }
-        if !addon.volumes.is_empty() {
-            service.insert(
-                Value::from("volumes"),
-                Value::Sequence(
-                    addon
-                        .volumes
-                        .iter()
-                        .map(|volume| Value::from(volume.clone()))
-                        .collect(),
-                ),
-            );
-            for volume in &addon.volumes {
-                if let Some(name) = volume.split(':').next() {
-                    volumes.insert(Value::from(name), Value::Null);
-                }
-            }
-        }
-        services.insert(
-            Value::from(addon.service_name.clone()),
-            Value::Mapping(service),
-        );
-    }
-
-    let mut root = Mapping::new();
-    root.insert(Value::from("services"), Value::Mapping(services));
-    if !volumes.is_empty() {
-        root.insert(Value::from("volumes"), Value::Mapping(volumes));
-    }
-    let compose = serde_yaml::to_string(&Value::Mapping(root)).unwrap_or_default();
-
-    GeneratedCompose {
-        compose_file: "compose.generated.hostlet.yml".to_string(),
-        web_service: web_service.to_string(),
-        port,
-        health_path: health_path.to_string(),
-        compose,
-    }
-}
-
-/// The outcome of resolving requested add-ons: the `runtime_config` with
-/// `generatedCompose` filled in, and the `(key, value)` env pairs to persist
-/// (encrypted by the caller).
-pub struct ResolvedAddons {
-    pub runtime_config: serde_json::Value,
-    pub env: Vec<(String, String)>,
-}
-
-/// Resolves `runtime_config.compose.addOns` (selected at app-create time) into a
-/// generated multi-service Compose runtime plus the env to persist. Shared by
-/// the self-hosted and Hostlet Cloud create handlers so the secret +
-/// compose-generation logic lives in one place.
-///
-/// `secret_gen` mints a strong random value for each `generate`-flagged add-on
-/// env key (the caller supplies its own CSPRNG; contracts stays dependency
-/// light). The generated secrets land only in the returned `env`; the compose
-/// references them via `${VAR}` interpolation, never plaintext in
-/// `runtime_config`. Returns `Ok(None)` when no add-ons are requested.
-pub fn resolve_managed_addons(
-    runtime_config: &serde_json::Value,
-    web_service: &str,
-    port: u16,
-    health_path: &str,
-    mut secret_gen: impl FnMut() -> String,
-) -> Result<Option<ResolvedAddons>, String> {
-    let Some(requested) = runtime_config
-        .pointer("/compose/addOns")
-        .and_then(|value| value.as_array())
-        .filter(|list| !list.is_empty())
-    else {
-        return Ok(None);
-    };
-    let catalog = add_on_catalog();
-    let mut chosen: Vec<AddOn> = Vec::new();
-    let mut env: Vec<(String, String)> = Vec::new();
-    for item in requested {
-        let key = item
-            .get("key")
-            .and_then(|value| value.as_str())
-            .ok_or("each add-on requires a key")?;
-        let addon = catalog
-            .iter()
-            .find(|candidate| candidate.key == key)
-            .ok_or_else(|| format!("unknown add-on {key}"))?;
-        if chosen
-            .iter()
-            .any(|existing| existing.service_name == addon.service_name)
-        {
-            return Err(format!("add-on {key} was requested more than once"));
-        }
-        for entry in &addon.env {
-            let value = if entry.generate {
-                secret_gen()
-            } else {
-                entry.default.clone().unwrap_or_default()
-            };
-            addon_env_upsert(&mut env, &entry.key, value);
-        }
-        for inject in &addon.inject {
-            let rendered = render_addon_template(&inject.template, &env);
-            addon_env_upsert(&mut env, &inject.key, rendered);
-        }
-        chosen.push(addon.clone());
-    }
-    let generated = generate_compose(web_service, port, health_path, &chosen);
-    let mut runtime_config = runtime_config.clone();
-    let object = runtime_config
-        .as_object_mut()
-        .ok_or("runtime config must be an object")?;
-    object.insert(
-        "generatedCompose".to_string(),
-        serde_json::to_value(&generated).map_err(|_| "failed to encode generated compose")?,
-    );
-    Ok(Some(ResolvedAddons {
-        runtime_config,
-        env,
-    }))
-}
-
-/// Inserts or replaces `key`, keeping the env list free of duplicates (a later
-/// add-on reusing a var name wins, matching compose's last-write semantics).
-fn addon_env_upsert(env: &mut Vec<(String, String)>, key: &str, value: String) {
-    match env.iter_mut().find(|(existing, _)| existing == key) {
-        Some(slot) => slot.1 = value,
-        None => env.push((key.to_string(), value)),
-    }
-}
-
-/// Substitutes `${VAR}` references in a connection-string template with the
-/// already-resolved env values.
-fn render_addon_template(template: &str, env: &[(String, String)]) -> String {
-    let mut rendered = template.to_string();
-    for (key, value) in env {
-        rendered = rendered.replace(&format!("${{{key}}}"), value);
-    }
-    rendered
+/// Soft, non-failing mirror of the agent's `validate_compose_subset`. Returns a
+/// human-readable warning for each thing the agent would reject at deploy time,
+/// so inspection can warn before the user commits. An empty result means the
+/// stack is within the safe subset.
+pub fn compose_subset_warnings(compose_yaml: &str, web_service: &str) -> Vec<String> {
+    compose_subset_errors(compose_yaml, web_service, true)
 }
 
 #[cfg(test)]
@@ -808,6 +673,83 @@ services:
     }
 
     #[test]
+    fn preview_rejects_uppercase_and_non_object_services() {
+        let uppercase = "services:\n  Web:\n    image: app\n";
+        let warnings = compose_subset_warnings(uppercase, "Web");
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("invalid service Web")));
+
+        let null_service = "services:\n  web: null\n";
+        let warnings = compose_subset_warnings(null_service, "web");
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("must be an object")));
+        assert!(validate_compose_subset(null_service, "web").is_err());
+    }
+
+    #[test]
+    fn preview_rejects_non_mapping_top_level_volumes() {
+        let warnings =
+            compose_subset_warnings("services:\n  web:\n    image: app\nvolumes: []\n", "web");
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("top-level volumes must be a mapping")));
+        assert!(
+            validate_compose_subset("services:\n  web:\n    image: app\nvolumes: []\n", "web")
+                .is_err()
+        );
+
+        let invalid_name = "services:\n  web:\n    image: app\nvolumes:\n  Cache_Data:\n";
+        assert!(compose_subset_warnings(invalid_name, "web")
+            .iter()
+            .any(|warning| warning.contains("invalid volume Cache_Data")));
+        assert!(validate_compose_subset(invalid_name, "web").is_err());
+    }
+
+    #[test]
+    fn preview_rejects_malformed_service_volume_shapes() {
+        let mapping = "services:\n  web:\n    image: app\n    volumes: {}\n";
+        assert!(compose_subset_warnings(mapping, "web")
+            .iter()
+            .any(|warning| warning.contains("volumes must be a sequence")));
+        assert!(validate_compose_subset(mapping, "web").is_err());
+
+        let null_entry = "services:\n  web:\n    image: app\n    volumes:\n      - null\n";
+        assert!(compose_subset_warnings(null_entry, "web")
+            .iter()
+            .any(|warning| warning.contains("strings or objects")));
+        assert!(validate_compose_subset(null_entry, "web").is_err());
+
+        let missing_target = "services:\n  web:\n    image: app\n    volumes:\n      - type: volume\n        source: app-data\n";
+        assert!(compose_subset_warnings(missing_target, "web")
+            .iter()
+            .any(|warning| warning.contains("non-empty target")));
+        assert!(validate_compose_subset(missing_target, "web").is_err());
+
+        for entry in ["", "app-data", "app-data:", "app-data:relative"] {
+            let yaml_entry = serde_yaml::to_string(entry).unwrap();
+            let compose =
+                format!("services:\n  web:\n    image: app\n    volumes:\n      - {yaml_entry}");
+            assert!(compose_subset_warnings(&compose, "web")
+                .iter()
+                .any(|warning| warning.contains("target") || warning.contains("absolute")));
+            assert!(validate_compose_subset(&compose, "web").is_err());
+        }
+
+        let relative_long_target = "services:\n  web:\n    image: app\n    volumes:\n      - type: volume\n        source: app-data\n        target: data\n";
+        assert!(compose_subset_warnings(relative_long_target, "web")
+            .iter()
+            .any(|warning| warning.contains("absolute")));
+        assert!(validate_compose_subset(relative_long_target, "web").is_err());
+
+        let valid_short_target = "services:\n  web:\n    image: app\n    volumes:\n      - app-data:/data\nvolumes:\n  app-data:\n";
+        assert!(compose_subset_warnings(valid_short_target, "web").is_empty());
+        let valid_long_target = "services:\n  web:\n    image: app\n    volumes:\n      - type: volume\n        source: app-data\n        target: /data\nvolumes:\n  app-data:\n";
+        assert!(compose_subset_warnings(valid_long_target, "web").is_empty());
+    }
+
+    #[test]
     fn invalid_yaml_is_a_single_warning_not_a_panic() {
         let warnings = compose_subset_warnings("::: not yaml :::", "web");
         assert_eq!(warnings.len(), 1);
@@ -829,125 +771,32 @@ services:
     }
 
     #[test]
-    fn catalog_has_postgres_and_redis() {
-        let catalog = add_on_catalog();
-        let keys: Vec<&str> = catalog.iter().map(|a| a.key.as_str()).collect();
-        assert!(keys.contains(&"postgres"));
-        assert!(keys.contains(&"redis"));
-        let postgres = catalog.iter().find(|a| a.key == "postgres").unwrap();
-        // Postgres mints a password but never declares a host port.
-        assert!(postgres
-            .env
-            .iter()
-            .any(|e| e.key == "POSTGRES_PASSWORD" && e.generate));
-        assert!(postgres.inject.iter().any(|i| i.key == "DATABASE_URL"));
-    }
-
-    #[test]
-    fn generated_compose_is_within_the_safe_subset() {
-        let catalog = add_on_catalog();
-        let generated = generate_compose("web", 3000, "/", &catalog);
-        // The generated stack must pass the very gate the agent enforces.
-        assert!(
-            compose_subset_warnings(&generated.compose, "web").is_empty(),
-            "generated compose left the safe subset: {}",
-            generated.compose
+    fn checked_manifest_rejects_invalid_service_and_repeated_slash_path() {
+        let uppercase = HostletComposeManifest::parse_compose_checked(
+            "runtime: compose\ncompose:\n  web_service: Web\n",
         );
-        assert_eq!(generated.web_service, "web");
-        assert_eq!(generated.compose_file, "compose.generated.hostlet.yml");
-    }
-
-    #[test]
-    fn generated_compose_references_built_image_and_interpolated_secrets() {
-        let postgres = add_on_catalog()
-            .into_iter()
-            .filter(|a| a.key == "postgres")
-            .collect::<Vec<_>>();
-        let generated = generate_compose("web", 8080, "/health", &postgres);
-        // Web image is deferred to deploy time; secrets are interpolation refs,
-        // never literal values baked into the stored compose.
-        assert!(generated.compose.contains("${HOSTLET_WEB_IMAGE}"));
-        assert!(generated.compose.contains("${POSTGRES_PASSWORD}"));
-        assert!(generated.compose.contains("postgres:16-alpine"));
-        assert!(generated.compose.contains("pgdata"));
-        // No service publishes a host port in the generated stack.
-        assert!(!generated.compose.contains("ports:"));
-        // The parsed view tags postgres as a backing service.
-        let services = parse_compose_services(&generated.compose, "web");
-        assert_eq!(
-            services.iter().find(|s| s.name == "postgres").unwrap().role,
-            "backing"
+        assert!(uppercase.is_err());
+        let repeated_slash = HostletComposeManifest::parse_compose_checked(
+            "runtime: compose\ncompose:\n  web_service: web\n  file: config//compose.yml\n",
         );
-    }
-
-    #[test]
-    fn resolve_no_addons_returns_none() {
-        assert!(
-            resolve_managed_addons(&serde_json::json!({}), "web", 3000, "/", || "x".into())
-                .unwrap()
-                .is_none()
-        );
-        assert!(resolve_managed_addons(
-            &serde_json::json!({"compose":{"addOns":[]}}),
-            "web",
-            3000,
-            "/",
-            || "x".into()
-        )
-        .unwrap()
-        .is_none());
-    }
-
-    #[test]
-    fn resolve_postgres_generates_secret_and_connection_string() {
-        let resolved = resolve_managed_addons(
-            &serde_json::json!({"compose":{"addOns":[{"key":"postgres"}]}}),
-            "web",
-            3000,
-            "/",
-            || "s3cret".into(),
-        )
-        .unwrap()
-        .unwrap();
-        let env: std::collections::HashMap<_, _> = resolved.env.iter().cloned().collect();
-        assert_eq!(
-            env.get("POSTGRES_PASSWORD").map(String::as_str),
-            Some("s3cret")
-        );
-        assert_eq!(env.get("POSTGRES_DB").map(String::as_str), Some("app"));
-        assert_eq!(
-            env.get("DATABASE_URL").map(String::as_str),
-            Some("postgres://postgres:s3cret@postgres:5432/app")
-        );
-        let compose = resolved
-            .runtime_config
-            .pointer("/generatedCompose/compose")
-            .and_then(|value| value.as_str())
-            .unwrap();
-        assert!(compose_subset_warnings(compose, "web").is_empty());
-        // The secret lives only in env; the stored compose keeps the ${VAR} ref.
-        assert!(compose.contains("${POSTGRES_PASSWORD}"));
-        assert!(!compose.contains("s3cret"));
-    }
-
-    #[test]
-    fn resolve_rejects_unknown_and_duplicate_addons() {
-        assert!(resolve_managed_addons(
-            &serde_json::json!({"compose":{"addOns":[{"key":"mongo"}]}}),
-            "web",
-            3000,
-            "/",
-            || "x".into()
-        )
-        .is_err());
-        assert!(resolve_managed_addons(
-            &serde_json::json!({"compose":{"addOns":[{"key":"postgres"},{"key":"postgres"}]}}),
-            "web",
-            3000,
-            "/",
-            || "x".into()
-        )
-        .is_err());
+        assert!(repeated_slash.is_err());
+        for file in [
+            "/compose.yml",
+            "../compose.yml",
+            "compose\\windows.yml",
+            "config/compose?.yml",
+            "config/compose#.yml",
+            "",
+        ] {
+            let yaml_file = serde_yaml::to_string(file).unwrap();
+            let manifest =
+                format!("runtime: compose\ncompose:\n  web_service: web\n  file: {yaml_file}");
+            assert!(
+                HostletComposeManifest::parse_compose_checked(&manifest).is_err(),
+                "manifest path {file:?} must be rejected"
+            );
+        }
+        assert!(HostletComposeManifest::parse_compose_checked("runtime: 1\n").is_err());
     }
 
     #[test]

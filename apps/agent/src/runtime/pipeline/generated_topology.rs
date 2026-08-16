@@ -1,15 +1,14 @@
 use super::*;
 use hostlet_contracts::{
-    GeneratedTopologyConfig, HealthProbeKind, RepositoryFile, RepositoryInventory, ServiceRole,
-    TopologyReadiness,
+    repository_inventory_entry_count_within_bound, repository_inventory_entry_is_visible,
+    repository_inventory_noise_directory, repository_inventory_path,
+    repository_inventory_select_candidates, GeneratedTopologyConfig, HealthProbeKind,
+    RepositoryFile, RepositoryInventory, RepositoryInventoryCandidate, ServiceRole,
+    TopologyReadiness, REPOSITORY_INVENTORY_MAX_ENTRIES,
 };
 use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-
-const INVENTORY_MAX_FILES: usize = 10_000;
-const INVENTORY_MAX_RELEVANT_FILES: usize = 1_024;
-const INVENTORY_MAX_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 include!("generated_topology/release.rs");
 
@@ -710,15 +709,14 @@ pub(crate) fn inference_receipt(
 
 pub(crate) async fn checkout_inventory(checkout: &Path) -> anyhow::Result<RepositoryInventory> {
     let mut stack = vec![checkout.to_path_buf()];
-    let mut files = Vec::new();
+    let mut candidates = Vec::new();
     let mut visited = 0usize;
-    let mut content_bytes = 0usize;
     while let Some(directory) = stack.pop() {
         let mut entries = tokio::fs::read_dir(&directory).await?;
         while let Some(entry) = entries.next_entry().await? {
             visited += 1;
-            if visited > INVENTORY_MAX_FILES {
-                bail!("repository inventory exceeds {INVENTORY_MAX_FILES} entries");
+            if !repository_inventory_entry_count_within_bound(visited) {
+                bail!("repository inventory exceeds {REPOSITORY_INVENTORY_MAX_ENTRIES} entries");
             }
             let file_type = entry.file_type().await?;
             let path = entry.path();
@@ -728,88 +726,40 @@ pub(crate) async fn checkout_inventory(checkout: &Path) -> anyhow::Result<Reposi
                 .to_string_lossy()
                 .replace('\\', "/");
             if file_type.is_dir() {
-                if !noise_directory(entry.file_name().to_string_lossy().as_ref()) {
+                if !repository_inventory_noise_directory(
+                    entry.file_name().to_string_lossy().as_ref(),
+                ) {
                     stack.push(path);
                 }
                 continue;
             }
-            if !file_type.is_file() || !inventory_path(&relative) {
+            if !file_type.is_file()
+                || !repository_inventory_entry_is_visible(&relative)
+                || !repository_inventory_path(&relative)
+            {
                 continue;
             }
-            if files.len() >= INVENTORY_MAX_RELEVANT_FILES {
-                bail!("repository has too many topology-relevant files");
-            }
             let metadata = entry.metadata().await?;
-            let is_lock = lock_filename(&relative);
-            let contents = if is_lock
-                || metadata.len() > 128 * 1024
-                || content_bytes + metadata.len() as usize > INVENTORY_MAX_CONTENT_BYTES
-            {
-                None
-            } else {
-                let contents = tokio::fs::read_to_string(&path).await.ok();
-                content_bytes += contents.as_ref().map(String::len).unwrap_or_default();
-                contents
-            };
-            files.push(RepositoryFile {
-                path: relative,
-                contents,
-            });
+            let file_bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+            candidates.push(RepositoryInventoryCandidate::new(relative, file_bytes));
         }
     }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let selections = repository_inventory_select_candidates(candidates)
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let mut files = Vec::with_capacity(selections.len());
+    for selection in selections {
+        let path = checkout.join(&selection.path);
+        let contents = if selection.include_contents {
+            tokio::fs::read_to_string(&path).await.ok()
+        } else {
+            None
+        };
+        files.push(RepositoryFile {
+            path: selection.path,
+            contents,
+        });
+    }
     Ok(RepositoryInventory { files })
-}
-
-fn noise_directory(name: &str) -> bool {
-    name.starts_with('.')
-        || matches!(
-            name,
-            "node_modules"
-                | "dist"
-                | "build"
-                | "out"
-                | "target"
-                | "vendor"
-                | "coverage"
-                | "docs"
-                | "test"
-                | "tests"
-                | "fixtures"
-                | "examples"
-        )
-}
-
-fn inventory_path(path: &str) -> bool {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    matches!(
-        filename,
-        "package.json"
-            | "pnpm-workspace.yaml"
-            | "pnpm-lock.yaml"
-            | "package-lock.json"
-            | "yarn.lock"
-            | "bun.lock"
-            | "bun.lockb"
-            | "pyproject.toml"
-            | "requirements.txt"
-            | "go.mod"
-            | "go.work"
-            | "Cargo.toml"
-            | "index.html"
-            | "main.rs"
-    ) || path.ends_with(".go")
-        || matches!(
-            path.rsplit('.').next(),
-            Some("js" | "jsx" | "ts" | "tsx" | "vue" | "svelte")
-        )
-}
-
-fn lock_filename(path: &str) -> bool {
-    matches!(
-        path.rsplit('/').next(),
-        Some("pnpm-lock.yaml" | "package-lock.json" | "yarn.lock" | "bun.lock" | "bun.lockb")
-    )
 }
 
 pub(crate) async fn repair_pnpm_lock_metadata(

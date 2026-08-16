@@ -1,4 +1,5 @@
 use super::*;
+use axum::body::to_bytes;
 
 /// A deploy payload carrying the two decrypted secret keys that terminal-state
 /// transitions must strip from `agent_jobs.payload_json`.
@@ -142,6 +143,11 @@ async fn db_complete_job_scrubs_payload_secrets() {
     .await;
 
     claim_only_queued_job(&state).await;
+    let claim_token: Uuid = sqlx::query_scalar("SELECT claim_token FROM agent_jobs WHERE id=$1")
+        .bind(job_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     let headers = agent_headers(&state, TEST_SERVER_ID);
     let status = complete_job_status(
         &state,
@@ -151,7 +157,7 @@ async fn db_complete_job_scrubs_payload_secrets() {
             status: "success".into(),
             failure: None,
             result: None,
-            claim_token: None,
+            claim_token: Some(claim_token),
         },
     )
     .await;
@@ -229,6 +235,11 @@ async fn db_ws_job_status_cannot_resurrect_terminal_job() {
     .await;
 
     claim_only_queued_job(&state).await;
+    let claim_token: Uuid = sqlx::query_scalar("SELECT claim_token FROM agent_jobs WHERE id=$1")
+        .bind(job_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     let headers = agent_headers(&state, TEST_SERVER_ID);
     let status = complete_job_status(
         &state,
@@ -238,7 +249,7 @@ async fn db_ws_job_status_cannot_resurrect_terminal_job() {
             status: "success".into(),
             failure: None,
             result: None,
-            claim_token: None,
+            claim_token: Some(claim_token),
         },
     )
     .await;
@@ -389,6 +400,149 @@ async fn db_retry_deploy_job_creates_fresh_deployment_with_fresh_secrets() {
         Some("failed"),
         "the original deploy job must stay terminal"
     );
+}
+
+/// Remote build jobs are intentionally unassigned until a compatible builder
+/// claims them. Owner list/detail APIs must still expose the queued row, and
+/// continue exposing it after claim assigns the builder server.
+#[tokio::test]
+async fn db_owner_sees_unassigned_remote_build_job_before_and_after_claim() {
+    let Some(state) = crate::state::db_test_state_from_env().await else {
+        return;
+    };
+    reset_agent_db(&state).await;
+    let user_id = insert_user(&state).await;
+    let other_user_id = insert_user(&state).await;
+    let app_id = insert_app(&state, user_id).await;
+    let deployment_id = insert_deployment(&state, app_id).await;
+    let build_pool_id = Uuid::from_u128(0x10);
+    sqlx::query("UPDATE servers SET build_pool_id=$1 WHERE id=$2")
+        .bind(build_pool_id)
+        .bind(TEST_SERVER_ID)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let job_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO agent_jobs
+           (server_id,build_pool_id,app_id,deployment_id,job_type,status,payload_json)
+         VALUES (NULL,$1,$2,$3,'build','queued',
+                 '{\"type\":\"build\",\"required_platform\":\"linux/amd64\"}'::jsonb)
+         RETURNING id",
+    )
+    .bind(build_pool_id)
+    .bind(app_id)
+    .bind(deployment_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    let owner_request_headers = owner_headers(&state, user_id);
+    let other_user_headers = owner_headers(&state, other_user_id);
+
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT server_id FROM agent_jobs WHERE id=$1")
+            .bind(job_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        None,
+        "remote build must start unassigned"
+    );
+    assert_owner_job_list_contains(&state, &owner_request_headers, job_id).await;
+    assert_owner_job_detail_is_queued(&state, &owner_request_headers, job_id).await;
+    assert_owner_job_list_excludes(&state, &other_user_headers, job_id).await;
+    assert_owner_job_detail_is_not_found(&state, &other_user_headers, job_id).await;
+
+    let claim_response = claim_job(
+        State(state.clone()),
+        agent_headers(&state, TEST_SERVER_ID),
+        Json(ClaimJobRequest {
+            agent_id: Some("remote-builder".into()),
+            protocol_version: 6,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(claim_response.status(), StatusCode::OK);
+    assert_eq!(job_status(&state, job_id).await.as_deref(), Some("claimed"));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT server_id FROM agent_jobs WHERE id=$1")
+            .bind(job_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        Some(TEST_SERVER_ID),
+        "builder claim must assign the server"
+    );
+
+    assert_owner_job_list_contains(&state, &owner_request_headers, job_id).await;
+    assert_owner_job_detail_is_claimed(&state, &owner_request_headers, job_id).await;
+    assert_owner_job_list_excludes(&state, &other_user_headers, job_id).await;
+    assert_owner_job_detail_is_not_found(&state, &other_user_headers, job_id).await;
+}
+
+async fn assert_owner_job_list_contains(state: &AppState, headers: &HeaderMap, job_id: Uuid) {
+    let response = crate::web::list_agent_jobs(State(state.clone()), headers.clone())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let jobs: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        jobs.as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job.get("id") == Some(&serde_json::json!(job_id))),
+        "owner job list should include {job_id}: {jobs}"
+    );
+}
+
+async fn assert_owner_job_detail_is_queued(state: &AppState, headers: &HeaderMap, job_id: Uuid) {
+    let response =
+        crate::web::agent_job_status(State(state.clone()), headers.clone(), Path(job_id))
+            .await
+            .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let job: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(job["id"], serde_json::json!(job_id));
+    assert_eq!(job["status"], "queued");
+}
+
+async fn assert_owner_job_detail_is_claimed(state: &AppState, headers: &HeaderMap, job_id: Uuid) {
+    let response =
+        crate::web::agent_job_status(State(state.clone()), headers.clone(), Path(job_id))
+            .await
+            .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let job: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(job["id"], serde_json::json!(job_id));
+    assert_eq!(job["status"], "claimed");
+}
+
+async fn assert_owner_job_list_excludes(state: &AppState, headers: &HeaderMap, job_id: Uuid) {
+    let response = crate::web::list_agent_jobs(State(state.clone()), headers.clone())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let jobs: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        !jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job.get("id") == Some(&serde_json::json!(job_id))),
+        "another owner must not see {job_id}: {jobs}"
+    );
+}
+
+async fn assert_owner_job_detail_is_not_found(state: &AppState, headers: &HeaderMap, job_id: Uuid) {
+    let response =
+        crate::web::agent_job_status(State(state.clone()), headers.clone(), Path(job_id))
+            .await
+            .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 /// Retrying a non-deploy job requeues the original row in place with its payload

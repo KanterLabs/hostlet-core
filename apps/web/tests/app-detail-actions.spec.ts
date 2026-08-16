@@ -106,3 +106,228 @@ test("runs a browser check and refreshes the app health", async ({ page }) => {
   await expect(page.getByText("Browser check completed.")).toBeVisible();
   expect(appLoads).toBeGreaterThanOrEqual(2);
 });
+
+const persistedSettingsApp = {
+  ...baseApp,
+  domain: "saved.example.test",
+  healthPath: "/health",
+  currentDeploymentId: "d0",
+  latestDeployment: { id: "d1", status: "success" },
+};
+
+test("preserves dirty settings and the warning when publishing", async ({ page }) => {
+  let serverApp = { ...persistedSettingsApp, publicExposure: false };
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1" && route.request().method() === "GET") {
+      await jsonRoute(route, serverApp);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/apps/app-1" && route.request().method() === "PATCH") {
+      serverApp = { ...serverApp, publicExposure: true };
+      await jsonRoute(route, {});
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+  await page.getByLabel("Domain").fill("draft.example.test");
+
+  await actionsPanel(page).getByRole("button", { name: "Publish URL" }).click();
+
+  await expect(page.getByLabel("Domain")).toHaveValue("draft.example.test");
+  await expect(page.getByText("Unsaved settings are not included in deploys or auxiliary app actions.")).toBeVisible();
+  await expect(page.getByText(/App URL published.*Unsaved settings remain in this form and were not included/)).toBeVisible();
+  await expect(page.getByLabel("Public URL")).toBeChecked();
+});
+
+test("preserves dirty settings and the warning when unpublishing", async ({ page }) => {
+  let serverApp = { ...persistedSettingsApp, publicExposure: true };
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1" && route.request().method() === "GET") {
+      await jsonRoute(route, serverApp);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/apps/app-1" && route.request().method() === "PATCH") {
+      serverApp = { ...serverApp, publicExposure: false };
+      await jsonRoute(route, {});
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+  await page.getByLabel("Domain").fill("draft.example.test");
+
+  await actionsPanel(page).getByRole("button", { name: "Make private" }).click();
+
+  await expect(page.getByLabel("Domain")).toHaveValue("draft.example.test");
+  await expect(page.getByText("Unsaved settings are not included in deploys or auxiliary app actions.")).toBeVisible();
+  await expect(page.getByText(/App URL is private.*Unsaved settings remain in this form and were not included/)).toBeVisible();
+  await expect(page.getByLabel("Public URL")).not.toBeChecked();
+});
+
+test("preserves dirty settings and the warning after a browser check", async ({ page }) => {
+  const serverApp = { ...persistedSettingsApp, publicExposure: true };
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1" && route.request().method() === "GET") {
+      await jsonRoute(route, serverApp);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/apps/app-1/browser-check") {
+      await jsonRoute(route, { jobId: "job-browser" });
+      return true;
+    }
+    if (path === "/api/agent-jobs/job-browser") {
+      await jsonRoute(route, { id: "job-browser", status: "success" });
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+  await page.getByLabel("Domain").fill("draft.example.test");
+
+  await actionsPanel(page).getByRole("button", { name: "Check in browser" }).click();
+
+  await expect(page.getByLabel("Domain")).toHaveValue("draft.example.test");
+  await expect(page.getByText("Unsaved settings are not included in deploys or auxiliary app actions.")).toBeVisible();
+  await expect(page.getByText("Browser check completed. Unsaved settings remain in this form and were not included.")).toBeVisible();
+});
+
+test("preserves dirty settings and the warning when pausing", async ({ page }) => {
+  let serverApp = { ...persistedSettingsApp, publicExposure: true, suspendedAt: null as string | null };
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1" && route.request().method() === "GET") {
+      await jsonRoute(route, serverApp);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/apps/app-1/pause") {
+      serverApp = { ...serverApp, suspendedAt: "2026-08-15T00:00:00Z" };
+      await jsonRoute(route, {});
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+  await page.getByLabel("Domain").fill("draft.example.test");
+  await actionsPanel(page).getByRole("button", { name: "Pause" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Pause" }).click();
+
+  await expect(page.getByLabel("Domain")).toHaveValue("draft.example.test");
+  await expect(page.getByText("Unsaved settings are not included in deploys or auxiliary app actions.")).toBeVisible();
+  await expect(page.getByText("App paused. Unsaved settings remain in this form and were not included.")).toBeVisible();
+});
+
+test("preserves dirty settings and the warning when resuming", async ({ page }) => {
+  let serverApp = { ...persistedSettingsApp, publicExposure: true, suspendedAt: "2026-08-15T00:00:00Z" as string | null };
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1" && route.request().method() === "GET") {
+      await jsonRoute(route, serverApp);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/apps/app-1/resume") {
+      serverApp = { ...serverApp, suspendedAt: null };
+      await jsonRoute(route, {});
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+  await page.getByLabel("Domain").fill("draft.example.test");
+  await actionsPanel(page).getByRole("button", { name: "Resume" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Resume" }).click();
+
+  await expect(page.getByLabel("Domain")).toHaveValue("draft.example.test");
+  await expect(page.getByText("Unsaved settings are not included in deploys or auxiliary app actions.")).toBeVisible();
+  await expect(page.getByText("App resume requested. Unsaved settings remain in this form and were not included.")).toBeVisible();
+});
+
+test("preserves dirty settings and the warning when changing the build pool", async ({ page }) => {
+  let serverApp = { ...persistedSettingsApp, publicExposure: true, buildPoolId: "pool-a" };
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1" && route.request().method() === "GET") {
+      await jsonRoute(route, serverApp);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/build-pools") {
+      await jsonRoute(route, [
+        { id: "pool-a", name: "Local", enabled: true, qualificationStatus: "ready" },
+        { id: "pool-b", name: "Remote", enabled: true, qualificationStatus: "ready" },
+      ]);
+      return true;
+    }
+    if (path === "/api/apps/app-1/build-pool") {
+      serverApp = { ...serverApp, buildPoolId: "pool-b" };
+      await jsonRoute(route, {});
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+  await page.getByLabel("Domain").fill("draft.example.test");
+
+  await page.getByLabel("Build pool").selectOption("pool-b");
+
+  await expect(page.getByLabel("Domain")).toHaveValue("draft.example.test");
+  await expect(page.getByText("Unsaved settings are not included in deploys or auxiliary app actions.")).toBeVisible();
+  await expect(page.getByText("Build pool updated. Unsaved settings remain in this form and were not included.")).toBeVisible();
+});
+
+test("does not clobber a second edit while an auxiliary refresh is in flight", async ({ page }) => {
+  const serverApp = { ...persistedSettingsApp, publicExposure: true };
+  let appLoads = 0;
+  let releaseRefresh: (() => void) | null = null;
+  await mockApi(page, async (route, path) => {
+    if (path === "/api/apps/app-1" && route.request().method() === "GET") {
+      appLoads += 1;
+      if (appLoads > 1) await new Promise<void>((resolve) => { releaseRefresh = resolve; });
+      await jsonRoute(route, serverApp);
+      return true;
+    }
+    if (path === "/api/apps/app-1/env") {
+      await jsonRoute(route, []);
+      return true;
+    }
+    if (path === "/api/apps/app-1/browser-check") {
+      await jsonRoute(route, { jobId: "job-browser" });
+      return true;
+    }
+    if (path === "/api/agent-jobs/job-browser") {
+      await jsonRoute(route, { id: "job-browser", status: "success" });
+      return true;
+    }
+    return false;
+  });
+  await page.goto("/apps/app-1");
+  await page.getByLabel("Domain").fill("draft.example.test");
+
+  await actionsPanel(page).getByRole("button", { name: "Check in browser" }).click();
+  await expect.poll(() => appLoads).toBeGreaterThan(1);
+  await page.getByLabel("Health path").fill("/draft-health");
+  (releaseRefresh as (() => void) | null)?.();
+
+  await expect(page.getByLabel("Domain")).toHaveValue("draft.example.test");
+  await expect(page.getByLabel("Health path")).toHaveValue("/draft-health");
+});

@@ -46,7 +46,10 @@ JSON_CT=(-H "content-type: application/json")
 # Bring up Postgres and the self-hosted API under test.
 # ---------------------------------------------------------------------------
 start_postgres_container postgres:16-alpine
-wait_postgres_ready
+if ! wait_postgres_ready; then
+  echo "PostgreSQL readiness failed; aborting self-hosted API smoke before API startup" >&2
+  exit 1
+fi
 POSTGRES_PORT="$(discover_postgres_port)"
 
 export_self_hosted_env "${POSTGRES_PORT}" "${API_PORT}"

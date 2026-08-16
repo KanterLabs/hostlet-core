@@ -40,6 +40,7 @@ export type AgentJob = {
   id: string;
   type: string;
   status: string;
+  capacityWaitReason?: string | null;
   failure?: string | null;
   attempt: number;
   maxAttempts: number;
