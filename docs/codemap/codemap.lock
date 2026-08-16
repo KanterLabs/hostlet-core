@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-16T20:05:31Z",
-  "generated_from_commit": "449d4729bcb623526ab8096a206174b4b4b6fe69",
+  "generated_at": "2026-08-16T20:14:07Z",
+  "generated_from_commit": "fab5f7c24a46832d3aeb6fc6a194941aed217440",
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
   "working_tree_has_uncommitted_changes": true,
@@ -90,12 +90,12 @@
     {
       "id": ".github",
       "file_count": 16,
-      "fingerprint": "8aeb2aaa9d1c22e22ac01c67b15dcf0dfdd6bbf1f485b6ec4020ea0ffbf4f646"
+      "fingerprint": "e2ba50b1528dc4dc5839e3a9b02559eb44aa6953ce9fd74a6e45926d2b29617b"
     },
     {
       "id": "repository-root",
-      "file_count": 13,
-      "fingerprint": "345e6c19e29f712f20edfb75c9fa7b19b77cbde91ddb86f38314a10bbab8a9a4"
+      "file_count": 14,
+      "fingerprint": "e26dd32daafdfcf68ccdcb167f85ef8e92c6e487dea33e6b63a1e58c5c1486aa"
     }
   ],
   "module_fingerprints": {
@@ -108,8 +108,8 @@
     "infra": "0b8147bcdf474c39a1497437f3340952564f1bd91b9e748674c6fb7a286c5acb",
     "scripts": "b58bbaef64c861bacacdfcab70a9e854122355103f068501bce4bdc234af1121",
     "docs": "505a0ec2c50affb6227c2bc85b354308d9733e6a6333f1681be460635b516411",
-    ".github": "8aeb2aaa9d1c22e22ac01c67b15dcf0dfdd6bbf1f485b6ec4020ea0ffbf4f646",
-    "repository-root": "345e6c19e29f712f20edfb75c9fa7b19b77cbde91ddb86f38314a10bbab8a9a4"
+    ".github": "e2ba50b1528dc4dc5839e3a9b02559eb44aa6953ce9fd74a6e45926d2b29617b",
+    "repository-root": "e26dd32daafdfcf68ccdcb167f85ef8e92c6e487dea33e6b63a1e58c5c1486aa"
   },
   "module_file_counts": {
     "apps/api": 127,
@@ -122,7 +122,7 @@
     "scripts": 34,
     "docs": 10,
     ".github": 16,
-    "repository-root": 13
+    "repository-root": 14
   },
-  "total_file_count": 372
+  "total_file_count": 373
 }
