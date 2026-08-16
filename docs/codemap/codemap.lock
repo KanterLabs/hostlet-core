@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-16T15:16:32Z",
-  "generated_from_commit": "32016a666b4b3e7bd3fa0946c9852f34440ae48e",
+  "generated_at": "2026-08-16T19:58:08Z",
+  "generated_from_commit": "af0812d54923c44e41ecb8cd3501d8cbd9dc7e74",
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
-  "working_tree_has_uncommitted_changes": false,
+  "working_tree_has_uncommitted_changes": true,
   "record_format": "codemap-fingerprint-v1\\0 + bytewise path order + decimal path length:path\\0 + decimal content length:content\\0; missing tracked file content is MISSING\\0",
   "scope": [
     "apps/api",
@@ -45,7 +45,7 @@
     {
       "id": "apps/api",
       "file_count": 127,
-      "fingerprint": "5b49ee389a08353253ecab5a782295e407e30e360ef71af43215204d3959a130"
+      "fingerprint": "360d25a323153c4041196cffe45c2970e3200b767b05c5fc477704e8bb740ca3"
     },
     {
       "id": "apps/agent",
@@ -80,7 +80,7 @@
     {
       "id": "scripts",
       "file_count": 34,
-      "fingerprint": "457f30d7e294532fc7121c2b0101682c3612927c5574358bb26fb7bd8f0ed606"
+      "fingerprint": "b58bbaef64c861bacacdfcab70a9e854122355103f068501bce4bdc234af1121"
     },
     {
       "id": "docs",
@@ -99,14 +99,14 @@
     }
   ],
   "module_fingerprints": {
-    "apps/api": "5b49ee389a08353253ecab5a782295e407e30e360ef71af43215204d3959a130",
+    "apps/api": "360d25a323153c4041196cffe45c2970e3200b767b05c5fc477704e8bb740ca3",
     "apps/agent": "996027ca44f29e62711964b783b4bd04990175b39bd49e822a6bf7d9f38d5522",
     "apps/cli": "612269475a1f9ddd98b26fa25125a476decabc7644b7153282a036d80be60ba6",
     "apps/screenshotter": "f5b6b10b597058574eb7e20c9f65c60b26b2852686ffbd738b9d336478d14c70",
     "apps/web": "22c1040efdcc2c3cbd7e584d61ab002c859f50f3a859640ca90b16149c4db7d9",
     "crates/contracts": "a3dafe87002bb59f321807835ef1a9b27a8077c781c5da2eed33925e9e8ca805",
     "infra": "0b8147bcdf474c39a1497437f3340952564f1bd91b9e748674c6fb7a286c5acb",
-    "scripts": "457f30d7e294532fc7121c2b0101682c3612927c5574358bb26fb7bd8f0ed606",
+    "scripts": "b58bbaef64c861bacacdfcab70a9e854122355103f068501bce4bdc234af1121",
     "docs": "505a0ec2c50affb6227c2bc85b354308d9733e6a6333f1681be460635b516411",
     ".github": "8aeb2aaa9d1c22e22ac01c67b15dcf0dfdd6bbf1f485b6ec4020ea0ffbf4f646",
     "repository-root": "aff247aa8bccd6f22737aab8b6c6c1ae5d928f2b8ad606a7e7cfa45ad4c31627"

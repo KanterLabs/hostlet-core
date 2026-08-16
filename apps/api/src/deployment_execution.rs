@@ -126,8 +126,17 @@ pub async fn heartbeat(
         .is_none()
     {
         if let Some(deployment_id) = job.get::<Option<Uuid>, _>("deployment_id") {
+            // The agent reports the generic `running` phase on every lease
+            // renewal, regardless of job type. Once a deployment has entered a
+            // more specific phase, treat that value as a liveness pulse rather
+            // than regressing build or release progress back to `running`.
             if sqlx::query(
-                "UPDATE deployments SET status=$1,last_heartbeat_at=now()
+                "UPDATE deployments
+                 SET status=CASE
+                       WHEN $1='running' AND status<>'queued' THEN status
+                       ELSE $1
+                     END,
+                     last_heartbeat_at=now()
              WHERE id=$2 AND server_id=$3 AND status = ANY($4)",
             )
             .bind(request.phase.as_str())

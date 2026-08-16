@@ -27,8 +27,8 @@
 </main>
 <script id="codemap-data" type="application/json">
 {
-  "generated_at": "2026-08-16T15:16:32Z",
-  "generated_from_commit": "32016a666b4b3e7bd3fa0946c9852f34440ae48e",
+  "generated_at": "2026-08-16T19:58:08Z",
+  "generated_from_commit": "af0812d54923c44e41ecb8cd3501d8cbd9dc7e74",
   "scope": [
     "apps/api",
     "apps/agent",
@@ -270,6 +270,10 @@
         {
           "path": "apps/api/src/agent/tests/concurrency.rs",
           "symbol": "async fn db_concurrent_cancellation_and_activation_follow_lock_order()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_generic_heartbeat_preserves_specific_deployment_phase()"
         }
       ],
       "constraints": [
@@ -303,7 +307,11 @@
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE deployments SET status=$1,last_heartbeat_at=now()"
+          "symbol": "UPDATE deployments SET status=CASE WHEN $1='running' AND status<>'queued' THEN status ELSE $1 END,last_heartbeat_at=now()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_generic_heartbeat_preserves_specific_deployment_phase()"
         }
       ]
     },
@@ -360,6 +368,10 @@
         {
           "path": "apps/api/src/server_capacity/tests.rs",
           "symbol": "async fn db_build_completion_admits_one_release_and_waits_for_the_next()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_generic_heartbeat_preserves_specific_deployment_phase()"
         }
       ],
       "constraints": [
@@ -528,6 +540,10 @@
         {
           "path": "apps/api/src/server_capacity/tests.rs",
           "symbol": "async fn db_build_completion_admits_one_release_and_waits_for_the_next()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_generic_heartbeat_preserves_specific_deployment_phase()"
         }
       ],
       "constraints": [
@@ -553,7 +569,7 @@
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE deployments SET status=$1,last_heartbeat_at=now()"
+          "symbol": "UPDATE deployments SET status=CASE WHEN $1='running' AND status<>'queued' THEN status ELSE $1 END,last_heartbeat_at=now()"
         },
         {
           "path": "apps/api/src/agent/build_execution.rs",
@@ -1564,7 +1580,7 @@
   ],
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
-  "working_tree_has_uncommitted_changes": false,
+  "working_tree_has_uncommitted_changes": true,
   "symbol_index": [
     {
       "id": "api-deployment-heartbeat",
@@ -1587,7 +1603,7 @@
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE deployments SET status=$1,last_heartbeat_at=now()"
+          "symbol": "UPDATE deployments SET status=CASE WHEN $1='running' AND status<>'queued' THEN status ELSE $1 END,last_heartbeat_at=now()"
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
@@ -1604,10 +1620,15 @@
           "path": "apps/api/src/agent/tests/concurrency.rs",
           "symbol": "async fn db_concurrent_cancellation_and_activation_follow_lock_order()",
           "coverage": "related lock ordering"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_generic_heartbeat_preserves_specific_deployment_phase()",
+          "coverage": "direct endpoint test"
         }
       ],
-      "direct_test_coverage": false,
-      "note": "The endpoint has no dedicated HTTP integration test in the bounded Core suite; related lease and lock-order tests are listed explicitly."
+      "direct_test_coverage": true,
+      "note": "The direct database-backed endpoint test verifies that generic running heartbeats preserve a specific deployment phase while still updating liveness."
     },
     {
       "id": "api-complete-successful-build",
