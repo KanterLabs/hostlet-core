@@ -1,0 +1,1725 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hostlet Core code map</title>
+<style>
+:root{color-scheme:dark;--bg:#08111d;--panel:#0e1a2a;--ink:#e7effa;--muted:#94a8c1;--line:#34506f;--accent:#7dd3fc;--node:#132640;--verified:#5eead4;--unknown:#fbbf24}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}header{padding:16px 20px;border-bottom:1px solid #223852;background:#0a1524}h1{font-size:19px;margin:0 0 5px}.meta{color:var(--muted);font-size:12px}main{display:grid;grid-template-columns:300px 1fr;height:calc(100vh - 79px)}aside{overflow:auto;padding:15px;border-right:1px solid #223852;background:var(--panel)}label{display:block;margin:10px 0 5px;color:var(--muted);font-size:12px}input,select,button{width:100%;border:1px solid #294461;border-radius:6px;background:#0a1524;color:var(--ink);padding:8px}button{cursor:pointer;margin-top:7px}button:hover{border-color:var(--accent)}.types{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px}.types label{margin:0;color:var(--ink);font-size:12px}.types input{width:auto;padding:0;margin-right:4px}.legend{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:14px}.swatch{display:inline-block;width:12px;height:3px;vertical-align:middle;margin-right:3px}.verified{background:var(--verified)}.unknown{background:var(--unknown);border-top:1px dashed var(--unknown)}#detail{margin-top:16px;border-top:1px solid #294461;padding-top:10px;font-size:12px;line-height:1.45;color:var(--muted)}#detail strong{color:var(--ink)}#canvas{position:relative;overflow:hidden;background:radial-gradient(circle at 30% 20%,#10223b 0,#08111d 52%)}svg{width:100%;height:100%;touch-action:none}.edge{fill:none;stroke:var(--line);stroke-width:1.5;opacity:.72}.edge.unknown{stroke:var(--unknown);stroke-dasharray:5 4}.edge.active{stroke:var(--accent);stroke-width:3;opacity:1}.edge.dim,.node.dim{opacity:.13}.node rect{fill:var(--node);stroke:#47729c;stroke-width:1.4;rx:9}.node.external rect{stroke:#c084fc}.node.infrastructure rect{stroke:#fbbf24}.node text{fill:var(--ink);font-size:12px;pointer-events:none}.node .role{fill:var(--muted);font-size:10px}.node.active rect{stroke:var(--accent);stroke-width:3}.group-label{fill:#6f8eaf;font-size:10px;letter-spacing:1px;text-transform:uppercase}.hint{font-size:11px;color:var(--muted);margin-top:10px}a{color:var(--accent)}
+.band{fill:#0e1b2d;fill-opacity:.55;stroke:#294461;stroke-width:1;stroke-dasharray:4 4}.node.application rect{stroke:#7dd3fc}.node.module rect{stroke:#5eead4}.node.library rect{stroke:#a78bfa}.node.external rect{stroke:#f472b6}.node.upstream rect{stroke:#c084fc;stroke-width:3}.node.downstream rect{stroke:#5eead4;stroke-width:3}.edge.upstream{stroke:#c084fc;stroke-width:2}.edge.downstream{stroke:#5eead4;stroke-width:2}
+</style>
+</head>
+<body>
+<header><h1>Hostlet Core — evidence-backed code map</h1><div class="meta" id="meta"></div></header>
+<main>
+<aside>
+<label for="search">Search nodes, paths, roles</label><input id="search" placeholder="e.g. activation">
+<label for="flow">Highlight flow</label><select id="flow"><option value="">None</option></select>
+<label>Edge types</label><div class="types" id="types"></div>
+<label>Module types</label><div class="types" id="nodeTypes"></div>
+<label>Boundaries</label><div class="types" id="boundaries"></div>
+<button id="fit">Fit map</button><button id="reset">Reset selection</button>
+<div class="legend"><span><i class="swatch verified"></i>verified</span><span><i class="swatch unknown"></i>unknown / evidence gap</span><span><i class="swatch" style="background:#7dd3fc"></i>application</span><span><i class="swatch" style="background:#5eead4"></i>module</span><span><i class="swatch" style="background:#fbbf24"></i>infrastructure</span><span><i class="swatch" style="background:#a78bfa"></i>library</span><span><i class="swatch" style="background:#f472b6"></i>external</span></div>
+<div class="hint">Drag the canvas to pan, use the wheel to zoom, and drag a node to reposition it. Click a node for its transitive upstream/downstream impact.</div>
+<div id="detail">Select a node or flow to inspect evidence, related tests, and flows.</div>
+</aside>
+<section id="canvas"><svg id="svg" aria-label="interactive architecture map"><g id="viewport"><g id="bands"></g><g id="edges"></g><g id="labels"></g><g id="nodes"></g></g></svg></section>
+</main>
+<script id="codemap-data" type="application/json">
+{
+  "generated_at": "2026-08-16T15:16:32Z",
+  "generated_from_commit": "32016a666b4b3e7bd3fa0946c9852f34440ae48e",
+  "scope": [
+    "apps/api",
+    "apps/agent",
+    "apps/cli",
+    "apps/screenshotter",
+    "apps/web",
+    "crates/contracts",
+    "infra",
+    "scripts",
+    "docs",
+    ".github",
+    "repository-root"
+  ],
+  "nodes": [
+    {
+      "id": "web-ui",
+      "label": "Web UI",
+      "path": "apps/web/app/apps/new/page.tsx",
+      "role": "Next.js control-plane interface",
+      "type": "application",
+      "boundary": "client",
+      "entrypoints": [
+        {
+          "path": "apps/web/app/apps/new/page.tsx",
+          "symbol": "async function inspectRepo()"
+        },
+        {
+          "path": "apps/web/app/apps/[id]/useAppActions.ts",
+          "symbol": "const deploy = useCallback"
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/web/tests/app-status-helpers.spec.ts",
+          "symbol": "test.describe(\"app-status helpers\", () => {"
+        }
+      ],
+      "constraints": [
+        "Core app/ is replaced by the Cloud overlay; shared helpers belong in lib/.",
+        "lib/ must not import @/app/."
+      ],
+      "evidence": [
+        {
+          "path": "apps/web/app/apps/new/page.tsx",
+          "symbol": "async function inspectRepo()"
+        },
+        {
+          "path": "apps/web/app/apps/[id]/useAppActions.ts",
+          "symbol": "const deploy = useCallback"
+        }
+      ]
+    },
+    {
+      "id": "api-router",
+      "label": "API router",
+      "path": "apps/api/src/lib.rs",
+      "role": "Axum HTTP and WebSocket route composition",
+      "type": "application",
+      "boundary": "control-plane",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "pub async fn run_from_env()"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "pub fn core_router(state: AppState)"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(deployment_execution::heartbeat)"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(agent::complete_job)"
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/agent/tests/mod.rs",
+          "symbol": "mod lifecycle;"
+        }
+      ],
+      "constraints": [
+        "Routes use browser-origin and authentication middleware.",
+        "The agent job heartbeat route is authenticated and updates the lease and active deployment phase in one transaction."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "pub async fn run_from_env()"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "pub fn core_router(state: AppState)"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(deployment_execution::heartbeat)"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(agent::complete_job)"
+        }
+      ]
+    },
+    {
+      "id": "identity-apps",
+      "label": "Identity & apps",
+      "path": "apps/api/src/auth.rs",
+      "role": "Device login, sessions, and persisted application records",
+      "type": "module",
+      "boundary": "control-plane",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/auth.rs",
+          "symbol": "pub async fn github_device_start("
+        },
+        {
+          "path": "apps/api/src/auth.rs",
+          "symbol": "pub async fn github_device_poll("
+        },
+        {
+          "path": "apps/api/src/web/apps/create.rs",
+          "symbol": "pub async fn create_app("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/agent/tests/lifecycle.rs",
+          "symbol": "async fn db_complete_job_scrubs_payload_secrets()"
+        }
+      ],
+      "constraints": [
+        "First setup requires a control-plane password before device login."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/auth.rs",
+          "symbol": "pub async fn github_device_start("
+        },
+        {
+          "path": "apps/api/src/apps.rs",
+          "symbol": "pub async fn create_app_record("
+        },
+        {
+          "path": "apps/api/src/web/apps/create.rs",
+          "symbol": "pub async fn create_app("
+        }
+      ]
+    },
+    {
+      "id": "provider-integration",
+      "label": "Provider integration",
+      "path": "apps/api/src/github.rs",
+      "role": "GitHub repository inventory, inference, and webhooks",
+      "type": "module",
+      "boundary": "control-plane",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "pub async fn repos("
+        },
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "pub async fn repo_inspect("
+        },
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "pub async fn webhook("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/github/tests.rs",
+          "symbol": "#[test]"
+        }
+      ],
+      "constraints": [
+        "Repository access is scoped through the authenticated GitHub token."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "pub async fn repos("
+        },
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "pub async fn repo_inspect("
+        },
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "pub async fn webhook("
+        }
+      ]
+    },
+    {
+      "id": "deployment-orchestrator",
+      "label": "Deployment orchestrator",
+      "path": "apps/api/src/deploy.rs",
+      "role": "Creates deployments, renews agent job leases, and applies transactional two-phase activation",
+      "type": "module",
+      "boundary": "control-plane",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/deploy.rs",
+          "symbol": "pub async fn manual_deploy("
+        },
+        {
+          "path": "apps/api/src/deploy.rs",
+          "symbol": "pub async fn create_and_send_deploy("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn prepare_activation("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn commit_activation("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn heartbeat("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/deploy/tests.rs",
+          "symbol": "fn blue_green_runtimes_support_rollback()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/deletion_fence.rs",
+          "symbol": "async fn db_teardown_fence_cancels_queued_and_rejects_late_enqueue()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_completion_requires_current_claim_and_live_lease()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/concurrency.rs",
+          "symbol": "async fn db_concurrent_cancellation_and_activation_follow_lock_order()"
+        }
+      ],
+      "constraints": [
+        "Activation checks pending/current deployment and records a route generation before commit.",
+        "Heartbeat renews the claimed job only while its lease and claim token remain valid, then records the active deployment phase transactionally."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/deploy.rs",
+          "symbol": "pub async fn manual_deploy("
+        },
+        {
+          "path": "apps/api/src/deploy.rs",
+          "symbol": "pub async fn create_and_send_deploy("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn prepare_activation("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn commit_activation("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn heartbeat("
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(deployment_execution::heartbeat)"
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE deployments SET status=$1,last_heartbeat_at=now()"
+        }
+      ]
+    },
+    {
+      "id": "agent-gateway",
+      "label": "Agent gateway",
+      "path": "apps/api/src/agent/routes.rs",
+      "role": "Authenticated agent registration, events, health targets, job claims, lease heartbeats, build completion, and completion",
+      "type": "module",
+      "boundary": "control-plane",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn event("
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn health_targets("
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn claim_job("
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn complete_job("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn heartbeat("
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "pub(crate) async fn complete_successful_build("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/agent/tests/health.rs",
+          "symbol": "async fn db_health_down_hook_fires_once_per_unhealthy_transition()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/priority.rs",
+          "symbol": "async fn db_enqueue_applies_app_queue_priority_offset_within_bands()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_completion_requires_current_claim_and_live_lease()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_pause_during_build_cancels_without_release_or_retry()"
+        },
+        {
+          "path": "apps/api/src/server_capacity/tests.rs",
+          "symbol": "async fn db_build_completion_admits_one_release_and_waits_for_the_next()"
+        }
+      ],
+      "constraints": [
+        "Agent-scoped paths are rate-limited separately.",
+        "Successful build completion validates the assigned artifact manifest, records the build, and enqueues a release job under capacity and pause fences."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn claim_job("
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn complete_job("
+        },
+        {
+          "path": "apps/api/src/rate_limit.rs",
+          "symbol": "fn is_agent_scoped_route(path: &str)"
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn heartbeat("
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "pub(crate) async fn complete_successful_build("
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "super::build_execution::complete_successful_build("
+        },
+        {
+          "path": "apps/api/src/server_capacity/tests.rs",
+          "symbol": "crate::agent::build_execution::complete_successful_build("
+        }
+      ]
+    },
+    {
+      "id": "recovery-observability",
+      "label": "Recovery & observability",
+      "path": "apps/api/src/screenshots.rs",
+      "role": "Startup recovery, screenshot scheduling, and browser/health diagnostics",
+      "type": "module",
+      "boundary": "control-plane",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/runtime_recovery.rs",
+          "symbol": "pub async fn recover_startup_state("
+        },
+        {
+          "path": "apps/api/src/screenshots.rs",
+          "symbol": "pub async fn capture_app_screenshot("
+        },
+        {
+          "path": "apps/api/src/screenshots.rs",
+          "symbol": "pub async fn check_app_browser("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/screenshots/tests.rs",
+          "symbol": "fn capture_url_uses_https_for_public_domains()"
+        }
+      ],
+      "constraints": [
+        "Screenshot orphan sweep is startup hygiene; recapture sweep is periodic."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "runtime_recovery::recover_startup_state(&state).await?"
+        },
+        {
+          "path": "apps/api/src/screenshots.rs",
+          "symbol": "pub async fn capture_app_screenshot("
+        },
+        {
+          "path": "apps/api/src/screenshots.rs",
+          "symbol": "pub async fn check_app_browser("
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "path": "infra/docker-compose.yml",
+      "role": "Persistent relational control-plane store",
+      "type": "infrastructure",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "postgres:"
+        },
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-db-tests.sh",
+          "symbol": "EXPECTED_DB_TESTS=55"
+        }
+      ],
+      "constraints": [
+        "Production compose requires POSTGRES_PASSWORD supplied at initialization."
+      ],
+      "evidence": [
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "postgres:"
+        },
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "DATABASE_URL: postgres://${POSTGRES_USER:-hostlet}"
+        }
+      ]
+    },
+    {
+      "id": "agent-job-queue",
+      "label": "Agent job queue",
+      "path": "apps/api/src/agent/routes.rs",
+      "role": "Database-backed job creation, claiming, lease renewal, heartbeat, build completion, and completion",
+      "type": "module",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/deploy.rs",
+          "symbol": "pub(crate) async fn insert_agent_job_in_transaction("
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn claim_job("
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn complete_job("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "pub async fn heartbeat("
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "pub(crate) async fn complete_successful_build("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/agent/tests/priority.rs",
+          "symbol": "async fn db_enqueue_applies_app_queue_priority_offset_within_bands()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/lifecycle.rs",
+          "symbol": "async fn db_complete_job_scrubs_payload_secrets()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_completion_requires_current_claim_and_live_lease()"
+        },
+        {
+          "path": "apps/api/src/agent/tests/concurrency.rs",
+          "symbol": "async fn db_concurrent_cancellation_and_activation_follow_lock_order()"
+        },
+        {
+          "path": "apps/api/src/server_capacity/tests.rs",
+          "symbol": "async fn db_build_completion_admits_one_release_and_waits_for_the_next()"
+        }
+      ],
+      "constraints": [
+        "Job lease and deployment heartbeat are coordinated by the API.",
+        "Build completion releases capacity only after validating the artifact manifest and acquiring lifecycle locks."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/deploy.rs",
+          "symbol": "pub(crate) async fn insert_agent_job_in_transaction("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE agent_jobs"
+        },
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn claim_job("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE agent_jobs SET status='running', updated_at=now()"
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE deployments SET status=$1,last_heartbeat_at=now()"
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "UPDATE deployment_builds SET status='succeeded',artifact_manifest_json=$1"
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "INSERT INTO agent_jobs (job_type) VALUES ('release')"
+        }
+      ]
+    },
+    {
+      "id": "agent-runtime",
+      "label": "Agent runtime",
+      "path": "apps/agent/src/main.rs",
+      "role": "Installed host agent that claims jobs, renews leases while executing them, and runs deployment and operations work",
+      "type": "application",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "apps/agent/src/main.rs",
+          "symbol": "async fn main()"
+        },
+        {
+          "path": "apps/agent/src/ops.rs",
+          "symbol": "pub(crate) async fn capture_screenshot_job("
+        },
+        {
+          "path": "apps/agent/src/runtime/pipeline.rs",
+          "symbol": "pub(crate) async fn deploy("
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "pub(crate) async fn claim_and_run_job("
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "pub(crate) async fn run_claimed_job_with_lease("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/agent/src/ops/screenshot_tests.rs",
+          "symbol": "fn validate_capture_url_accepts_public_targets()"
+        },
+        {
+          "path": "apps/agent/src/ops/status_tests.rs",
+          "symbol": "fn failed_deployment_status_event_keeps_runtime_metrics()"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "async fn stalled_websocket_send_exits_within_its_deadline()"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "async fn slot_frees_when_the_holding_task_panics()"
+        }
+      ],
+      "constraints": [
+        "Runtime is invoked as a separate agent process, not inside the API.",
+        "Every claimed job sends an initial heartbeat and renews its five-minute lease; repeated renewal failures or cancellation stop execution before reassignment."
+      ],
+      "evidence": [
+        {
+          "path": "apps/agent/src/main.rs",
+          "symbol": "async fn main()"
+        },
+        {
+          "path": "apps/agent/src/ops.rs",
+          "symbol": "pub(crate) async fn capture_screenshot_job("
+        },
+        {
+          "path": "apps/agent/src/runtime/pipeline.rs",
+          "symbol": "pub(crate) async fn deploy("
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "pub(crate) async fn claim_and_run_job("
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "pub(crate) async fn run_claimed_job_with_lease("
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "heartbeat_job(&cfg, job_id, claim_token, \"running\").await?"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "post(format!(\"{}/api/agent/jobs/{job_id}/heartbeat\", cfg.api_url))"
+        }
+      ]
+    },
+    {
+      "id": "local-deploy-engine",
+      "label": "Local deploy engine",
+      "path": "apps/agent/src/runtime/pipeline.rs",
+      "role": "Builds/launches local deployments, validates health, and switches routes",
+      "type": "module",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "apps/agent/src/runtime/pipeline.rs",
+          "symbol": "pub(crate) async fn build_image("
+        },
+        {
+          "path": "apps/agent/src/compose.rs",
+          "symbol": "pub(crate) async fn deploy_compose("
+        },
+        {
+          "path": "apps/agent/src/ops/activation.rs",
+          "symbol": "pub(crate) async fn prepare_candidate_activation("
+        },
+        {
+          "path": "apps/agent/src/ops/activation.rs",
+          "symbol": "pub(crate) async fn commit_candidate_activation("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/agent/src/build/tests.rs",
+          "symbol": "fn build_runtime_metadata_records_build_time_and_image_size()"
+        },
+        {
+          "path": "apps/agent/src/validation/tests.rs",
+          "symbol": "fn runtime_env_args_injects_port_and_data_dirs()"
+        }
+      ],
+      "constraints": [
+        "Candidate activation must be prepared before its route is committed."
+      ],
+      "evidence": [
+        {
+          "path": "apps/agent/src/runtime/pipeline.rs",
+          "symbol": "pub(crate) async fn build_image("
+        },
+        {
+          "path": "apps/agent/src/compose.rs",
+          "symbol": "pub(crate) async fn deploy_compose("
+        },
+        {
+          "path": "apps/agent/src/ops/activation.rs",
+          "symbol": "pub(crate) async fn prepare_candidate_activation("
+        },
+        {
+          "path": "apps/agent/src/ops/activation.rs",
+          "symbol": "pub(crate) async fn commit_candidate_activation("
+        }
+      ]
+    },
+    {
+      "id": "remote-build-engine",
+      "label": "Remote build engine",
+      "path": "apps/agent/src/runtime/remote_build.rs",
+      "role": "Builds remotely, publishes OCI artifacts, and returns or consumes signed artifact manifests for release",
+      "type": "module",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "pub(super) async fn build_artifact("
+        },
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "pub(super) async fn release_artifact("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/agent/src/build/tests.rs",
+          "symbol": "fn build_runtime_metadata_records_unknown_image_size()"
+        },
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "fn registry_target_rejects_cross_namespace_repositories()"
+        }
+      ],
+      "constraints": [
+        "Remote build and release use the assigned registry namespace; artifact publication is verified through the registry push and digest lookup."
+      ],
+      "evidence": [
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "pub(super) async fn build_artifact("
+        },
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "fn build_plan_digest(payload: &Value)"
+        },
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "pub(super) async fn release_artifact("
+        },
+        {
+          "path": "apps/agent/src/runtime/remote_build/registry.rs",
+          "symbol": "async fn push_image("
+        }
+      ]
+    },
+    {
+      "id": "contracts",
+      "label": "Contracts",
+      "path": "crates/contracts/src/lib.rs",
+      "role": "Shared wire types, artifact schema, compose model, and inference helpers",
+      "type": "library",
+      "boundary": "shared",
+      "entrypoints": [
+        {
+          "path": "crates/contracts/src/artifacts.rs",
+          "symbol": "pub struct OciArtifactDescriptor"
+        },
+        {
+          "path": "crates/contracts/src/lib.rs",
+          "symbol": "pub enum DeploymentStatus"
+        },
+        {
+          "path": "crates/contracts/src/topology.rs",
+          "symbol": "pub fn plan_repository_topology("
+        },
+        {
+          "path": "crates/contracts/src/protocol.rs",
+          "symbol": "pub struct AgentJobHeartbeat"
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/contracts/src/lib_tests.rs",
+          "symbol": "fn deploy_payload_keeps_existing_wire_shape()"
+        },
+        {
+          "path": "crates/contracts/src/inference/tests.rs",
+          "symbol": "fn start_command_prefers_procfile_web_process()"
+        },
+        {
+          "path": "crates/contracts/src/topology_patchwork_tests.rs",
+          "symbol": "fn patchwork_shape_is_frontend_backend_not_workspace_libraries()"
+        },
+        {
+          "path": "crates/contracts/src/lib_tests.rs",
+          "symbol": "fn agent_events_keep_existing_type_tags()"
+        }
+      ],
+      "constraints": [
+        "Wire data uses shared Rust types and validation helpers."
+      ],
+      "evidence": [
+        {
+          "path": "crates/contracts/src/artifacts.rs",
+          "symbol": "pub struct OciArtifactDescriptor"
+        },
+        {
+          "path": "crates/contracts/src/lib.rs",
+          "symbol": "pub enum DeploymentStatus"
+        },
+        {
+          "path": "crates/contracts/src/topology.rs",
+          "symbol": "pub fn plan_repository_topology("
+        },
+        {
+          "path": "crates/contracts/src/protocol.rs",
+          "symbol": "pub struct AgentJobHeartbeat"
+        }
+      ]
+    },
+    {
+      "id": "cli",
+      "label": "CLI",
+      "path": "apps/cli/src/main.rs",
+      "role": "Interactive self-hosted installation, operation, update, and provider setup",
+      "type": "application",
+      "boundary": "operations",
+      "entrypoints": [
+        {
+          "path": "apps/cli/src/main.rs",
+          "symbol": "async fn main()"
+        },
+        {
+          "path": "apps/cli/src/cloudflare.rs",
+          "symbol": "pub(crate) async fn configure_cloudflare("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/cli/src/cloudflare.rs",
+          "symbol": "fn populate_env_derives_public_urls_from_host()"
+        }
+      ],
+      "constraints": [
+        "Interactive provider credentials must not be stored in repository files."
+      ],
+      "evidence": [
+        {
+          "path": "apps/cli/src/main.rs",
+          "symbol": "async fn main()"
+        },
+        {
+          "path": "apps/cli/src/cloudflare.rs",
+          "symbol": "pub(crate) async fn configure_cloudflare("
+        }
+      ]
+    },
+    {
+      "id": "screenshotter",
+      "label": "Screenshotter",
+      "path": "apps/screenshotter/capture.js",
+      "role": "Playwright capture container with routed-request safeguards",
+      "type": "application",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "apps/screenshotter/capture.js",
+          "symbol": "const { chromium } = require(\"playwright-core\")"
+        },
+        {
+          "path": "apps/screenshotter/network.js",
+          "symbol": "async function lookupPublicAddress(url, lookupCache)"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-screenshotter-smoke.sh",
+          "symbol": "screenshotter smoke passed"
+        }
+      ],
+      "constraints": [
+        "Public address validation pins resolved address to avoid DNS-rebinding between validation and connection."
+      ],
+      "evidence": [
+        {
+          "path": "apps/screenshotter/capture.js",
+          "symbol": "const { chromium } = require(\"playwright-core\")"
+        },
+        {
+          "path": "apps/screenshotter/network.js",
+          "symbol": "async function lookupPublicAddress(url, lookupCache)"
+        }
+      ]
+    },
+    {
+      "id": "docker-engine",
+      "label": "Docker engine",
+      "path": "infra/docker-compose.yml",
+      "role": "Compose-defined local container runtime topology",
+      "type": "infrastructure",
+      "boundary": "operations",
+      "entrypoints": [
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "services:"
+        },
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "local-agent:"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-self-hosted-deploy-e2e.sh",
+          "symbol": "published_app_serves()"
+        }
+      ],
+      "constraints": [
+        "Compose connects API, registry, local agent, router, and web services."
+      ],
+      "evidence": [
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "services:"
+        },
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "local-agent:"
+        }
+      ]
+    },
+    {
+      "id": "caddy-router",
+      "label": "Caddy router",
+      "path": "infra/Caddyfile.direct",
+      "role": "HTTP entrypoint and per-app route snippet host",
+      "type": "infrastructure",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "infra/Caddyfile.lan",
+          "symbol": "@api path /api/* /auth/* /webhooks/* /install-agent.sh /install-builder.sh /ws/* /health"
+        },
+        {
+          "path": "infra/Caddyfile.direct",
+          "symbol": "import /var/lib/hostlet/caddy/*.caddy"
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/agent/src/ops/screenshot_tests.rs",
+          "symbol": "fn internal_capture_url_requires_one_canonical_https_tenant_label()"
+        }
+      ],
+      "constraints": [
+        "Routes are rendered by the agent and imported from the shared agent volume."
+      ],
+      "evidence": [
+        {
+          "path": "infra/Caddyfile.lan",
+          "symbol": "@api path /api/* /auth/* /webhooks/* /install-agent.sh /install-builder.sh /ws/* /health"
+        },
+        {
+          "path": "infra/Caddyfile.direct",
+          "symbol": "import /var/lib/hostlet/caddy/*.caddy"
+        },
+        {
+          "path": "apps/agent/src/build.rs",
+          "symbol": "pub(crate) fn render_caddy_route("
+        }
+      ]
+    },
+    {
+      "id": "oci-registry",
+      "label": "OCI registry",
+      "path": "infra/zot-config.json",
+      "role": "Internal image/artifact registry exposed at /v2",
+      "type": "infrastructure",
+      "boundary": "data-plane",
+      "entrypoints": [
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "HOSTLET_ARTIFACT_REGISTRY_INTERNAL_URL: http://registry:5000"
+        },
+        {
+          "path": "infra/zot-config.json",
+          "symbol": "\"rootDirectory\": \"/var/lib/registry\""
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-self-hosted-registry-lib.sh",
+          "symbol": "start_test_artifact_registry()"
+        }
+      ],
+      "constraints": [
+        "API uses an internal registry URL in Compose."
+      ],
+      "evidence": [
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "HOSTLET_ARTIFACT_REGISTRY_INTERNAL_URL: http://registry:5000"
+        },
+        {
+          "path": "infra/zot-config.json",
+          "symbol": "\"rootDirectory\": \"/var/lib/registry\""
+        },
+        {
+          "path": "infra/Caddyfile.lan",
+          "symbol": "@registry path /v2/*"
+        }
+      ]
+    },
+    {
+      "id": "github",
+      "label": "GitHub",
+      "path": ".github/workflows/release.yml",
+      "role": "OAuth/device-flow provider, repository source, and release CI publisher",
+      "type": "external",
+      "boundary": "external",
+      "entrypoints": [
+        {
+          "path": "apps/api/src/auth.rs",
+          "symbol": "https://github.com/login/device/code"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "name: Release"
+        }
+      ],
+      "tests": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "symbol": "name: CI"
+        }
+      ],
+      "constraints": [
+        "Release builds publish tagged images and create a GitHub release."
+      ],
+      "evidence": [
+        {
+          "path": "apps/api/src/auth.rs",
+          "symbol": "https://github.com/login/device/code"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "name: Release"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "Build and push release images"
+        }
+      ]
+    },
+    {
+      "id": "cloudflare",
+      "label": "Cloudflare",
+      "path": "apps/cli/src/cloudflare.rs",
+      "role": "Optional tunnel and DNS provider integration",
+      "type": "external",
+      "boundary": "external",
+      "entrypoints": [
+        {
+          "path": "apps/cli/src/cloudflare.rs",
+          "symbol": "pub(crate) async fn configure_cloudflare("
+        },
+        {
+          "path": "apps/api/src/web/dns/cloudflare.rs",
+          "symbol": "pub(in crate::web) async fn ensure_cloudflare_app_dns("
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/cli/src/cloudflare.rs",
+          "symbol": "fn result_first_str_reads_field_off_first_element()"
+        }
+      ],
+      "constraints": [
+        "Cloudflare configuration is optional and requires provider credentials at runtime."
+      ],
+      "evidence": [
+        {
+          "path": "apps/cli/src/cloudflare.rs",
+          "symbol": "pub(crate) async fn configure_cloudflare("
+        },
+        {
+          "path": "apps/api/src/web/dns/cloudflare.rs",
+          "symbol": "pub(in crate::web) async fn ensure_cloudflare_app_dns("
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-web-api",
+      "from": "web-ui",
+      "to": "api-router",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/web/app/apps/[id]/useAppActions.ts",
+          "symbol": "`/api/apps/${id}/deploy`"
+        }
+      ]
+    },
+    {
+      "id": "e-api-identity",
+      "from": "api-router",
+      "to": "identity-apps",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(auth::github_device_start)"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(web::create_app)"
+        }
+      ]
+    },
+    {
+      "id": "e-api-provider",
+      "from": "api-router",
+      "to": "provider-integration",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(github::repo_inspect)"
+        }
+      ]
+    },
+    {
+      "id": "e-api-deploy",
+      "from": "api-router",
+      "to": "deployment-orchestrator",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(deployment_execution::heartbeat)"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(deployment_execution::prepare_activation)"
+        },
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(deployment_execution::commit_activation)"
+        }
+      ]
+    },
+    {
+      "id": "e-api-agent",
+      "from": "api-router",
+      "to": "agent-gateway",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(agent::claim_job)"
+        }
+      ]
+    },
+    {
+      "id": "e-api-observe",
+      "from": "api-router",
+      "to": "recovery-observability",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(screenshots::capture_app_screenshot)"
+        }
+      ]
+    },
+    {
+      "id": "e-identity-postgres",
+      "from": "identity-apps",
+      "to": "postgres",
+      "type": "writes",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/apps.rs",
+          "symbol": "pub async fn create_app_record("
+        }
+      ]
+    },
+    {
+      "id": "e-provider-contracts",
+      "from": "provider-integration",
+      "to": "contracts",
+      "type": "imports",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "use hostlet_contracts::{"
+        }
+      ]
+    },
+    {
+      "id": "e-orchestrator-queue",
+      "from": "deployment-orchestrator",
+      "to": "agent-job-queue",
+      "type": "writes",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/deploy.rs",
+          "symbol": "pub(crate) async fn insert_agent_job_in_transaction("
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE agent_jobs"
+        }
+      ]
+    },
+    {
+      "id": "e-orchestrator-postgres",
+      "from": "deployment-orchestrator",
+      "to": "postgres",
+      "type": "writes",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE apps SET pending_deployment_id=$1,route_generation=$2,updated_at=now()"
+        }
+      ]
+    },
+    {
+      "id": "e-agentgateway-queue",
+      "from": "agent-gateway",
+      "to": "agent-job-queue",
+      "type": "reads",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "pub async fn claim_job("
+        }
+      ]
+    },
+    {
+      "id": "e-agentruntime-gateway",
+      "from": "agent-runtime",
+      "to": "agent-gateway",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "post(format!(\"{}/api/agent/jobs/{job_id}/heartbeat\", cfg.api_url))"
+        },
+        {
+          "path": "apps/agent/src/ops/activation.rs",
+          "symbol": "/api/agent/deployments/{deployment_id}/prepare-activation"
+        }
+      ]
+    },
+    {
+      "id": "e-agentruntime-local",
+      "from": "agent-runtime",
+      "to": "local-deploy-engine",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/agent/src/runtime/pipeline.rs",
+          "symbol": "pub(crate) async fn deploy("
+        }
+      ]
+    },
+    {
+      "id": "e-agentruntime-remote",
+      "from": "agent-runtime",
+      "to": "remote-build-engine",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "pub(super) async fn build_artifact("
+        },
+        {
+          "path": "apps/agent/src/runtime/remote_build.rs",
+          "symbol": "pub(super) async fn release_artifact("
+        }
+      ]
+    },
+    {
+      "id": "e-local-caddy",
+      "from": "local-deploy-engine",
+      "to": "caddy-router",
+      "type": "writes",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/agent/src/build.rs",
+          "symbol": "pub(crate) async fn apply_caddy_route("
+        }
+      ]
+    },
+    {
+      "id": "e-local-docker",
+      "from": "local-deploy-engine",
+      "to": "docker-engine",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/agent/src/compose.rs",
+          "symbol": "pub(crate) async fn deploy_compose("
+        }
+      ]
+    },
+    {
+      "id": "e-remote-registry",
+      "from": "remote-build-engine",
+      "to": "oci-registry",
+      "type": "publishes",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/agent/src/runtime/remote_build/registry.rs",
+          "symbol": "async fn push_image("
+        },
+        {
+          "path": "apps/agent/src/runtime/remote_build/registry.rs",
+          "symbol": "async fn registry_descriptor("
+        }
+      ]
+    },
+    {
+      "id": "e-observe-queue",
+      "from": "recovery-observability",
+      "to": "agent-job-queue",
+      "type": "writes",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/screenshots.rs",
+          "symbol": "enqueue_auto_screenshot_for_deployment"
+        }
+      ]
+    },
+    {
+      "id": "e-agent-screenshotter",
+      "from": "agent-runtime",
+      "to": "screenshotter",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/agent/src/ops.rs",
+          "symbol": "pub(crate) async fn capture_screenshot_job("
+        }
+      ]
+    },
+    {
+      "id": "e-docker-postgres",
+      "from": "docker-engine",
+      "to": "postgres",
+      "type": "reads",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "infra/docker-compose.yml",
+          "symbol": "postgres:"
+        }
+      ]
+    },
+    {
+      "id": "e-caddy-api",
+      "from": "caddy-router",
+      "to": "api-router",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "infra/Caddyfile.lan",
+          "symbol": "reverse_proxy @api 127.0.0.1:8080"
+        }
+      ]
+    },
+    {
+      "id": "e-caddy-registry",
+      "from": "caddy-router",
+      "to": "oci-registry",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "infra/Caddyfile.lan",
+          "symbol": "reverse_proxy @registry 127.0.0.1:5000"
+        }
+      ]
+    },
+    {
+      "id": "e-identity-github",
+      "from": "identity-apps",
+      "to": "github",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/auth.rs",
+          "symbol": "https://github.com/login/device/code"
+        }
+      ]
+    },
+    {
+      "id": "e-cli-cloudflare",
+      "from": "cli",
+      "to": "cloudflare",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/cli/src/cloudflare.rs",
+          "symbol": "https://api.cloudflare.com/client/v4/zones"
+        }
+      ]
+    },
+    {
+      "id": "e-provider-github",
+      "from": "provider-integration",
+      "to": "github",
+      "type": "calls",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": "apps/api/src/github.rs",
+          "symbol": "pub async fn repos("
+        }
+      ]
+    },
+    {
+      "id": "e-identity-cloudflare",
+      "from": "identity-apps",
+      "to": "cloudflare",
+      "type": "calls",
+      "status": "unknown",
+      "reason": "App DNS handling exists under web/dns, but its create/update call path is not asserted by this bounded map.",
+      "evidence": [
+        {
+          "path": "apps/api/src/web/dns/cloudflare.rs",
+          "symbol": "pub(in crate::web) async fn ensure_cloudflare_app_dns("
+        }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "first-run-auth",
+      "name": "First-run authentication",
+      "trigger": "A user starts GitHub device login from the Web UI after setup.",
+      "steps": [
+        "web-ui",
+        "api-router",
+        "identity-apps",
+        "github"
+      ],
+      "step_details": "Web UI starts the device flow; the API dispatches identity handling, which exchanges codes with GitHub.",
+      "edges": [
+        "e-web-api",
+        "e-api-identity",
+        "e-identity-github"
+      ],
+      "outcome": "A signed session is established after the device flow succeeds."
+    },
+    {
+      "id": "repository-inspection-app-creation",
+      "name": "Repository inspection and app creation",
+      "trigger": "A user inspects a repository and submits the create-and-deploy form.",
+      "steps": [
+        "web-ui",
+        "api-router",
+        "provider-integration",
+        "contracts",
+        "identity-apps",
+        "postgres"
+      ],
+      "step_details": "Repository inspection uses provider integration and shared contracts; the submitted app form is persisted.",
+      "edges": [
+        "e-web-api",
+        "e-api-provider",
+        "e-provider-contracts",
+        "e-api-identity",
+        "e-identity-postgres"
+      ],
+      "outcome": "A configured app record exists and can start deployment."
+    },
+    {
+      "id": "deployment-fenced-activation",
+      "name": "Deployment and fenced activation",
+      "trigger": "A manual deploy request reaches the API.",
+      "steps": [
+        "api-router",
+        "deployment-orchestrator",
+        "agent-job-queue",
+        "postgres",
+        "agent-gateway",
+        "agent-runtime",
+        "local-deploy-engine",
+        "caddy-router"
+      ],
+      "step_details": "The orchestrator creates agent work and fenced database state; the agent sends lease heartbeats while deploying, then prepares and commits activation before writing Caddy routes.",
+      "edges": [
+        "e-api-deploy",
+        "e-orchestrator-queue",
+        "e-orchestrator-postgres",
+        "e-agentgateway-queue",
+        "e-agentruntime-gateway",
+        "e-agentruntime-local",
+        "e-local-caddy"
+      ],
+      "outcome": "The candidate becomes current only after the API’s fenced prepare/commit protocol and live job lease succeed."
+    },
+    {
+      "id": "remote-build-artifact-release",
+      "name": "Remote build and artifact release",
+      "trigger": "An agent runtime selects the remote build path.",
+      "steps": [
+        "agent-runtime",
+        "remote-build-engine",
+        "oci-registry"
+      ],
+      "step_details": "The agent builds and pushes OCI artifacts, returns a manifest to the API, and the API validates it before queueing a capacity-gated release job.",
+      "edges": [
+        "e-agentruntime-remote",
+        "e-remote-registry"
+      ],
+      "outcome": "A validated artifact manifest and release job are persisted; registry publication and digest lookup are verified."
+    },
+    {
+      "id": "health-screenshot-diagnostics",
+      "name": "Health and screenshot diagnostics",
+      "trigger": "A user requests a screenshot/browser check or automated recovery schedules capture.",
+      "steps": [
+        "api-router",
+        "recovery-observability",
+        "agent-job-queue",
+        "agent-runtime",
+        "screenshotter"
+      ],
+      "step_details": "Diagnostics enqueue screenshot work that the agent executes through the screenshotter.",
+      "edges": [
+        "e-api-observe",
+        "e-observe-queue",
+        "e-agent-screenshotter"
+      ],
+      "outcome": "Captured diagnostic output can be reported through the control plane."
+    }
+  ],
+  "algorithm": "sha256",
+  "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
+  "working_tree_has_uncommitted_changes": false,
+  "symbol_index": [
+    {
+      "id": "api-deployment-heartbeat",
+      "path": "apps/api/src/deployment_execution.rs",
+      "symbol": "pub async fn heartbeat(",
+      "callers": [
+        {
+          "path": "apps/api/src/lib.rs",
+          "symbol": "post(deployment_execution::heartbeat)"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "post(format!(\"{}/api/agent/jobs/{job_id}/heartbeat\", cfg.api_url))"
+        }
+      ],
+      "effects": [
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE agent_jobs SET status='running', lease_expires_at=..."
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "UPDATE deployments SET status=$1,last_heartbeat_at=now()"
+        },
+        {
+          "path": "apps/api/src/deployment_execution.rs",
+          "symbol": "AgentJobHeartbeatReceipt { cancel_requested, lease_expires_at }"
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_completion_requires_current_claim_and_live_lease()",
+          "coverage": "related lease fencing"
+        },
+        {
+          "path": "apps/api/src/agent/tests/concurrency.rs",
+          "symbol": "async fn db_concurrent_cancellation_and_activation_follow_lock_order()",
+          "coverage": "related lock ordering"
+        }
+      ],
+      "direct_test_coverage": false,
+      "note": "The endpoint has no dedicated HTTP integration test in the bounded Core suite; related lease and lock-order tests are listed explicitly."
+    },
+    {
+      "id": "api-complete-successful-build",
+      "path": "apps/api/src/agent/build_execution.rs",
+      "symbol": "pub(crate) async fn complete_successful_build(",
+      "callers": [
+        {
+          "path": "apps/api/src/agent/routes.rs",
+          "symbol": "super::build_execution::complete_successful_build("
+        }
+      ],
+      "effects": [
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "validate_build_manifest(original_payload, manifest)?"
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "UPDATE deployment_builds SET status='succeeded',artifact_manifest_json=$1"
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "UPDATE deployments SET status='queued_for_release',artifact_manifest_json=$1,last_heartbeat_at=now()"
+        },
+        {
+          "path": "apps/api/src/agent/build_execution.rs",
+          "symbol": "INSERT INTO agent_jobs (... job_type='release' ...)"
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/api/src/server_capacity/tests.rs",
+          "symbol": "async fn db_build_completion_admits_one_release_and_waits_for_the_next()",
+          "coverage": "direct helper call"
+        },
+        {
+          "path": "apps/api/src/agent/tests/authority.rs",
+          "symbol": "async fn db_pause_during_build_cancels_without_release_or_retry()",
+          "coverage": "related pause fence"
+        }
+      ],
+      "direct_test_coverage": true
+    },
+    {
+      "id": "agent-run-claimed-job-with-lease",
+      "path": "apps/agent/src/runtime.rs",
+      "symbol": "pub(crate) async fn run_claimed_job_with_lease(",
+      "callers": [
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "pub(crate) async fn claim_and_run_job("
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "run_claimed_job_with_lease(cfg.clone(), job_id, claim_token, payload.clone()).await"
+        }
+      ],
+      "effects": [
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "heartbeat_job(&cfg, job_id, claim_token, \"running\").await?"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "tokio::spawn periodic heartbeat renewal every 60 seconds"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "tokio::select! { handle_job(cfg, payload) | cancellation watch }"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "renew.abort()"
+        }
+      ],
+      "tests": [
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "async fn stalled_websocket_send_exits_within_its_deadline()",
+          "coverage": "related runtime responsiveness"
+        },
+        {
+          "path": "apps/agent/src/runtime.rs",
+          "symbol": "async fn slot_frees_when_the_holding_task_panics()",
+          "coverage": "related task cleanup"
+        }
+      ],
+      "direct_test_coverage": false,
+      "note": "No direct unit test invokes the lease runner; the callers, renewal path, cancellation path, and related runtime cleanup tests are recorded."
+    }
+  ]
+}
+</script>
+<script>
+(()=>{"use strict";
+const map=JSON.parse(document.getElementById("codemap-data").textContent), svg=document.getElementById("svg"), vp=document.getElementById("viewport"), B=document.getElementById("bands"),E=document.getElementById("edges"),N=document.getElementById("nodes"),L=document.getElementById("labels"),detail=document.getElementById("detail"),types=document.getElementById("types"),nodeTypes=document.getElementById("nodeTypes"),boundaryTypes=document.getElementById("boundaries"),search=document.getElementById("search"),flow=document.getElementById("flow");
+document.getElementById("meta").textContent="repo: hostlet-core · generated: "+map.generated_at+" · commit: "+map.generated_from_commit;
+const byId=Object.fromEntries(map.nodes.map(n=>[n.id,n])), edgeTypes=[...new Set(map.edges.map(e=>e.type))], enabled=new Set(edgeTypes), nodeTypeSet=new Set(map.nodes.map(n=>n.type)), boundarySet=new Set(map.nodes.map(n=>n.boundary)), enabledNodeTypes=new Set(nodeTypeSet),enabledBoundaries=new Set(boundarySet),positions={}, W=172,H=62,boundaryOrder=['client','control-plane','shared','data-plane','operations','external'];
+edgeTypes.forEach(t=>{const l=document.createElement("label"),i=document.createElement("input");i.type="checkbox";i.checked=true;i.onchange=()=>{i.checked?enabled.add(t):enabled.delete(t);render()};l.append(i,document.createTextNode(t));types.append(l)});
+function checks(target,values,enabledSet){[...values].forEach(value=>{const l=document.createElement("label"),i=document.createElement("input");i.type="checkbox";i.checked=true;i.onchange=()=>{i.checked?enabledSet.add(value):enabledSet.delete(value);render()};l.append(i,document.createTextNode(value));target.append(l)})}checks(nodeTypes,nodeTypeSet,enabledNodeTypes);checks(boundaryTypes,boundaryOrder.filter(x=>boundarySet.has(x)),enabledBoundaries);
+map.flows.forEach(f=>{const o=document.createElement("option");o.value=f.id;o.textContent=f.name;flow.append(o)});
+function layout(){const cols=boundaryOrder.filter(b=>boundarySet.has(b)),members=Object.fromEntries(cols.map(b=>[b,map.nodes.filter(n=>n.boundary===b).map(n=>n.id).sort()])),neighbors={};map.nodes.forEach(n=>neighbors[n.id]=[]);map.edges.forEach(e=>{neighbors[e.from].push(e.to);neighbors[e.to].push(e.from)});cols.forEach((b,col)=>members[b].forEach((id,row)=>positions[id]={x:60+col*235,y:75+row*88}));for(let pass=0;pass<8;pass++){const order=pass%2?cols:[...cols].reverse();for(const b of order){const ids=members[b];ids.sort((a,z)=>{const median=id=>{const ys=neighbors[id].map(x=>positions[x]?.y).filter(Number.isFinite).sort((x,y)=>x-y);return ys.length?ys[Math.floor(ys.length/2)]:positions[id].y};return median(a)-median(z)||a.localeCompare(z)});ids.forEach((id,row)=>{positions[id].x=60+cols.indexOf(b)*235;positions[id].y=75+row*88})}}}
+function paths(a,b){const x1=a.x+W,y1=a.y+H/2,x2=b.x,y2=b.y+H/2,mid=(x1+x2)/2;return "M"+x1+","+y1+" C"+mid+","+y1+" "+mid+","+y2+" "+x2+","+y2}
+let selected="",activeFlow="",pan={x:15,y:25,z:1},drag=null;
+function visible(n){const q=search.value.trim().toLowerCase();return enabledNodeTypes.has(n.type)&&enabledBoundaries.has(n.boundary)&&(!q||[n.id,n.label,n.path,n.role,n.boundary].join(" ").toLowerCase().includes(q))}
+function directional(root){const walk=(dir)=>{const seen=new Set(),visit=id=>map.edges.filter(e=>e[dir]===id).forEach(e=>{const next=e[dir==="from"?"to":"from"];if(!seen.has(next)){seen.add(next);visit(next)}});visit(root);return seen};return {upstream:walk("to"),downstream:walk("from")}}
+function render(){B.innerHTML="";E.innerHTML="";N.innerHTML="";L.innerHTML="";const dirs=selected?directional(selected):null, f=map.flows.find(x=>x.id===activeFlow),fEdges=new Set(f?.edges||[]),boundaries=boundaryOrder.filter(b=>boundarySet.has(b));boundaries.forEach((boundary,col)=>{const ids=map.nodes.filter(n=>n.boundary===boundary).map(n=>n.id),ys=ids.map(id=>positions[id].y),y=Math.min(...ys)-35,h=Math.max(...ys)-y+H+24,rect=document.createElementNS(svg.namespaceURI,"rect"),t=document.createElementNS(svg.namespaceURI,"text");rect.setAttribute("class","band");rect.setAttribute("x",35+col*235);rect.setAttribute("y",y);rect.setAttribute("width",205);rect.setAttribute("height",h);B.append(rect);t.setAttribute("x",60+col*235);t.setAttribute("y",y+17);t.setAttribute("class","group-label");t.textContent=boundary;L.append(t)});map.edges.filter(e=>enabled.has(e.type)).forEach(e=>{const p=document.createElementNS(svg.namespaceURI,"path"),a=positions[e.from],b=positions[e.to],outside=dirs&&!dirs.upstream.has(e.from)&&!dirs.upstream.has(e.to)&&!dirs.downstream.has(e.from)&&!dirs.downstream.has(e.to)&&e.from!==selected&&e.to!==selected;let cls="edge "+(e.status==="unknown"?"unknown ":"")+(outside?"dim ":"")+(fEdges.has(e.id)?"active ":"");if(dirs&&dirs.upstream.has(e.from)&&dirs.upstream.has(e.to))cls+="upstream ";if(dirs&&dirs.downstream.has(e.from)&&dirs.downstream.has(e.to))cls+="downstream ";p.setAttribute("d",paths(a,b));p.setAttribute("class",cls);p.dataset.id=e.id;E.append(p)});map.nodes.forEach(n=>{const p=positions[n.id],g=document.createElementNS(svg.namespaceURI,"g"),outside=dirs&&n.id!==selected&&!dirs.upstream.has(n.id)&&!dirs.downstream.has(n.id);g.setAttribute("transform","translate("+p.x+" "+p.y+")");g.setAttribute("class","node "+n.type+" "+(!visible(n)||outside?"dim ":"")+(selected===n.id?"active ":"")+(dirs?.upstream.has(n.id)?"upstream ":"")+(dirs?.downstream.has(n.id)?"downstream ":""));g.dataset.id=n.id;g.innerHTML='<rect width="'+W+'" height="'+H+'"/><text x="11" y="23">'+esc(n.label)+'</text><text class="role" x="11" y="43">'+esc(n.role.slice(0,29))+'</text>';g.onpointerdown=ev=>{ev.stopPropagation();drag={id:n.id,x:ev.clientX,y:ev.clientY,ox:p.x,oy:p.y};svg.setPointerCapture(ev.pointerId)};g.onclick=ev=>{ev.stopPropagation();selected=n.id;activeFlow="";flow.value="";showNode(n);render()};N.append(g)});vp.setAttribute("transform","translate("+pan.x+" "+pan.y+") scale("+pan.z+")")}
+function esc(x){return x.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function showNode(n){const up=map.edges.filter(e=>e.to===n.id).map(e=>e.from),down=map.edges.filter(e=>e.from===n.id).map(e=>e.to),flows=map.flows.filter(f=>f.edges.some(id=>map.edges.find(e=>e.id===id&&(e.from===n.id||e.to===n.id))));detail.innerHTML="<strong>"+esc(n.label)+"</strong><br>"+esc(n.path)+"<br><br><strong>Upstream:</strong> "+(up.map(id=>esc(byId[id].label)).join(", ")||"none")+"<br><strong>Downstream:</strong> "+(down.map(id=>esc(byId[id].label)).join(", ")||"none")+"<br><strong>Tests:</strong> "+n.tests.map(t=>esc(t.path+" :: "+t.symbol)).join(", ")+"<br><strong>Flows:</strong> "+(flows.map(f=>esc(f.name)).join(", ")||"none")+"<br><strong>Evidence:</strong> "+n.evidence.map(e=>esc(e.path+" :: "+e.symbol)).join(" · ")}
+function showFlow(f){detail.innerHTML="<strong>"+esc(f.name)+"</strong><br><br><strong>Trigger:</strong> "+esc(f.trigger)+"<br><strong>Outcome:</strong> "+esc(f.outcome)+"<br><strong>Steps:</strong><br>"+f.steps.map(esc).join("<br>")}
+flow.onchange=()=>{activeFlow=flow.value;selected="";if(activeFlow)showFlow(map.flows.find(f=>f.id===activeFlow));else detail.textContent="Select a node or flow to inspect evidence, related tests, and flows.";render()};search.oninput=render;
+let canvasDrag=null;svg.onpointerdown=e=>{canvasDrag={x:e.clientX,y:e.clientY,px:pan.x,py:pan.y};svg.setPointerCapture(e.pointerId)};svg.onpointermove=e=>{if(drag){const p=positions[drag.id];p.x=drag.ox+(e.clientX-drag.x)/pan.z;p.y=drag.oy+(e.clientY-drag.y)/pan.z;render()}else if(canvasDrag){pan.x=canvasDrag.px+e.clientX-canvasDrag.x;pan.y=canvasDrag.py+e.clientY-canvasDrag.y;render()}};svg.onpointerup=()=>{drag=null;canvasDrag=null};svg.onwheel=e=>{e.preventDefault();pan.z=Math.max(.28,Math.min(2.5,pan.z*(e.deltaY>0?.9:1.1)));render()};function fit(){const box=svg.getBoundingClientRect(),xs=Object.values(positions).map(p=>p.x),ys=Object.values(positions).map(p=>p.y),w=Math.max(...xs)-Math.min(...xs)+W+70,h=Math.max(...ys)-Math.min(...ys)+H+70;pan.z=Math.min(box.width/w,box.height/h,1);pan.x=(box.width-w*pan.z)/2-Math.min(...xs)*pan.z+35;pan.y=(box.height-h*pan.z)/2-Math.min(...ys)*pan.z+35;render()}document.getElementById("fit").onclick=fit;document.getElementById("reset").onclick=()=>{selected="";activeFlow="";flow.value="";search.value="";detail.textContent="Select a node or flow to inspect evidence, related tests, and flows.";fit()};layout();fit()})()
+</script>
+</body>
+</html>
