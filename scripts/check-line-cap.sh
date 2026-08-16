@@ -21,6 +21,7 @@ warned=0
 is_authored_file() {
   case "$1" in
     vendor/*) return 1 ;;
+    docs/codemap/*) return 1 ;;
     Cargo.lock|*"/Cargo.lock"|*"/pnpm-lock.yaml"|*"/package-lock.json"|*"/yarn.lock") return 1 ;;
     *".tsbuildinfo"|*".min.js"|*".map") return 1 ;;
     *.rs|*.ts|*.tsx|*.js|*.mjs|*.sh|*.sql|*.yml|*.yaml|*.toml|*.json|*.md|*.css) return 0 ;;
