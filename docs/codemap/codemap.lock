@@ -1,0 +1,128 @@
+{
+  "generated_at": "2026-08-16T20:14:07Z",
+  "generated_from_commit": "fab5f7c24a46832d3aeb6fc6a194941aed217440",
+  "algorithm": "sha256",
+  "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
+  "working_tree_has_uncommitted_changes": true,
+  "record_format": "codemap-fingerprint-v1\\0 + bytewise path order + decimal path length:path\\0 + decimal content length:content\\0; missing tracked file content is MISSING\\0",
+  "scope": [
+    "apps/api",
+    "apps/agent",
+    "apps/cli",
+    "apps/screenshotter",
+    "apps/web",
+    "crates/contracts",
+    "infra",
+    "scripts",
+    "docs",
+    ".github",
+    "repository-root"
+  ],
+  "scanned_scope": [
+    "apps/api",
+    "apps/agent",
+    "apps/cli",
+    "apps/screenshotter",
+    "apps/web",
+    "crates/contracts",
+    "infra",
+    "scripts",
+    "docs",
+    ".github",
+    "repository-root"
+  ],
+  "excluded_paths": [
+    "docs/codemap/**",
+    "apps/web/.design-sync/**",
+    "scripts/fixtures/generated-apps/**"
+  ],
+  "excluded_directories": [
+    "docs/codemap",
+    "apps/web/.design-sync",
+    "scripts/fixtures/generated-apps"
+  ],
+  "partitions": [
+    {
+      "id": "apps/api",
+      "file_count": 127,
+      "fingerprint": "81bd860ad1e925504cdfe16c7feca89c1d1c8c2ecaa58768a6541720821cff8b"
+    },
+    {
+      "id": "apps/agent",
+      "file_count": 37,
+      "fingerprint": "c238a8927f68963f7d5b1242850166fbb81e1540d6b53ad76ab867ce56740f40"
+    },
+    {
+      "id": "apps/cli",
+      "file_count": 11,
+      "fingerprint": "fad6ca9724a37f4441b7910b0d8621c868b728385ac831fe36d7d582a42f3337"
+    },
+    {
+      "id": "apps/screenshotter",
+      "file_count": 3,
+      "fingerprint": "f5b6b10b597058574eb7e20c9f65c60b26b2852686ffbd738b9d336478d14c70"
+    },
+    {
+      "id": "apps/web",
+      "file_count": 98,
+      "fingerprint": "22c1040efdcc2c3cbd7e584d61ab002c859f50f3a859640ca90b16149c4db7d9"
+    },
+    {
+      "id": "crates/contracts",
+      "file_count": 17,
+      "fingerprint": "a3dafe87002bb59f321807835ef1a9b27a8077c781c5da2eed33925e9e8ca805"
+    },
+    {
+      "id": "infra",
+      "file_count": 6,
+      "fingerprint": "0b8147bcdf474c39a1497437f3340952564f1bd91b9e748674c6fb7a286c5acb"
+    },
+    {
+      "id": "scripts",
+      "file_count": 34,
+      "fingerprint": "b58bbaef64c861bacacdfcab70a9e854122355103f068501bce4bdc234af1121"
+    },
+    {
+      "id": "docs",
+      "file_count": 10,
+      "fingerprint": "505a0ec2c50affb6227c2bc85b354308d9733e6a6333f1681be460635b516411"
+    },
+    {
+      "id": ".github",
+      "file_count": 16,
+      "fingerprint": "e2ba50b1528dc4dc5839e3a9b02559eb44aa6953ce9fd74a6e45926d2b29617b"
+    },
+    {
+      "id": "repository-root",
+      "file_count": 14,
+      "fingerprint": "e26dd32daafdfcf68ccdcb167f85ef8e92c6e487dea33e6b63a1e58c5c1486aa"
+    }
+  ],
+  "module_fingerprints": {
+    "apps/api": "81bd860ad1e925504cdfe16c7feca89c1d1c8c2ecaa58768a6541720821cff8b",
+    "apps/agent": "c238a8927f68963f7d5b1242850166fbb81e1540d6b53ad76ab867ce56740f40",
+    "apps/cli": "fad6ca9724a37f4441b7910b0d8621c868b728385ac831fe36d7d582a42f3337",
+    "apps/screenshotter": "f5b6b10b597058574eb7e20c9f65c60b26b2852686ffbd738b9d336478d14c70",
+    "apps/web": "22c1040efdcc2c3cbd7e584d61ab002c859f50f3a859640ca90b16149c4db7d9",
+    "crates/contracts": "a3dafe87002bb59f321807835ef1a9b27a8077c781c5da2eed33925e9e8ca805",
+    "infra": "0b8147bcdf474c39a1497437f3340952564f1bd91b9e748674c6fb7a286c5acb",
+    "scripts": "b58bbaef64c861bacacdfcab70a9e854122355103f068501bce4bdc234af1121",
+    "docs": "505a0ec2c50affb6227c2bc85b354308d9733e6a6333f1681be460635b516411",
+    ".github": "e2ba50b1528dc4dc5839e3a9b02559eb44aa6953ce9fd74a6e45926d2b29617b",
+    "repository-root": "e26dd32daafdfcf68ccdcb167f85ef8e92c6e487dea33e6b63a1e58c5c1486aa"
+  },
+  "module_file_counts": {
+    "apps/api": 127,
+    "apps/agent": 37,
+    "apps/cli": 11,
+    "apps/screenshotter": 3,
+    "apps/web": 98,
+    "crates/contracts": 17,
+    "infra": 6,
+    "scripts": 34,
+    "docs": 10,
+    ".github": 16,
+    "repository-root": 14
+  },
+  "total_file_count": 373
+}
