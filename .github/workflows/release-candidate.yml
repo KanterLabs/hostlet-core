@@ -69,6 +69,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify runner and exact staging run
+        id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ inputs.staging_sha }}
@@ -238,9 +239,12 @@ jobs:
             -- --exact --test-threads=1
       - name: Release-only API smoke
         run: scripts/ci-self-hosted-api-smoke.sh
+      # ci-install-railpack.sh publishes HOSTLET_RAILPACK_BIN through
+      # GITHUB_ENV, which GitHub only applies to subsequent steps.
+      - name: Install Railpack for candidate fixtures
+        run: scripts/ci-install-railpack.sh
       - name: Release-only Railpack fixtures
         run: |
-          scripts/ci-install-railpack.sh
           test -x "${HOSTLET_RAILPACK_BIN}"
           scripts/ci-railpack-generated-fixtures.sh
       - name: Release-only deploy E2E
@@ -313,6 +317,7 @@ jobs:
           set -euo pipefail
           cfg="$RUNNER_TEMP/release-candidate-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$cfg"
+          export DOCKER_CONFIG="$cfg"
           echo "DOCKER_CONFIG=$cfg" >> "$GITHUB_ENV"
           echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
       - name: Capture four existing staging image digests
