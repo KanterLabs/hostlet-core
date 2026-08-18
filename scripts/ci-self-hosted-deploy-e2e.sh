@@ -321,6 +321,21 @@ PY
 # ---------------------------------------------------------------------------
 # Bring up Postgres and the git fixture repo.
 # ---------------------------------------------------------------------------
+# The agent starts some fixture containers itself, where an implicit pull has
+# no retry boundary. Resolve every fixed external fixture image up front with
+# the shared bounded retry helper so transient registry failures stay in CI.
+for image in \
+  alpine:3.20 \
+  postgres:16-alpine \
+  redis:7-alpine \
+  node:22-alpine \
+  httpd:2.4-alpine \
+  ghcr.io/project-zot/zot-linux-amd64:v2.1.18 \
+  moby/buildkit:buildx-stable-1@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f; do
+  docker image inspect "${image}" >/dev/null 2>&1 || \
+    "${ROOT}/scripts/ci-docker-retry.sh" docker pull "${image}"
+done
+
 ensure_railpack
 start_postgres_container postgres:16-alpine
 if ! wait_postgres_ready; then
