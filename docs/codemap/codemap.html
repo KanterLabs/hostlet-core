@@ -27,8 +27,8 @@
 </main>
 <script id="codemap-data" type="application/json">
 {
-  "generated_at": "2026-08-16T20:14:07Z",
-  "generated_from_commit": "fab5f7c24a46832d3aeb6fc6a194941aed217440",
+  "generated_at": "2026-08-18T03:58:57Z",
+  "generated_from_commit": "77bf89a795881a2123f015d954928ae3ea745482",
   "scope": [
     "apps/api",
     "apps/agent",
@@ -307,7 +307,7 @@
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE deployments SET status=CASE WHEN $1='running' AND status<>'queued' THEN status ELSE $1 END,last_heartbeat_at=now()"
+          "symbol": "UPDATE deployments"
         },
         {
           "path": "apps/api/src/agent/tests/authority.rs",
@@ -474,7 +474,7 @@
       "tests": [
         {
           "path": "scripts/ci-db-tests.sh",
-          "symbol": "EXPECTED_DB_TESTS=55"
+          "symbol": "EXPECTED_DB_TESTS=84"
         }
       ],
       "constraints": [
@@ -500,7 +500,7 @@
       "boundary": "data-plane",
       "entrypoints": [
         {
-          "path": "apps/api/src/deploy.rs",
+          "path": "apps/api/src/deploy/agent_jobs.rs",
           "symbol": "pub(crate) async fn insert_agent_job_in_transaction("
         },
         {
@@ -552,7 +552,7 @@
       ],
       "evidence": [
         {
-          "path": "apps/api/src/deploy.rs",
+          "path": "apps/api/src/deploy/agent_jobs.rs",
           "symbol": "pub(crate) async fn insert_agent_job_in_transaction("
         },
         {
@@ -565,19 +565,19 @@
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE agent_jobs SET status='running', updated_at=now()"
+          "symbol": "UPDATE agent_jobs"
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE deployments SET status=CASE WHEN $1='running' AND status<>'queued' THEN status ELSE $1 END,last_heartbeat_at=now()"
+          "symbol": "UPDATE deployments"
         },
         {
           "path": "apps/api/src/agent/build_execution.rs",
-          "symbol": "UPDATE deployment_builds SET status='succeeded',artifact_manifest_json=$1"
+          "symbol": "UPDATE deployment_builds"
         },
         {
           "path": "apps/api/src/agent/build_execution.rs",
-          "symbol": "INSERT INTO agent_jobs (job_type) VALUES ('release')"
+          "symbol": "INSERT INTO agent_jobs"
         }
       ]
     },
@@ -1064,7 +1064,7 @@
         },
         {
           "path": ".github/workflows/release.yml",
-          "symbol": "Build and push release images"
+          "symbol": "Build and push legacy release images"
         }
       ]
     },
@@ -1102,6 +1102,375 @@
         {
           "path": "apps/api/src/web/dns/cloudflare.rs",
           "symbol": "pub(in crate::web) async fn ensure_cloudflare_app_dns("
+        }
+      ]
+    },
+    {
+      "id": "staging-candidate",
+      "label": "Staging candidate selection",
+      "path": ".github/workflows/staging.yml",
+      "role": "Publishes immutable SHA images and identifies the exact staging run eligible for release proof",
+      "type": "infrastructure",
+      "boundary": "operations",
+      "entrypoints": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "# Release-only proof is dispatched separately for an explicitly selected SHA."
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "Compute image tags"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "Build and push staging images"
+        }
+      ],
+      "callers": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "needs: [secrets, rust, database, web, topology-e2e, remote-build]"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "SHA_TAG=sha-${GITHUB_SHA::12}"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "scripts/ci-docker-retry.sh docker push \"${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}\""
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${STAGING_WORKFLOW}\" 'needs: [images]'"
+        },
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${STAGING_WORKFLOW}\" 'scripts/ci-docker-retry.sh docker push \"${IMAGE_REGISTRY}/hostlet-${app}:staging\"'"
+        }
+      ],
+      "constraints": [
+        "Staging remains the moving image/pin lane; release proof is dispatched only for a selected exact SHA and successful staging run."
+      ],
+      "evidence": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "# Release-only proof is dispatched separately for an explicitly selected SHA."
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "needs: [images]"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "scripts/ci-docker-retry.sh docker push \"${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}\""
+        }
+      ]
+    },
+    {
+      "id": "release-candidate-proof",
+      "label": "Core release candidate proof",
+      "path": ".github/workflows/release-candidate.yml",
+      "role": "Verifies the selected staging run, runs release-only tests and artifact packaging, and seals one durable candidate receipt",
+      "type": "infrastructure",
+      "boundary": "operations",
+      "entrypoints": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "workflow_call:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "workflow_dispatch:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "verify-staging:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "candidate-tests:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "candidate-artifacts:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "seal-candidate:"
+        }
+      ],
+      "callers": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "staging_sha:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "staging_run_id:"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "name: core-release-candidate"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "CANDIDATE_RUN_ID: ${{ github.run_id }}"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/release-candidate-selftest.py",
+          "symbol": "assert release.validate_receipt("
+        },
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${RELEASE_CANDIDATE_WORKFLOW}\" 'needs: [verify-staging, candidate-tests, candidate-artifacts]'"
+        }
+      ],
+      "constraints": [
+        "Candidate tests and artifact packaging run in parallel after exact staging verification; the seal binds SHA, tree, version, staging run, candidate run, expiry, images, and artifact checksums."
+      ],
+      "evidence": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "needs: [verify-staging, candidate-tests, candidate-artifacts]"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "schema\": \"hostlet.core.release-candidate/v1\""
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "name: core-release-candidate"
+        }
+      ]
+    },
+    {
+      "id": "release-pr-gate",
+      "label": "Release PR gate",
+      "path": ".github/workflows/pr-homelab-ci.yml",
+      "role": "Base-owned pull-request gate that accepts only exact candidate evidence for release-candidate branches",
+      "type": "infrastructure",
+      "boundary": "operations",
+      "entrypoints": [
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "release-candidate-gate:"
+        },
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "Require exact release evidence or truthful ordinary PR lanes"
+        },
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "run: python3 .hostlet-release-evidence/scripts/ci-release-evidence.py"
+        }
+      ],
+      "callers": [
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "needs: [clear-approval, secrets, rust, web, compose, docker, remote-build]"
+        }
+      ],
+      "effects": [
+        {
+          "path": "scripts/ci-release-evidence.py",
+          "symbol": "validate_candidate_artifact("
+        },
+        {
+          "path": "scripts/ci-release-evidence.py",
+          "symbol": "validate_release_pr("
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-release-evidence-selftest.py",
+          "symbol": "assert evidence.validate_live_pull("
+        },
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${PR_WORKFLOW}\" 'name: release-candidate-gate'"
+        }
+      ],
+      "constraints": [
+        "Release PRs must target main, use the exact release-candidate/vX.Y.Z branch identity, and validate the sealed artifact before merge; ordinary PR lanes remain truthful and separate."
+      ],
+      "evidence": [
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "name: release-candidate-gate"
+        },
+        {
+          "path": "scripts/ci-release-evidence.py",
+          "symbol": "expected_branch_version = RELEASE_BRANCH_PATTERN.fullmatch(event_head_ref)"
+        },
+        {
+          "path": "scripts/ci-release-evidence.py",
+          "symbol": "validate_candidate_artifact("
+        }
+      ]
+    },
+    {
+      "id": "core-publication",
+      "label": "Core candidate publication",
+      "path": ".github/workflows/release.yml",
+      "role": "Publishes the exact gated candidate by aliasing immutable image digests, reusing candidate bytes, and creating the GitHub release manifest",
+      "type": "infrastructure",
+      "boundary": "operations",
+      "entrypoints": [
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "candidate-publication:"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "Resolve the exact successful candidate artifact run"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "Create idempotent semantic image aliases"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "Publish GitHub release from candidate bytes"
+        }
+      ],
+      "callers": [
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'candidate')"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "needs: [release-source]"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "docker buildx imagetools create --tag"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"publication\": {"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "dist/hostlet-release.json"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${RELEASE_WORKFLOW}\" 'name: candidate-publication'"
+        },
+        {
+          "path": "scripts/ci-release-mainline-gate-selftest.sh",
+          "symbol": "echo \"ci-release-mainline-gate self-test passed\""
+        }
+      ],
+      "constraints": [
+        "The normal candidate path does not rebuild release bytes; it requires the exact candidate receipt, mainline ancestry, and idempotent digest aliases before publishing."
+      ],
+      "evidence": [
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "name: candidate-publication"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"workflow\": \"release.yml\""
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "Publish GitHub release from candidate bytes"
+        }
+      ]
+    },
+    {
+      "id": "cloud-dispatch",
+      "label": "Hostlet Cloud handoff",
+      "path": ".github/workflows/staging.yml",
+      "role": "Cloud-facing handoff for Core staging pins and published release metadata",
+      "type": "external",
+      "boundary": "external",
+      "entrypoints": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "pin-cloud-staging:"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "repository: KanterLabs/hostlet-cloud"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "scripts/update-core-staging-pin.sh \"${GITHUB_SHA}\""
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"publication\": {"
+        }
+      ],
+      "callers": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "needs: [images]"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "Publish GitHub release from candidate bytes"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "working-directory: hostlet-cloud"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_PAT }}"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"notes_url\": f\"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/{os.environ['RELEASE_TAG']}\""
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${STAGING_WORKFLOW}\" 'scripts/update-core-staging-pin.sh \"${GITHUB_SHA}\"'"
+        },
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_not_contains \"${STAGING_WORKFLOW}\" 'repository_dispatch'"
+        }
+      ],
+      "constraints": [
+        "This Core checkout proves the staging pin-PR handoff and release manifest publication; the downstream Cloud workflow/dispatch consumer is external, and direct repository_dispatch is intentionally absent from Core staging."
+      ],
+      "evidence": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "name: Open the exact Core staging pin pull request"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "repository: KanterLabs/hostlet-cloud"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"publication\": {"
         }
       ]
     }
@@ -1231,7 +1600,7 @@
       "status": "verified",
       "evidence": [
         {
-          "path": "apps/api/src/deploy.rs",
+          "path": "apps/api/src/deploy/agent_jobs.rs",
           "symbol": "pub(crate) async fn insert_agent_job_in_transaction("
         },
         {
@@ -1473,6 +1842,104 @@
           "symbol": "pub(in crate::web) async fn ensure_cloudflare_app_dns("
         }
       ]
+    },
+    {
+      "id": "e-staging-candidate-proof",
+      "from": "staging-candidate",
+      "to": "release-candidate-proof",
+      "type": "dispatches",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "staging_sha:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "staging_run_id:"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "workflow_dispatch:"
+        }
+      ]
+    },
+    {
+      "id": "e-candidate-release-pr",
+      "from": "release-candidate-proof",
+      "to": "release-pr-gate",
+      "type": "gates",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "name: core-release-candidate"
+        },
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "name: release-candidate-gate"
+        },
+        {
+          "path": "scripts/ci-release-evidence.py",
+          "symbol": "validate_candidate_artifact("
+        }
+      ]
+    },
+    {
+      "id": "e-release-pr-publication",
+      "from": "release-pr-gate",
+      "to": "core-publication",
+      "type": "gates",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "run: python3 .hostlet-release-evidence/scripts/ci-release-evidence.py"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "candidate-publication:"
+        }
+      ]
+    },
+    {
+      "id": "e-publication-cloud",
+      "from": "core-publication",
+      "to": "cloud-dispatch",
+      "type": "publishes",
+      "status": "unknown",
+      "reason": "Core release.yml proves the publication manifest, while the downstream Cloud dispatch/consumer runs outside this checkout; the local staging pin-PR handoff is the bounded Core evidence.",
+      "evidence": [
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"publication\": {"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"workflow\": \"release.yml\""
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "repository: KanterLabs/hostlet-cloud"
+        }
+      ]
+    },
+    {
+      "id": "e-staging-cloud-pin",
+      "from": "staging-candidate",
+      "to": "cloud-dispatch",
+      "type": "writes",
+      "status": "verified",
+      "evidence": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "pin-cloud-staging:"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "scripts/update-core-staging-pin.sh \"${GITHUB_SHA}\""
+        }
+      ]
     }
   ],
   "flows": [
@@ -1576,11 +2043,31 @@
         "e-agent-screenshotter"
       ],
       "outcome": "Captured diagnostic output can be reported through the control plane."
+    },
+    {
+      "id": "fast-release-candidate-publication",
+      "name": "Fast release candidate to Cloud handoff",
+      "trigger": "An operator selects an exact successful staging SHA/run and dispatches the Core release-candidate workflow.",
+      "steps": [
+        "staging-candidate",
+        "release-candidate-proof",
+        "release-pr-gate",
+        "core-publication",
+        "cloud-dispatch"
+      ],
+      "step_details": "Staging publishes immutable SHA images; release-candidate.yml verifies that exact staging run, runs release-only tests and artifacts in parallel, and seals the receipt. The release PR gate validates the exact branch, source version, tree, and receipt before publication aliases digest-pinned images and publishes hostlet-release.json. Cloud receives the resulting handoff through its downstream consumer; Core also has a directly evidenced staging pin-PR path, while direct repository_dispatch remains intentionally absent.",
+      "edges": [
+        "e-staging-candidate-proof",
+        "e-candidate-release-pr",
+        "e-release-pr-publication",
+        "e-publication-cloud"
+      ],
+      "outcome": "Only the selected, sealed, PR-gated candidate is eligible for Core publication and downstream Cloud consumption; the local map records the external Cloud dispatch as an evidence boundary."
     }
   ],
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
-  "working_tree_has_uncommitted_changes": true,
+  "working_tree_has_uncommitted_changes": false,
   "symbol_index": [
     {
       "id": "api-deployment-heartbeat",
@@ -1599,15 +2086,15 @@
       "effects": [
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE agent_jobs SET status='running', lease_expires_at=..."
+          "symbol": "UPDATE agent_jobs"
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "UPDATE deployments SET status=CASE WHEN $1='running' AND status<>'queued' THEN status ELSE $1 END,last_heartbeat_at=now()"
+          "symbol": "UPDATE deployments"
         },
         {
           "path": "apps/api/src/deployment_execution.rs",
-          "symbol": "AgentJobHeartbeatReceipt { cancel_requested, lease_expires_at }"
+          "symbol": "AgentJobHeartbeatReceipt"
         }
       ],
       "tests": [
@@ -1647,15 +2134,15 @@
         },
         {
           "path": "apps/api/src/agent/build_execution.rs",
-          "symbol": "UPDATE deployment_builds SET status='succeeded',artifact_manifest_json=$1"
+          "symbol": "UPDATE deployment_builds"
         },
         {
           "path": "apps/api/src/agent/build_execution.rs",
-          "symbol": "UPDATE deployments SET status='queued_for_release',artifact_manifest_json=$1,last_heartbeat_at=now()"
+          "symbol": "UPDATE deployments"
         },
         {
           "path": "apps/api/src/agent/build_execution.rs",
-          "symbol": "INSERT INTO agent_jobs (... job_type='release' ...)"
+          "symbol": "INSERT INTO agent_jobs"
         }
       ],
       "tests": [
@@ -1693,11 +2180,11 @@
         },
         {
           "path": "apps/agent/src/runtime.rs",
-          "symbol": "tokio::spawn periodic heartbeat renewal every 60 seconds"
+          "symbol": "tokio::spawn"
         },
         {
           "path": "apps/agent/src/runtime.rs",
-          "symbol": "tokio::select! { handle_job(cfg, payload) | cancellation watch }"
+          "symbol": "tokio::select!"
         },
         {
           "path": "apps/agent/src/runtime.rs",
@@ -1718,6 +2205,188 @@
       ],
       "direct_test_coverage": false,
       "note": "No direct unit test invokes the lease runner; the callers, renewal path, cancellation path, and related runtime cleanup tests are recorded."
+    },
+    {
+      "id": "core-staging-candidate-selection",
+      "path": ".github/workflows/staging.yml",
+      "symbol": "SHA_TAG=sha-${GITHUB_SHA::12}",
+      "callers": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "Build and push staging images"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "scripts/ci-docker-retry.sh docker push \"${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}\""
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "# Release-only proof is dispatched separately for an explicitly selected SHA."
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${STAGING_WORKFLOW}\" 'needs: [images]'",
+          "coverage": "staging image publication dependency"
+        }
+      ],
+      "direct_test_coverage": true,
+      "note": "The workflow contract locks the moving image lane and keeps release-only proof separate from ordinary staging pushes."
+    },
+    {
+      "id": "core-release-candidate-seal",
+      "path": ".github/workflows/release-candidate.yml",
+      "symbol": "seal-candidate:",
+      "callers": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "needs: [verify-staging, candidate-tests, candidate-artifacts]"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "python3 scripts/release-candidate.py seal"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "name: core-release-candidate"
+        },
+        {
+          "path": ".github/workflows/release-candidate.yml",
+          "symbol": "retention-days: 14"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/release-candidate-selftest.py",
+          "symbol": "assert release.validate_receipt(",
+          "coverage": "receipt schema, freshness, identity, and fingerprint"
+        },
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${RELEASE_CANDIDATE_WORKFLOW}\" 'name: core-release-candidate'",
+          "coverage": "durable candidate artifact"
+        }
+      ],
+      "direct_test_coverage": true,
+      "note": "The seal is the immutable handoff consumed by release publication and the downstream Cloud candidate workflow."
+    },
+    {
+      "id": "core-release-pr-evidence",
+      "path": "scripts/ci-release-evidence.py",
+      "symbol": "def validate_release_pr(",
+      "callers": [
+        {
+          "path": ".github/workflows/pr-homelab-ci.yml",
+          "symbol": "run: python3 .hostlet-release-evidence/scripts/ci-release-evidence.py"
+        }
+      ],
+      "effects": [
+        {
+          "path": "scripts/ci-release-evidence.py",
+          "symbol": "validate_candidate_artifact("
+        },
+        {
+          "path": "scripts/ci-release-evidence.py",
+          "symbol": "return event_head"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-release-evidence-selftest.py",
+          "symbol": "assert evidence.is_merged_release_pull(",
+          "coverage": "exact merged release-candidate identity"
+        },
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${RELEASE_EVIDENCE}\" 'release-candidate.py'",
+          "coverage": "authoritative receipt validator"
+        }
+      ],
+      "direct_test_coverage": true,
+      "note": "The same base-owned evaluator serves the release PR and main-push heavy-lane reuse decisions."
+    },
+    {
+      "id": "core-publication-identity",
+      "path": ".github/workflows/release.yml",
+      "symbol": "\"publication\": {",
+      "callers": [
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "name: candidate-publication"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"run_id\": int(os.environ[\"GITHUB_RUN_ID\"])"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"run_attempt\": int(os.environ[\"GITHUB_RUN_ATTEMPT\"])"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "symbol": "\"workflow\": \"release.yml\""
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${RELEASE_WORKFLOW}\" '\"publication\": {'",
+          "coverage": "publication run identity"
+        },
+        {
+          "path": "scripts/ci-release-mainline-gate-selftest.sh",
+          "symbol": "echo \"ci-release-mainline-gate self-test passed\"",
+          "coverage": "mainline tag gate"
+        }
+      ],
+      "direct_test_coverage": true,
+      "note": "Cloud-side consumers bind their dispatch and digest checks to this publication identity and the sealed candidate fingerprint."
+    },
+    {
+      "id": "core-cloud-handoff",
+      "path": ".github/workflows/staging.yml",
+      "symbol": "pin-cloud-staging:",
+      "callers": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "needs: [images]"
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "repository: KanterLabs/hostlet-cloud"
+        }
+      ],
+      "effects": [
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "scripts/update-core-staging-pin.sh \"${GITHUB_SHA}\""
+        },
+        {
+          "path": ".github/workflows/staging.yml",
+          "symbol": "GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_PAT }}"
+        }
+      ],
+      "tests": [
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_not_contains \"${STAGING_WORKFLOW}\" 'repository_dispatch'",
+          "coverage": "direct dispatch remains forbidden in Core staging"
+        },
+        {
+          "path": "scripts/ci-core-workflow-contracts.sh",
+          "symbol": "assert_contains \"${STAGING_WORKFLOW}\" 'repository: KanterLabs/hostlet-cloud'",
+          "coverage": "Cloud checkout handoff"
+        }
+      ],
+      "direct_test_coverage": true,
+      "note": "Only the Core-side pin-PR and release-manifest anchors are local; Cloud dispatch execution is intentionally an external evidence boundary."
     }
   ]
 }
