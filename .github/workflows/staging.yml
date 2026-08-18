@@ -2,8 +2,8 @@ name: Staging
 
 # Push to the always-alive `staging` branch -> build moving staging images and
 # open a hostlet-cloud pin PR for this exact Core tip after publication succeeds.
-# No version-match gate here: staging tracks the branch, not a release tag. The
-# release-candidate workflow derives the package version from this exact commit.
+# No version-match gate here: staging tracks the branch, not a release tag.
+# Release-only proof is dispatched separately for an explicitly selected SHA.
 
 on:
   push:
@@ -155,21 +155,6 @@ jobs:
             scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/hostlet-${app}:staging"
             scripts/ci-docker-retry.sh docker push "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}"
           done
-
-  # Pre-certify the exact staging SHA after immutable image publication.  This
-  # reusable call runs independently of the Cloud pin job so staging deploy
-  # latency remains governed by the existing image path, while every staging
-  # push still leaves a reusable Core release candidate artifact.
-  release-candidate:
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    needs: [images]
-    uses: ./.github/workflows/release-candidate.yml
-    with:
-      staging_sha: ${{ github.sha }}
-      staging_run_id: ${{ github.run_id }}
-      release_version: ""
-    secrets:
-      GHCR_PAT: ${{ secrets.GHCR_PAT }}
 
   pin-cloud-staging:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
