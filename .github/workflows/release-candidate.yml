@@ -238,9 +238,12 @@ jobs:
             -- --exact --test-threads=1
       - name: Release-only API smoke
         run: scripts/ci-self-hosted-api-smoke.sh
+      # ci-install-railpack.sh publishes HOSTLET_RAILPACK_BIN through
+      # GITHUB_ENV, which GitHub only applies to subsequent steps.
+      - name: Install Railpack for candidate fixtures
+        run: scripts/ci-install-railpack.sh
       - name: Release-only Railpack fixtures
         run: |
-          scripts/ci-install-railpack.sh
           test -x "${HOSTLET_RAILPACK_BIN}"
           scripts/ci-railpack-generated-fixtures.sh
       - name: Release-only deploy E2E
