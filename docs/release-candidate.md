@@ -23,8 +23,8 @@ leading `v`.
   "core": {"commit_sha": "<40 lowercase hex>", "tree_sha": "<40 lowercase hex>"},
   "version": "0.2.24",
   "workflows": {
-    "staging": {"run_id": 12345, "conclusion": "success"},
-    "candidate": {"run_id": 67890, "conclusion": "success"}
+    "staging": {"run_id": 12345, "job": "images", "conclusion": "success"},
+    "candidate": {"run_id": 67890, "job": "seal-candidate", "conclusion": "success"}
   },
   "created_at": "2026-08-18T00:00:00Z",
   "expires_at": "2026-08-18T04:00:00Z",
@@ -43,11 +43,13 @@ leading `v`.
 }
 ```
 
-The validator requires both workflow conclusions to be exactly `success`,
-requires their positive run IDs to differ, and rejects mutable image tags,
-missing evidence, unknown fields, duplicate JSON keys, stale expiry, and
-fingerprint drift. Image names must match their map keys. Artifact references
-must use `https://`, `oci://`, or `artifact://` and contain no whitespace.
+The validator requires both workflow conclusions to be exactly `success` and
+requires each `(run_id, job)` pair to identify different evidence. Run IDs may
+match when the candidate is a reusable job inside the staging workflow.
+Mutable image tags, missing evidence, unknown fields, duplicate JSON keys,
+stale expiry, and fingerprint drift are rejected. Image names must match their
+map keys. Artifact references must use `https://`, `oci://`, or `artifact://`
+and contain no whitespace.
 
 ## Workflow commands
 

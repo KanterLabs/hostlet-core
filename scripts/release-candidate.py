@@ -41,7 +41,7 @@ TOP_LEVEL_FIELDS = frozenset(
     }
 )
 CORE_FIELDS = frozenset({"commit_sha", "tree_sha"})
-WORKFLOW_FIELDS = frozenset({"run_id", "conclusion"})
+WORKFLOW_FIELDS = frozenset({"run_id", "job", "conclusion"})
 ARTIFACT_FIELDS = frozenset({"cli", "sbom", "provenance"})
 CLI_FIELDS = frozenset({"ref", "sha256"})
 REF_FIELDS = frozenset({"ref"})
@@ -226,12 +226,15 @@ def _validate_workflows(value: Any) -> dict[str, dict[str, Any]]:
         record = _require_mapping(workflows[name], f"workflows.{name}")
         _require_fields(record, WORKFLOW_FIELDS, f"workflows.{name}")
         run_id = _require_run_id(record["run_id"], f"workflows.{name}.run_id")
+        job = _require_string(record["job"], f"workflows.{name}.job")
         conclusion = _require_string(record["conclusion"], f"workflows.{name}.conclusion")
         if conclusion != "success":
             raise ReceiptError(f"workflows.{name}.conclusion must be success (got {conclusion})")
-        result[name] = {"conclusion": conclusion, "run_id": run_id}
-    if result["staging"]["run_id"] == result["candidate"]["run_id"]:
-        raise ReceiptError("staging and candidate workflow run IDs must differ")
+        result[name] = {"conclusion": conclusion, "job": job, "run_id": run_id}
+    staging_identity = (result["staging"]["run_id"], result["staging"]["job"])
+    candidate_identity = (result["candidate"]["run_id"], result["candidate"]["job"])
+    if staging_identity == candidate_identity:
+        raise ReceiptError("staging and candidate workflow evidence must identify different jobs")
     return result
 
 
