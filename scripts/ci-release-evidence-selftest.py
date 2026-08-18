@@ -131,7 +131,9 @@ base_environment = {
 }
 with mock.patch.object(evidence, "fetch_commit_pulls", return_value=[release_pull]), mock.patch.object(
     evidence, "fetch_source_version_and_tree", return_value=(TREE, "0.2.25")
-), mock.patch.object(evidence, "validate_candidate_artifact"):
+), mock.patch.object(evidence, "fetch_commit_tree", return_value=TREE), mock.patch.object(
+    evidence, "validate_candidate_artifact"
+):
     assert evidence.detect_main_reuse(base_environment | {"GH_TOKEN": "test", "GITHUB_API_URL": "https://api.test"})
 
 ordinary_environment = dict(base_environment, GITHUB_SHA=HEAD)
@@ -142,5 +144,12 @@ scheduled = dict(base_environment, GITHUB_EVENT_NAME="schedule")
 with mock.patch.object(evidence, "fetch_commit_pulls") as fetch:
     assert not evidence.detect_main_reuse(scheduled | {"GH_TOKEN": "test", "GITHUB_API_URL": "https://api.test"})
     fetch.assert_not_called()
+
+# Bootstrap behavior is fail-open: the detector must never execute head-owned
+# code when the trusted pre-push base predates this evaluator.
+for workflow_name in ("ci.yml", "full-ci.yml", "deployability.yml"):
+    workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+    assert "trusted release evidence evaluator is absent on the pre-push base" in workflow
+    assert 'echo "reuse_heavy=false" >> "${GITHUB_OUTPUT}"' in workflow
 
 print("ci-release-evidence self-test passed")

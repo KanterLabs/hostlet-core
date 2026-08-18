@@ -16,6 +16,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-evidence:
+    name: release-evidence
+    runs-on: homelab
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      reuse_heavy: ${{ steps.detect.outputs.reuse_heavy }}
+    steps:
+      - name: Check out base-owned release evidence evaluator
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # On a main push, use the trusted pre-push main tip; release PR code
+          # must not be able to rewrite the detector that decides reuse.
+          ref: ${{ github.event_name == 'push' && github.event.before || github.sha }}
+          path: .hostlet-release-evidence
+          sparse-checkout: |
+            /scripts/ci-release-evidence.py
+            /scripts/release-candidate.py
+            /scripts/ci-verify-runner.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+        working-directory: .hostlet-release-evidence
+      - id: detect
+        name: Detect exact merged release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOSTLET_RELEASE_EVIDENCE_MODE: main
+        run: |
+          set -euo pipefail
+          if [ ! -f .hostlet-release-evidence/scripts/ci-release-evidence.py ] ||
+            [ ! -f .hostlet-release-evidence/scripts/release-candidate.py ]; then
+            echo "trusted release evidence evaluator is absent on the pre-push base; keeping heavy CI enabled"
+            echo "reuse_heavy=false" >> "${GITHUB_OUTPUT}"
+          else
+            python3 .hostlet-release-evidence/scripts/ci-release-evidence.py
+          fi
+
   secrets:
     runs-on: homelab
     steps:
@@ -26,6 +67,8 @@ jobs:
       - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --config=/repo/.gitleaks.toml --redact --verbose
 
   rust:
+    needs: [release-evidence]
+    if: needs.release-evidence.outputs.reuse_heavy != 'true'
     runs-on: homelab-heavy
     env:
       # This full workspace check owns the isolated 8-CPU heavy runner.
@@ -59,9 +102,13 @@ jobs:
       - run: cargo test --workspace
 
   database:
+    needs: [release-evidence]
+    if: needs.release-evidence.outputs.reuse_heavy != 'true'
     uses: ./.github/workflows/database-tests.yml
 
   web:
+    needs: [release-evidence]
+    if: needs.release-evidence.outputs.reuse_heavy != 'true'
     runs-on: homelab-heavy
     defaults:
       run:
@@ -109,6 +156,8 @@ jobs:
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
 
   docker:
+    needs: [release-evidence]
+    if: needs.release-evidence.outputs.reuse_heavy != 'true'
     runs-on: homelab-heavy
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

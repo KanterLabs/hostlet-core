@@ -21,8 +21,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-evidence:
+    name: release-evidence
+    runs-on: homelab
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      reuse_heavy: ${{ steps.detect.outputs.reuse_heavy }}
+    steps:
+      - name: Check out base-owned release evidence evaluator
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # On a main push, use the trusted pre-push main tip; release PR code
+          # must not be able to rewrite the detector that decides reuse.
+          ref: ${{ github.event_name == 'push' && github.event.before || github.sha }}
+          path: .hostlet-release-evidence
+          sparse-checkout: |
+            /scripts/ci-release-evidence.py
+            /scripts/release-candidate.py
+            /scripts/ci-verify-runner.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+        working-directory: .hostlet-release-evidence
+      - id: detect
+        name: Detect exact merged release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOSTLET_RELEASE_EVIDENCE_MODE: main
+        run: |
+          set -euo pipefail
+          if [ ! -f .hostlet-release-evidence/scripts/ci-release-evidence.py ] ||
+            [ ! -f .hostlet-release-evidence/scripts/release-candidate.py ]; then
+            echo "trusted release evidence evaluator is absent on the pre-push base; keeping heavy CI enabled"
+            echo "reuse_heavy=false" >> "${GITHUB_OUTPUT}"
+          else
+            python3 .hostlet-release-evidence/scripts/ci-release-evidence.py
+          fi
+
   generated-apps:
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    needs: [release-evidence]
+    if: needs.release-evidence.outputs.reuse_heavy != 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: homelab-heavy
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -60,7 +102,8 @@ jobs:
       - run: scripts/ci-self-hosted-api-smoke.sh
 
   patchwork-canary:
-    if: github.event_name == 'schedule'
+    needs: [release-evidence]
+    if: needs.release-evidence.outputs.reuse_heavy != 'true' && github.event_name == 'schedule'
     continue-on-error: true
     runs-on: homelab-heavy
     env:
