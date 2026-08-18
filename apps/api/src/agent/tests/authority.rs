@@ -51,7 +51,7 @@ fn activation_candidate(app_id: Uuid) -> hostlet_contracts::CandidateRuntime {
 }
 
 #[tokio::test]
-async fn db_generic_heartbeat_preserves_specific_deployment_phase() {
+async fn db_long_running_build_heartbeat_renews_lease_without_duplicate_claim() {
     let Some(state) = crate::state::db_test_state_from_env().await else {
         return;
     };
@@ -69,16 +69,28 @@ async fn db_generic_heartbeat_preserves_specific_deployment_phase() {
     )
     .await;
     let claim_token = Uuid::new_v4();
-    sqlx::query(
+    let original_lease: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
         "UPDATE agent_jobs
-         SET claim_token=$2,lease_expires_at=now()+interval '5 minutes'
-         WHERE id=$1",
+         SET claimed_by='fixture-agent',
+             claimed_at=now()-interval '6 minutes',
+             claim_token=$2,
+             lease_expires_at=now()+interval '1 minute'
+         WHERE id=$1
+         RETURNING lease_expires_at",
     )
     .bind(job_id)
     .bind(claim_token)
-    .execute(&state.db)
+    .fetch_one(&state.db)
     .await
     .unwrap();
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT claimed_at < clock_timestamp()-interval '5 minutes'
+         FROM agent_jobs WHERE id=$1",
+    )
+    .bind(job_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap());
     sqlx::query("UPDATE deployments SET status='publishing' WHERE id=$1")
         .bind(deployment_id)
         .execute(&state.db)
@@ -98,6 +110,16 @@ async fn db_generic_heartbeat_preserves_specific_deployment_phase() {
     .into_response()
     .status();
     assert_eq!(heartbeat_status, StatusCode::OK);
+    let renewed_lease: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT lease_expires_at FROM agent_jobs WHERE id=$1")
+            .bind(job_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert!(
+        renewed_lease - original_lease > chrono::Duration::minutes(3),
+        "heartbeat must renew a long-running job well beyond its prior lease"
+    );
     assert_eq!(
         deployment_status_by_id(&state, deployment_id)
             .await
@@ -111,6 +133,43 @@ async fn db_generic_heartbeat_preserves_specific_deployment_phase() {
     .fetch_one(&state.db)
     .await
     .unwrap());
+
+    // Polling for new work after the renewal exercises the stale-claim path:
+    // the still-running job must remain owned by the original worker rather
+    // than being requeued and claimed a second time.
+    let stale_claim_response = claim_job(
+        State(state.clone()),
+        agent_headers(&state, TEST_SERVER_ID),
+        Json(ClaimJobRequest {
+            agent_id: Some("stale-claimant".into()),
+            protocol_version: 2,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(stale_claim_response.status(), StatusCode::OK);
+    assert_eq!(job_status(&state, job_id).await.as_deref(), Some("running"));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT claimed_by FROM agent_jobs WHERE id=$1",)
+            .bind(job_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("fixture-agent")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM agent_jobs
+             WHERE app_id=$1 AND status IN ('claimed','running')",
+        )
+        .bind(app_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap(),
+        1,
+        "a renewed build must not have duplicate active ownership"
+    );
 
     sqlx::query("UPDATE deployments SET status='queued' WHERE id=$1")
         .bind(deployment_id)
