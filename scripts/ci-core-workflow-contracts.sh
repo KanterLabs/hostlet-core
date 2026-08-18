@@ -12,11 +12,14 @@ STAGING_PR_GATE_SELFTEST="${ROOT}/scripts/ci-staging-pr-gate-selftest.py"
 STAGING_DEPLOYABILITY="${ROOT}/.github/workflows/deployability.yml"
 FULL_CI_WORKFLOW="${ROOT}/.github/workflows/full-ci.yml"
 RELEASE_WORKFLOW="${ROOT}/.github/workflows/release.yml"
+RELEASE_CANDIDATE_WORKFLOW="${ROOT}/.github/workflows/release-candidate.yml"
 PREWARM_WORKFLOW="${ROOT}/.github/workflows/runner-fleet-prewarm.yml"
 DATABASE_WORKFLOW="${ROOT}/.github/workflows/database-tests.yml"
 ACTIONLINT_CONFIG="${ROOT}/.github/actionlint.yaml"
 RELEASE_MAINLINE_GATE="${ROOT}/scripts/ci-release-mainline-gate.sh"
 RELEASE_MAINLINE_SELFTEST="${ROOT}/scripts/ci-release-mainline-gate-selftest.sh"
+PREPARE_RELEASE_PR="${ROOT}/scripts/prepare-release-pr.sh"
+PREPARE_RELEASE_PR_SELFTEST="${ROOT}/scripts/prepare-release-pr-selftest.sh"
 SELF_HOSTED_LIB_SELFTEST="${ROOT}/scripts/ci-self-hosted-lib-selftest.sh"
 
 assert_contains() {
@@ -80,20 +83,60 @@ assert_not_contains "${STAGING_WORKFLOW}" 'auto-merge'
 assert_not_contains "${STAGING_WORKFLOW}" 'packages: write'
 assert_not_contains "${STAGING_WORKFLOW}" 'actions/checkout@v4'
 assert_not_contains "${STAGING_WORKFLOW}" 'dtolnay/rust-toolchain@stable'
-assert_contains "${RELEASE_WORKFLOW}" 'docker buildx build --platform linux/amd64 --push'
-assert_contains "${RELEASE_WORKFLOW}" 'HOSTLET_MAX_GLIBC_VERSION: "2.39"'
-assert_contains "${RELEASE_WORKFLOW}" 'readelf --version-info target/release/hostlet'
-assert_not_contains "${RELEASE_WORKFLOW}" 'linux/arm64'
-assert_not_contains "${RELEASE_WORKFLOW}" 'hostlet-linux-arm64'
-assert_contains "${RELEASE_WORKFLOW}" 'HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}"'
-assert_contains "${RELEASE_WORKFLOW}" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
-assert_contains "${RELEASE_WORKFLOW}" 'uses: ./.github/workflows/database-tests.yml'
-assert_contains "${RELEASE_WORKFLOW}" 'needs: [database, release-validation]'
-assert_contains "${RELEASE_WORKFLOW}" 'GHCR_PAT: ${{ secrets.GHCR_PAT }}'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'workflow_call:'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'workflow_dispatch:'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'runs-on: homelab'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'candidate-tests:'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'candidate-artifacts:'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'seal-candidate:'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'needs: [verify-staging]'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'needs: [verify-staging, candidate-tests, candidate-artifacts]'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'HOSTLET_RELEASE_CANDIDATE_MAX_AGE_SECONDS: "14400"'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'cargo build --release -p hostlet'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'readelf --version-info target/release/hostlet'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'Capture four existing staging image digests'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'schema": "hostlet.core.release-candidate/v1"'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '"core": {'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '"artifacts": {'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '--expected-sha'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '--expected-tree'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '--expected-version'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'name: core-release-candidate'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'retention-days: 14'
+assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'certify-candidate:'
+assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'candidate_sha":'
+assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'docker build'
+assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'cargo test'
+assert_contains "${RELEASE_WORKFLOW}" 'candidate_max_age_seconds:'
+assert_contains "${RELEASE_WORKFLOW}" 'default: "14400"'
+assert_contains "${RELEASE_WORKFLOW}" 'emergency_acknowledgement:'
+assert_contains "${RELEASE_WORKFLOW}" 'I_UNDERSTAND_LEGACY_RELEASE'
+assert_contains "${RELEASE_WORKFLOW}" 'release-candidate.py validate'
+assert_contains "${RELEASE_WORKFLOW}" 'docker buildx imagetools create --tag'
+assert_contains "${RELEASE_WORKFLOW}" 'name: candidate-publication'
 assert_contains "${RELEASE_WORKFLOW}" 'name: Require release source on main'
 assert_contains "${RELEASE_WORKFLOW}" 'bash scripts/ci-release-mainline-gate.sh'
 assert_contains "${RELEASE_WORKFLOW}" 'bash scripts/ci-release-mainline-gate-selftest.sh'
 assert_contains "${RELEASE_WORKFLOW}" 'fetch-depth: 0'
+assert_contains "${RELEASE_WORKFLOW}" 'docker buildx build --platform linux/amd64 --push'
+assert_contains "${RELEASE_WORKFLOW}" 'HOSTLET_SCREENSHOTTER_SKIP_BUILD=1'
+assert_contains "${RELEASE_WORKFLOW}" 'uses: ./.github/workflows/database-tests.yml'
+assert_contains "${RELEASE_WORKFLOW}" 'needs: [release-source, database, release-validation]'
+assert_contains "${RELEASE_WORKFLOW}" 'GHCR_PAT: ${{ secrets.GHCR_PAT }}'
+assert_not_contains "${RELEASE_WORKFLOW}" 'receipt["candidate_sha"]'
+assert_not_contains "${RELEASE_WORKFLOW}" 'image.get("digest"'
+python3 - "${RELEASE_WORKFLOW}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text()
+for action in re.findall(r"^\s+uses:\s+([^\s]+)$", workflow, re.MULTILINE):
+    if action.startswith("./"):
+        continue
+    if "@" not in action or not re.fullmatch(r"[0-9a-f]{40}", action.rsplit("@", 1)[1]):
+        raise SystemExit(f"release action is not full-SHA pinned: {action}")
+PY
 assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
 assert_contains "${CI_WORKFLOW}" 'uses: ./.github/workflows/database-tests.yml'
 assert_contains "${CI_WORKFLOW}" 'bash scripts/ci-db-tests-selftest.sh'
@@ -178,6 +221,13 @@ assert_contains "${RELEASE_MAINLINE_GATE}" 'refs/heads/main'
 assert_contains "${RELEASE_MAINLINE_SELFTEST}" 'arbitrary-side-tag'
 assert_contains "${RELEASE_MAINLINE_SELFTEST}" 'prerelease-tag'
 assert_contains "${RELEASE_MAINLINE_SELFTEST}" 'branch-dry-run'
+assert_contains "${PREPARE_RELEASE_PR}" 'release-candidate/v${version}'
+assert_contains "${PREPARE_RELEASE_PR}" 'pulls?state=all&head='
+assert_contains "${PREPARE_RELEASE_PR}" 'baseSha'
+assert_contains "${PREPARE_RELEASE_PR}" 'headSha'
+assert_contains "${PREPARE_RELEASE_PR}" 'Do not merge'
+assert_contains "${PREPARE_RELEASE_PR_SELFTEST}" 'base mismatch was accepted'
+assert_contains "${PREPARE_RELEASE_PR_SELFTEST}" 'branch collision was accepted'
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-api "${RUN_ID}")"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'TMP_DIR="$(ci_tmp_dir hostlet-self-deploy "${RUN_ID}")"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'HOSTLET_SELF_HOSTED_STARTUP_ATTEMPTS:-300'
@@ -214,6 +264,7 @@ assert_not_contains "${ROOT}/scripts/backup.sh" '--single-transaction'
 assert_not_contains "${ROOT}/apps/api/src/cleanup.rs" 'd.updated_at'
 
 PYTHONDONTWRITEBYTECODE=1 python3 "${STAGING_PR_GATE_SELFTEST}"
+bash "${PREPARE_RELEASE_PR_SELFTEST}"
 
 for workflow in \
   "${CI_WORKFLOW}" \
@@ -223,6 +274,7 @@ for workflow in \
   "${STAGING_DEPLOYABILITY}" \
   "${FULL_CI_WORKFLOW}" \
   "${RELEASE_WORKFLOW}" \
+  "${RELEASE_CANDIDATE_WORKFLOW}" \
   "${PREWARM_WORKFLOW}" \
   "${DATABASE_WORKFLOW}"; do
   assert_not_contains "${workflow}" 'runs-on: [self-hosted'
@@ -297,6 +349,7 @@ expected = {
     sys.argv[7]: {"prewarm": "homelab"},
     sys.argv[8]: {
         "release-source": "homelab",
+        "candidate-publication": "homelab",
         "release-validation": "homelab-heavy",
         "linux-cli": "homelab-heavy",
     },
@@ -314,6 +367,73 @@ for workflow_path, expected_runners in expected.items():
             raise SystemExit(f"{workflow_path} missing job {job}")
         if f"    runs-on: {runner}\n" not in match.group("body"):
             raise SystemExit(f"{workflow_path} job {job} must run on {runner}")
+PY
+
+python3 - "${RELEASE_CANDIDATE_WORKFLOW}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text()
+expected = {
+    "verify-staging": "homelab",
+    "candidate-tests": "homelab-heavy",
+    "candidate-artifacts": "homelab-heavy",
+    "seal-candidate": "homelab",
+}
+for job, runner in expected.items():
+    match = re.search(
+        rf"^  {re.escape(job)}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
+        workflow,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        raise SystemExit(f"{sys.argv[1]} missing job {job}")
+    if f"    runs-on: {runner}\n" not in match.group("body"):
+        raise SystemExit(f"{job} must run on {runner}")
+
+for action in re.findall(r"^\s+uses:\s+([^\s]+)$", workflow, re.MULTILINE):
+    if action.startswith("./"):
+        continue
+    if "@" not in action or not re.fullmatch(r"[0-9a-f]{40}", action.rsplit("@", 1)[1]):
+        raise SystemExit(f"release candidate action is not full-SHA pinned: {action}")
+
+verify = re.search(r"^  verify-staging:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL).group("body")
+tests = re.search(r"^  candidate-tests:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL).group("body")
+artifacts = re.search(r"^  candidate-artifacts:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL).group("body")
+seal = re.search(r"^  seal-candidate:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL).group("body")
+if "staging_sha" not in verify or "staging_run_id" not in verify:
+    raise SystemExit("verify-staging must accept exact SHA and run inputs")
+if "needs: [verify-staging]" not in tests or "needs: [verify-staging]" not in artifacts:
+    raise SystemExit("candidate tests/artifacts must run in parallel after verify-staging")
+if "needs: [verify-staging, candidate-tests, candidate-artifacts]" not in seal:
+    raise SystemExit("seal-candidate must wait for both parallel lanes")
+if "cargo build --release -p hostlet" not in artifacts or "cargo build --release -p hostlet" in tests:
+    raise SystemExit("only candidate-artifacts may build the CLI")
+if "scripts/ci-self-hosted-api-smoke.sh" not in tests or "scripts/ci-self-hosted-deploy-e2e.sh" not in tests:
+    raise SystemExit("candidate-tests must run API and deploy E2E")
+if "scripts/ci-install-railpack.sh" not in tests:
+    raise SystemExit("candidate-tests must cover Railpack")
+if "--expected-sha" not in seal or "--expected-tree" not in seal or "--expected-version" not in seal:
+    raise SystemExit("seal-candidate must bind all expected receipt identities")
+if 'name: core-release-candidate' not in seal or 'retention-days: 14' not in seal:
+    raise SystemExit("seal-candidate must upload one durable receipt artifact")
+for marker in (
+    '"schema": "hostlet.core.release-candidate/v1"',
+    '"core": {',
+    '"version":',
+    '"workflows": {',
+    '"created_at":',
+    '"expires_at":',
+    '"images": images',
+    '"artifacts": {',
+):
+    if marker not in seal:
+        raise SystemExit(f"sealed receipt draft is missing {marker}")
+if "name: release-candidate-tests" not in seal or "name: release-candidate-artifacts" not in seal:
+    raise SystemExit("seal-candidate must download both parallel evidence artifacts")
+if "14400" not in workflow or "604800" in workflow:
+    raise SystemExit("Core candidate freshness must be exactly four hours")
 PY
 
 python3 - "${PR_WORKFLOW}" <<'PY'
@@ -557,6 +677,7 @@ import sys
 from pathlib import Path
 
 staging_path = Path(sys.argv[2])
+release_path = Path(sys.argv[3])
 for workflow_path in sys.argv[1:]:
     path = Path(workflow_path)
     workflow = path.read_text()
@@ -578,6 +699,13 @@ for workflow_path in sys.argv[1:]:
         )
         if expected not in body:
             raise SystemExit("staging database gate must reject non-staging dispatches")
+    elif path == release_path:
+        expected = (
+            "    if: github.event_name == 'workflow_dispatch' && inputs.release_mode == 'legacy' "
+            "&& inputs.emergency_acknowledgement == 'I_UNDERSTAND_LEGACY_RELEASE'\n"
+        )
+        if expected not in body:
+            raise SystemExit("release database gate must be emergency-acknowledged only")
     elif conditional:
         raise SystemExit(f"{workflow_path} database gate must not be conditional")
     if re.search(r"^    runs-on:", body, re.MULTILINE):
@@ -589,7 +717,7 @@ linux = re.search(
     release,
     re.MULTILINE | re.DOTALL,
 )
-if not linux or "    needs: [database, release-validation]\n" not in linux.group("body"):
+if not linux or "    needs: [release-source, database, release-validation]\n" not in linux.group("body"):
     raise SystemExit("release publisher must depend on database and release-validation")
 linux_body = linux.group("body")
 for permission in (
@@ -625,6 +753,49 @@ for job in ("database", "release-validation"):
     )
     if not match or "    needs: [release-source]\n" not in match.group("body"):
         raise SystemExit(f"release {job} must wait for release-source")
+
+candidate = re.search(
+    r"^  candidate-publication:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
+    release,
+    re.MULTILINE | re.DOTALL,
+)
+if not candidate:
+    raise SystemExit("release workflow missing candidate-publication")
+candidate_body = candidate.group("body")
+for forbidden in (
+    "cargo build",
+    "cargo test",
+    "docker build ",
+    "docker buildx build",
+    "ci-self-hosted-api-smoke",
+    "ci-self-hosted-deploy-e2e",
+    "ci-install-railpack",
+):
+    if forbidden in candidate_body:
+        raise SystemExit(f"normal candidate path must not contain {forbidden}")
+for required in (
+    "release-candidate.py validate",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "docker buildx imagetools create --tag",
+    "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+    "receipt[\"core\"][\"commit_sha\"]",
+    "receipt[\"images\"]",
+):
+    if required not in candidate_body:
+        raise SystemExit(f"normal candidate publication missing {required}")
+if "inputs.release_mode == 'candidate'" not in candidate_body:
+    raise SystemExit("candidate publication must be candidate-mode only")
+legacy_jobs = ("database", "release-validation", "linux-cli")
+for name in legacy_jobs:
+    legacy = re.search(
+        rf"^  {name}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
+        release,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not legacy or "github.event_name == 'workflow_dispatch'" not in legacy.group("body"):
+        raise SystemExit(f"legacy job {name} is not workflow-dispatch isolated")
+    if "I_UNDERSTAND_LEGACY_RELEASE" not in legacy.group("body"):
+        raise SystemExit(f"legacy job {name} lacks emergency acknowledgement")
 
 release_header = release.split("\njobs:\n", 1)[0]
 if "permissions:\n  contents: read\n" not in release_header:
@@ -674,10 +845,15 @@ staging_push = staging.index('scripts/ci-docker-retry.sh docker push "${IMAGE_RE
 if staging_smoke > staging_push:
     raise SystemExit("staging workflow must smoke-test screenshotter before pushing it")
 
-# The release workflow publishes x86_64 images and smoke-tests the published
-# SHA-tagged screenshotter before release assets are created.
-release.index("scripts/ci-screenshotter-smoke.sh")
+# The normal candidate publication only aliases immutable digests and reuses
+# candidate bytes.  The old image builder/smoke test remains present solely in
+# the explicitly acknowledged legacy job.
+candidate = release.split("  candidate-publication:\n", 1)[1].split("\n  # Explicitly acknowledged emergency fallback.", 1)[0]
+for forbidden in ("docker build ", "docker buildx build", "cargo build", "cargo test", "scripts/ci-screenshotter-smoke.sh"):
+    if forbidden in candidate:
+        raise SystemExit(f"normal candidate publication contains forbidden work: {forbidden}")
 release.index("docker buildx build --platform linux/amd64 --push")
+release.index("scripts/ci-screenshotter-smoke.sh")
 PY
 
 echo "core workflow contracts passed"
