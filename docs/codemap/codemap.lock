@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-18T04:51:13Z",
-  "generated_from_commit": "9680c102a3303c38ad973f9bc41712baecba0e2d",
+  "generated_at": "2026-08-18T07:10:41Z",
+  "generated_from_commit": "d13f38fd905675a274a53b0ef342f0493e3f705c",
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
   "working_tree_has_uncommitted_changes": false,
@@ -80,7 +80,7 @@
     {
       "id": "scripts",
       "file_count": 41,
-      "fingerprint": "2305777826f5c60f4bd874c6e4bf8235213ba140e5b68120143c674734621137"
+      "fingerprint": "55828e3c5b242c50251c472a0754722388275af7e2de4bd785e8c6a7953b7d74"
     },
     {
       "id": "docs",
@@ -90,7 +90,7 @@
     {
       "id": ".github",
       "file_count": 17,
-      "fingerprint": "924aa3fc9a77e7be6400130ee564a45626232a71a66a55dedcaee212ab5523f9"
+      "fingerprint": "41dd15d163513830b73ad110ef656ef45dee1edd98e970b2306535d177285c8c"
     },
     {
       "id": "repository-root",
@@ -106,9 +106,9 @@
     "apps/web": "22c1040efdcc2c3cbd7e584d61ab002c859f50f3a859640ca90b16149c4db7d9",
     "crates/contracts": "a3dafe87002bb59f321807835ef1a9b27a8077c781c5da2eed33925e9e8ca805",
     "infra": "0b8147bcdf474c39a1497437f3340952564f1bd91b9e748674c6fb7a286c5acb",
-    "scripts": "2305777826f5c60f4bd874c6e4bf8235213ba140e5b68120143c674734621137",
+    "scripts": "55828e3c5b242c50251c472a0754722388275af7e2de4bd785e8c6a7953b7d74",
     "docs": "f3a20b580367cfb9fb406b0264d80ee52e514129320a5a2ae9250cd0d9cec101",
-    ".github": "924aa3fc9a77e7be6400130ee564a45626232a71a66a55dedcaee212ab5523f9",
+    ".github": "41dd15d163513830b73ad110ef656ef45dee1edd98e970b2306535d177285c8c",
     "repository-root": "5a8fd5b160902223e89d27b3ca7053163d750cb1ba4d1b465d10955e06bbb5ba"
   },
   "module_file_counts": {
@@ -125,5 +125,5 @@
     "repository-root": 14
   },
   "total_file_count": 382,
-  "fingerprint": "562fc805a7224b5b8a7b1ba970b291a4af2b1702f3ae7cb8b4af4b08df44c79d"
+  "fingerprint": "192cc0733a542529562be449c5d67093dc9cb7e1bcc45a8228a7a445e7663d15"
 }
