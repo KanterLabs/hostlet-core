@@ -317,6 +317,7 @@ jobs:
           set -euo pipefail
           cfg="$RUNNER_TEMP/release-candidate-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$cfg"
+          export DOCKER_CONFIG="$cfg"
           echo "DOCKER_CONFIG=$cfg" >> "$GITHUB_ENV"
           echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
       - name: Capture four existing staging image digests

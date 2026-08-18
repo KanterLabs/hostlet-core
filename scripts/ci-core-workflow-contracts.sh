@@ -442,15 +442,13 @@ if "needs: [verify-staging, candidate-tests, candidate-artifacts]" not in seal:
     raise SystemExit("seal-candidate must wait for both parallel lanes")
 if "cargo build --release -p hostlet" not in artifacts or "cargo build --release -p hostlet" in tests:
     raise SystemExit("only candidate-artifacts may build the CLI")
+if 'export DOCKER_CONFIG="$cfg"' not in artifacts or artifacts.index('export DOCKER_CONFIG="$cfg"') > artifacts.index("docker login"):
+    raise SystemExit("candidate registry login must activate its isolated Docker config before use")
 if "scripts/ci-self-hosted-api-smoke.sh" not in tests or "scripts/ci-self-hosted-deploy-e2e.sh" not in tests:
     raise SystemExit("candidate-tests must run API and deploy E2E")
 if "scripts/ci-install-railpack.sh" not in tests:
     raise SystemExit("candidate-tests must cover Railpack")
-install_step = re.search(
-    r"- name: Install Railpack for candidate fixtures\n"
-    r"\s+run: scripts/ci-install-railpack\.sh",
-    tests,
-)
+install_step = re.search(r"- name: Install Railpack for candidate fixtures\n\s+run: scripts/ci-install-railpack\.sh", tests)
 fixture_step = re.search(
     r"- name: Release-only Railpack fixtures\n"
     r"\s+run: \|\n"
