@@ -21,6 +21,8 @@ RELEASE_MAINLINE_SELFTEST="${ROOT}/scripts/ci-release-mainline-gate-selftest.sh"
 PREPARE_RELEASE_PR="${ROOT}/scripts/prepare-release-pr.sh"
 PREPARE_RELEASE_PR_SELFTEST="${ROOT}/scripts/prepare-release-pr-selftest.sh"
 SELF_HOSTED_LIB_SELFTEST="${ROOT}/scripts/ci-self-hosted-lib-selftest.sh"
+RELEASE_EVIDENCE="${ROOT}/scripts/ci-release-evidence.py"
+RELEASE_EVIDENCE_SELFTEST="${ROOT}/scripts/ci-release-evidence-selftest.py"
 
 assert_contains() {
   local file="$1"
@@ -447,16 +449,13 @@ from pathlib import Path
 workflow = Path(sys.argv[1]).read_text()
 light_jobs = workflow.count("runs-on: homelab\n")
 heavy_jobs = workflow.count("runs-on: homelab-heavy\n")
-same_repo_guard = (
-    "if: github.event.pull_request.head.repo.full_name == github.repository "
-    "&& github.event.action == 'labeled' "
-    "&& github.event.label.name == 'homelab-ci-approved'"
-)
-approved_guards = workflow.count(same_repo_guard)
-if light_jobs != 3 or heavy_jobs != 4 or approved_guards != 6:
+approval_guards = workflow.count("github.event.label.name == 'homelab-ci-approved'")
+release_exclusions = workflow.count("!startsWith(github.event.pull_request.head.ref, 'release-candidate/v')")
+if light_jobs != 4 or heavy_jobs != 4 or approval_guards != 6 or release_exclusions != 6:
     raise SystemExit(
-        "PR homelab CI must use canonical tiers behind same-repository approval: "
-        f"light={light_jobs} heavy={heavy_jobs} guards={approved_guards}"
+        "PR homelab CI must use canonical tiers behind same-repository approval "
+        "and exclude release candidates from heavy lanes: "
+        f"light={light_jobs} heavy={heavy_jobs} approvals={approval_guards} exclusions={release_exclusions}"
     )
 PY
 
@@ -710,6 +709,10 @@ for workflow_path in sys.argv[1:]:
         )
         if expected not in body:
             raise SystemExit("release database gate must be emergency-acknowledged only")
+    elif path.name == "ci.yml":
+        expected = "    if: needs.release-evidence.outputs.reuse_heavy != 'true'\n"
+        if expected not in body or "    needs: [release-evidence]\n" not in body:
+            raise SystemExit("main CI database gate must wait for release evidence")
     elif conditional:
         raise SystemExit(f"{workflow_path} database gate must not be conditional")
     if re.search(r"^    runs-on:", body, re.MULTILINE):
@@ -859,5 +862,43 @@ for forbidden in ("docker build ", "docker buildx build", "cargo build", "cargo 
 release.index("docker buildx build --platform linux/amd64 --push")
 release.index("scripts/ci-screenshotter-smoke.sh")
 PY
+
+assert_contains "${PR_WORKFLOW}" 'name: release-candidate-gate'
+assert_contains "${PR_WORKFLOW}" 'if: always()'
+assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.base.sha }}'
+assert_contains "${PR_WORKFLOW}" 'sparse-checkout-cone-mode: false'
+assert_contains "${PR_WORKFLOW}" 'HOSTLET_PR_RESULTS_JSON: ${{ toJSON(needs) }}'
+assert_contains "${PR_WORKFLOW}" 'HOSTLET_RELEASE_EVIDENCE_MODE: pr'
+assert_contains "${PR_WORKFLOW}" 'EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}'
+assert_contains "${PR_WORKFLOW}" 'run: python3 .hostlet-release-evidence/scripts/ci-release-evidence.py'
+assert_contains "${RELEASE_EVIDENCE}" 'MAX_AGE_SECONDS = 14400'
+assert_contains "${RELEASE_EVIDENCE}" 'select_latest_artifact'
+assert_contains "${RELEASE_EVIDENCE}" 'release-candidate.py'
+assert_contains "${RELEASE_EVIDENCE}" '--expected-staging-run-id'
+assert_contains "${RELEASE_EVIDENCE}" '--expected-candidate-run-id'
+assert_contains "${RELEASE_EVIDENCE}" 'GITHUB_EVENT_NAME'
+assert_contains "${RELEASE_EVIDENCE}" 'merge_commit_sha'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'ordinary-approved-pr-skipped-old-job'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'missing-artifact'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'stale-artifact'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'mismatched-staging-head'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'detect_main_reuse'
+
+PYTHONDONTWRITEBYTECODE=1 python3 "${RELEASE_EVIDENCE_SELFTEST}"
+
+for workflow in "${CI_WORKFLOW}" "${FULL_CI_WORKFLOW}" "${STAGING_DEPLOYABILITY}" "${PR_WORKFLOW}"; do
+  python3 - "${workflow}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text()
+for action in re.findall(r"^\s+uses:\s+([^\s]+)$", workflow, re.MULTILINE):
+    if action.startswith("./"):
+        continue
+    if "@" not in action or not re.fullmatch(r"[0-9a-f]{40}", action.rsplit("@", 1)[1]):
+        raise SystemExit(f"workflow action is not full-SHA pinned: {action}")
+PY
+done
 
 echo "core workflow contracts passed"
