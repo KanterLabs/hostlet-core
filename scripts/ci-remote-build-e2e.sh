@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/ci-self-hosted-lib.sh
 source "${ROOT}/scripts/ci-self-hosted-lib.sh"
+# shellcheck source=scripts/ci-remote-build-e2e-lib.sh
+source "${ROOT}/scripts/ci-remote-build-e2e-lib.sh"
 
 RUN_ID="${GITHUB_RUN_ID:-local}-$$"
 TMP_DIR="$(ci_tmp_dir hostlet-remote-build "${RUN_ID}")"
@@ -194,7 +196,7 @@ JSON
   wait_deployment "${deployment_id}"
   detail="$(curl -fsS -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${app_id}")"
   published="$(printf '%s' "${detail}" | json_get currentDeployment.publishedPort)"
-  docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${published}${probe}" >/dev/null
+  remote_e2e_runner_get "${RUNNER_DIND}" "http://127.0.0.1:${published}${probe}" >/dev/null
   if [ -n "$(docker -H "${BUILDER_DOCKER_HOST}" ps -aq --filter "label=hostlet.app_id=${app_id}")" ]; then
     echo "builder daemon ran an application container for ${app_id}" >&2
     return 1
@@ -366,7 +368,7 @@ docker run -d --name "${BUILDER_AGENT_CONTAINER}" --network "container:${BUILDER
 wait_agent /api/builders "${BUILDER_ID}"
 
 read -r DOCKER_APP DOCKER_DEPLOY DOCKER_PORT < <(create_and_deploy remote-dockerfile dockerfile single '{}')
-docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${DOCKER_PORT}/" | grep -q hostlet-remote-dockerfile
+remote_e2e_runner_get "${RUNNER_DIND}" "http://127.0.0.1:${DOCKER_PORT}/" | grep -q hostlet-remote-dockerfile
 create_and_deploy remote-railpack railpack single '{}' >/dev/null
 create_and_deploy remote-compose compose compose '{}' >/dev/null
 create_and_deploy remote-addons railpack single '{"compose":{"addOns":[{"key":"postgres"}]}}' >/dev/null
@@ -381,12 +383,12 @@ frontend, backend=sys.argv[1:]
 assert set(services) == {frontend, backend}, services
 print(services[frontend]["publishedPort"], services[backend]["publishedPort"])
 ' '@hostlet-topology/client' '@hostlet-topology/server')
-docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${TOPOLOGY_FRONTEND_PORT}/" | grep -q patchwork-v1
-docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${TOPOLOGY_BACKEND_PORT}/api/version" | grep -q '^backend-v1$'
+remote_e2e_runner_get "${RUNNER_DIND}" "http://127.0.0.1:${TOPOLOGY_FRONTEND_PORT}/" | grep -q patchwork-v1
+remote_e2e_runner_get "${RUNNER_DIND}" "http://127.0.0.1:${TOPOLOGY_BACKEND_PORT}/api/version" | grep -q '^backend-v1$'
 
 expect_status 200 -H "cookie: ${AUTH_COOKIE}" "${BASE_URL}/api/apps/${DOCKER_APP}"
 docker stop "${REGISTRY_CONTAINER}" >/dev/null
-docker exec "${RUNNER_DIND}" wget -qO- "http://127.0.0.1:${DOCKER_PORT}/" | grep -q hostlet-remote-dockerfile
+remote_e2e_runner_get "${RUNNER_DIND}" "http://127.0.0.1:${DOCKER_PORT}/" | grep -q hostlet-remote-dockerfile
 docker rm "${REGISTRY_CONTAINER}" >/dev/null
 start_registry "${TMP_DIR}/registry-data-rebuilt"
 registry_ready=0

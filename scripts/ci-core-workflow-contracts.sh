@@ -995,4 +995,5 @@ for action in re.findall(r"^\s+uses:\s+([^\s]+)$", workflow, re.MULTILINE):
 PY
 done
 
+bash "${ROOT}/scripts/ci-remote-build-e2e-selftest.sh"
 echo "core workflow contracts passed"
