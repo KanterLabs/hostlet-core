@@ -439,8 +439,11 @@ jobs:
           test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["lease_heartbeat"])')" = success
           test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["railpack"])')" = success
           test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["deploy_e2e"])')" = success
-          test -x candidate-artifacts/hostlet-linux-x64
+          # Artifact transport does not promise to preserve Unix mode bits. Verify
+          # the bytes first, then restore the executable bit for the durable bundle.
+          test -s candidate-artifacts/hostlet-linux-x64
           (cd candidate-artifacts && sha256sum --check hostlet-linux-x64.sha256)
+          chmod +x candidate-artifacts/hostlet-linux-x64
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           export NOW
           python3 - <<'PY'
