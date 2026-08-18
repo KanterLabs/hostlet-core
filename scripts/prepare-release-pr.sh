@@ -84,6 +84,24 @@ $git_bin fetch --quiet "$remote" \
 source_sha="$($git_bin rev-parse --verify "refs/remotes/${remote}/${source_branch}^{commit}")"
 base_sha="$($git_bin rev-parse --verify "refs/remotes/${remote}/${base_branch}^{commit}")"
 
+# Release preparation must certify the version before publishing any branch.
+# Read the manifests directly from the exact source commit so the operator's
+# current worktree cannot influence this decision.
+for manifest in apps/cli/Cargo.toml apps/api/Cargo.toml apps/agent/Cargo.toml; do
+  manifest_version="$($git_bin show "${source_sha}:${manifest}" 2>/dev/null | sed -n 's/^version = "\([^"]*\)"$/\1/p' | head -n 1)"
+  if [ "${manifest_version}" != "${version}" ]; then
+    echo "${manifest} on origin/${source_branch} is ${manifest_version:-missing}; expected ${version}" >&2
+    exit 1
+  fi
+done
+
+# A pre-existing release tag is a collision even if it points at the same
+# commit. Tags are immutable release identities and must be unused here.
+if [ -n "$($git_bin ls-remote --tags "$remote" "refs/tags/v${version}" "refs/tags/v${version}^{}")" ]; then
+  echo "release tag v${version} already exists on ${remote}" >&2
+  exit 1
+fi
+
 remote_branch_sha="$($git_bin ls-remote --heads "$remote" "refs/heads/${branch}" | awk 'NR == 1 { print $1 }')"
 if [ -n "$remote_branch_sha" ]; then
   if [ "$remote_branch_sha" != "$source_sha" ]; then
