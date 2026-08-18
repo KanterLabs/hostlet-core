@@ -996,4 +996,5 @@ PY
 done
 
 bash "${ROOT}/scripts/ci-remote-build-e2e-selftest.sh"
+bash "${ROOT}/scripts/ci-release-artifact-transport-selftest.sh"
 echo "core workflow contracts passed"
