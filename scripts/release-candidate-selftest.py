@@ -41,8 +41,8 @@ def draft() -> dict[str, Any]:
         "core": {"commit_sha": SHA, "tree_sha": TREE},
         "version": "0.2.24",
         "workflows": {
-            "staging": {"run_id": 12345, "conclusion": "success"},
-            "candidate": {"run_id": 67890, "conclusion": "success"},
+            "staging": {"run_id": 12345, "job": "images", "conclusion": "success"},
+            "candidate": {"run_id": 67890, "job": "seal-candidate", "conclusion": "success"},
         },
         "created_at": "2026-08-18T00:00:00Z",
         "expires_at": "2026-08-18T04:00:00Z",
@@ -145,7 +145,16 @@ for workflow_name in ("staging", "candidate"):
         )
 same_run = copy.deepcopy(valid)
 same_run["workflows"]["candidate"]["run_id"] = same_run["workflows"]["staging"]["run_id"]
-expect_failure("duplicate-workflow-run", lambda: release.validate_receipt(same_run, now=NOW))
+same_run["fingerprint"] = release.fingerprint_for(
+    {key: value for key, value in same_run.items() if key != "fingerprint"}
+)
+assert release.validate_receipt(same_run, now=NOW) == same_run
+same_evidence = copy.deepcopy(same_run)
+same_evidence["workflows"]["candidate"]["job"] = same_evidence["workflows"]["staging"]["job"]
+same_evidence["fingerprint"] = release.fingerprint_for(
+    {key: value for key, value in same_evidence.items() if key != "fingerprint"}
+)
+expect_failure("duplicate-workflow-evidence", lambda: release.validate_receipt(same_evidence, now=NOW))
 expect_failure("run-id-mismatch", lambda: release.validate_receipt(valid, expected_candidate_run_id=7, now=NOW))
 fingerprint_mismatch = copy.deepcopy(valid)
 fingerprint_mismatch["fingerprint"] = "e" * 64
