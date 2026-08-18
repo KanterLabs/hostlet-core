@@ -1,0 +1,516 @@
+name: Release Candidate
+
+# Core release evidence is produced from the exact staging run that published
+# the immutable sha image tags.  Staging calls this workflow after its images
+# job; the manual entry point is useful for recovering a candidate artifact
+# from a completed staging run.
+on:
+  workflow_call:
+    inputs:
+      staging_sha:
+        description: Exact 40-character Core staging commit to certify
+        required: true
+        type: string
+      staging_run_id:
+        description: Exact staging workflow run that published the sha images
+        required: true
+        type: string
+      release_version:
+        description: Release version without a leading v; empty derives it from Cargo.toml
+        required: false
+        default: ""
+        type: string
+    secrets:
+      GHCR_PAT:
+        required: true
+  workflow_dispatch:
+    inputs:
+      staging_sha:
+        description: Exact 40-character Core staging commit to certify
+        required: true
+        type: string
+      staging_run_id:
+        description: Exact staging workflow run that published the sha images
+        required: true
+        type: string
+      release_version:
+        description: Release version without a leading v; empty derives it from Cargo.toml
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_MAX_GLIBC_VERSION: "2.39"
+  HOSTLET_RELEASE_CANDIDATE_MAX_AGE_SECONDS: "14400"
+  IMAGE_REGISTRY: ghcr.io/shanekanterman04
+
+jobs:
+  verify-staging:
+    name: verify-staging
+    runs-on: homelab
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+      candidate_tree: ${{ steps.resolve.outputs.candidate_tree }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+      staging_run_id: ${{ steps.resolve.outputs.staging_run_id }}
+      sha_tag: ${{ steps.resolve.outputs.sha_tag }}
+    steps:
+      - name: Check out the exact staging commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.staging_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify runner and exact staging run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.staging_sha }}
+          EXPECTED_RUN_ID: ${{ inputs.staging_run_id }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          scripts/ci-verify-runner.sh
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          expected_sha = os.environ["EXPECTED_SHA"].strip().lower()
+          staging_run_id = os.environ["EXPECTED_RUN_ID"].strip()
+          current_run_id = os.environ["CURRENT_RUN_ID"].strip()
+          if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+              raise SystemExit("staging_sha must be a full lowercase 40-character SHA")
+          if not re.fullmatch(r"[0-9]+", staging_run_id):
+              raise SystemExit("staging_run_id must be numeric")
+
+          def gh_api(path):
+              return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+
+          run = gh_api(
+              f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{staging_run_id}"
+          )
+          if run.get("head_sha", "").lower() != expected_sha:
+              raise SystemExit(
+                  f"staging run {staging_run_id} does not target {expected_sha}"
+              )
+          if run.get("head_branch") != "staging":
+              raise SystemExit(f"staging run {staging_run_id} is not on staging")
+          if run.get("path") != ".github/workflows/staging.yml":
+              raise SystemExit(f"staging run {staging_run_id} is not staging.yml")
+
+          # A reusable call executes while its parent staging run is still in
+          # progress.  In that case every upstream staging job must already be
+          # completed successfully; a manual certification requires the run
+          # itself to be terminal and successful.
+          if staging_run_id == current_run_id and run.get("status") == "in_progress":
+              jobs = gh_api(
+                  f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{staging_run_id}/jobs?per_page=100"
+              ).get("jobs", [])
+              required = {
+                  "secrets",
+                  "rust",
+                  "database",
+                  "web",
+                  "topology-e2e",
+                  "remote-build",
+                  "images",
+              }
+              by_name = {job.get("name", "").split(" / ")[-1]: job for job in jobs}
+              missing = sorted(required - set(by_name))
+              if missing:
+                  raise SystemExit(f"staging run is missing upstream jobs: {missing}")
+              failed = sorted(
+                  name
+                  for name in required
+                  if by_name[name].get("status") != "completed"
+                  or by_name[name].get("conclusion") != "success"
+              )
+              if failed:
+                  raise SystemExit(f"staging upstream jobs are not successful: {failed}")
+          elif run.get("status") != "completed" or run.get("conclusion") != "success":
+              raise SystemExit(
+                  f"staging run is not successful: status={run.get('status')!r} "
+                  f"conclusion={run.get('conclusion')!r}"
+              )
+
+          actual_sha = subprocess.check_output(
+              ["git", "rev-parse", f"{expected_sha}^{{commit}}"], text=True
+          ).strip()
+          if actual_sha != expected_sha:
+              raise SystemExit(f"checked out {actual_sha}, expected {expected_sha}")
+          tree_sha = subprocess.check_output(
+              ["git", "rev-parse", f"{expected_sha}^{{tree}}"], text=True
+          ).strip()
+          if not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
+              raise SystemExit("candidate tree is not a full lowercase 40-character SHA")
+
+          version = os.environ.get("INPUT_RELEASE_VERSION", "").strip()
+          if version.startswith("v"):
+              version = version[1:]
+          if not version:
+              rows = subprocess.check_output(
+                  ["sed", "-n", r's/^version = "\([^\"]*\)"$/\1/p', "apps/cli/Cargo.toml"],
+                  text=True,
+              ).splitlines()
+              if not rows:
+                  raise SystemExit("apps/cli/Cargo.toml has no package version")
+              version = rows[0].strip()
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+              raise SystemExit(f"release version must be stable X.Y.Z: {version!r}")
+
+          manifests = ("apps/cli/Cargo.toml", "apps/api/Cargo.toml", "apps/agent/Cargo.toml")
+          mismatches = {}
+          for manifest in manifests:
+              rows = subprocess.check_output(
+                  ["sed", "-n", r's/^version = "\([^\"]*\)"$/\1/p', manifest],
+                  text=True,
+              ).splitlines()
+              if not rows:
+                  raise SystemExit(f"{manifest} has no package version")
+              if rows[0].strip() != version:
+                  mismatches[manifest] = rows[0].strip()
+          if mismatches:
+              raise SystemExit(
+                  f"Cargo package versions do not match {version}: {mismatches}"
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"candidate_sha={expected_sha}\n")
+              output.write(f"candidate_tree={tree_sha}\n")
+              output.write(f"release_version={version}\n")
+              output.write(f"staging_run_id={int(staging_run_id)}\n")
+              output.write(f"sha_tag=sha-{expected_sha[:12]}\n")
+          PY
+
+  # These two lanes deliberately depend only on verify-staging so they run in
+  # parallel.  Candidate tests never produce release bytes; candidate-artifacts
+  # builds the CLI exactly once and only reads the already-published staging
+  # image digests.
+  candidate-tests:
+    name: candidate-tests
+    needs: [verify-staging]
+    runs-on: homelab-heavy
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "8"
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verify-staging.outputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - name: Release-only API smoke
+        run: scripts/ci-self-hosted-api-smoke.sh
+      - name: Release-only Railpack fixtures
+        run: |
+          scripts/ci-install-railpack.sh
+          test -x "${HOSTLET_RAILPACK_BIN}"
+          scripts/ci-railpack-generated-fixtures.sh
+      - name: Release-only deploy E2E
+        run: scripts/ci-self-hosted-deploy-e2e.sh
+      - name: Record candidate test evidence
+        run: |
+          mkdir -p candidate-tests
+          printf '{"api":"success","railpack":"success","deploy_e2e":"success"}\n' \
+            > candidate-tests/result.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-candidate-tests
+          retention-days: 1
+          if-no-files-found: error
+          path: candidate-tests/result.json
+
+  candidate-artifacts:
+    name: candidate-artifacts
+    needs: [verify-staging]
+    runs-on: homelab-heavy
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+    env:
+      CARGO_BUILD_JOBS: "8"
+      CANDIDATE_SHA: ${{ needs.verify-staging.outputs.candidate_sha }}
+      CANDIDATE_TREE: ${{ needs.verify-staging.outputs.candidate_tree }}
+      RELEASE_VERSION: ${{ needs.verify-staging.outputs.release_version }}
+      SHA_TAG: ${{ needs.verify-staging.outputs.sha_tag }}
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verify-staging.outputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - name: Build the release CLI once
+        run: cargo build --release -p hostlet
+      - name: Enforce x64 CLI glibc baseline
+        run: |
+          set -euo pipefail
+          command -v readelf >/dev/null
+          required="$(
+            readelf --version-info target/release/hostlet |
+              grep -oE 'GLIBC_[0-9]+\.[0-9]+' |
+              sort -Vu |
+              tail -1
+          )"
+          if [ -z "${required}" ]; then
+            echo "could not determine the x64 CLI glibc requirement" >&2
+            exit 1
+          fi
+          required="${required#GLIBC_}"
+          newest="$(printf '%s\n' "${required}" "${HOSTLET_MAX_GLIBC_VERSION}" | sort -V | tail -1)"
+          if [ "${newest}" != "${HOSTLET_MAX_GLIBC_VERSION}" ]; then
+            echo "x64 CLI requires glibc ${required}; maximum supported is ${HOSTLET_MAX_GLIBC_VERSION}" >&2
+            exit 1
+          fi
+      - name: Log in to GHCR for immutable digest reads
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USERNAME: ShaneKanterman04
+        run: |
+          set -euo pipefail
+          cfg="$RUNNER_TEMP/release-candidate-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$cfg"
+          echo "DOCKER_CONFIG=$cfg" >> "$GITHUB_ENV"
+          echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+      - name: Capture four existing staging image digests
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          images = {}
+          for name in ("api", "web", "agent", "screenshotter"):
+              tag_ref = f"{os.environ['IMAGE_REGISTRY']}/hostlet-{name}:{os.environ['SHA_TAG']}"
+              digest = subprocess.check_output(
+                  ["docker", "buildx", "imagetools", "inspect", "--format", "{{.Manifest.Digest}}", tag_ref],
+                  text=True,
+              ).strip()
+              if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                  raise SystemExit(f"{tag_ref} did not resolve to a full digest: {digest!r}")
+              images[name] = f"{os.environ['IMAGE_REGISTRY']}/hostlet-{name}@{digest}"
+          Path("dist/images.json").write_text(
+              json.dumps(images, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Package CLI and checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/hostlet dist/hostlet-linux-x64
+          chmod +x dist/hostlet-linux-x64
+          sha256sum dist/hostlet-linux-x64 | sed 's#dist/##' > dist/hostlet-linux-x64.sha256
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          file: dist/hostlet-linux-x64
+          format: spdx-json
+          output-file: dist/hostlet-linux-x64.spdx.json
+      - name: Write provenance evidence
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          cli = Path("dist/hostlet-linux-x64")
+          provenance = {
+              "schema": "hostlet.core.release-candidate/provenance/v1",
+              "core": {
+                  "commit_sha": os.environ["CANDIDATE_SHA"],
+                  "tree_sha": os.environ["CANDIDATE_TREE"],
+              },
+              "version": os.environ["RELEASE_VERSION"],
+              "subject": {
+                  "ref": "artifact://core-release-candidate/hostlet-linux-x64",
+                  "sha256": hashlib.sha256(cli.read_bytes()).hexdigest(),
+              },
+          }
+          Path("dist/provenance.json").write_text(
+              json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: |
+            dist/hostlet-linux-x64
+            dist/hostlet-linux-x64.sha256
+            dist/hostlet-linux-x64.spdx.json
+            dist/provenance.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-candidate-artifacts
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            dist/hostlet-linux-x64
+            dist/hostlet-linux-x64.sha256
+            dist/hostlet-linux-x64.spdx.json
+            dist/images.json
+            dist/provenance.json
+
+  seal-candidate:
+    name: seal-candidate
+    needs: [verify-staging, candidate-tests, candidate-artifacts]
+    runs-on: homelab
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CANDIDATE_SHA: ${{ needs.verify-staging.outputs.candidate_sha }}
+      CANDIDATE_TREE: ${{ needs.verify-staging.outputs.candidate_tree }}
+      RELEASE_VERSION: ${{ needs.verify-staging.outputs.release_version }}
+      STAGING_RUN_ID: ${{ needs.verify-staging.outputs.staging_run_id }}
+      CANDIDATE_RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verify-staging.outputs.candidate_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-candidate-tests
+          path: candidate-tests
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-candidate-artifacts
+          path: candidate-artifacts
+      - name: Write and seal the exact Core receipt
+        run: |
+          set -euo pipefail
+          test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["api"])')" = success
+          test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["railpack"])')" = success
+          test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["deploy_e2e"])')" = success
+          test -x candidate-artifacts/hostlet-linux-x64
+          (cd candidate-artifacts && sha256sum --check hostlet-linux-x64.sha256)
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export NOW
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          now = datetime.strptime(os.environ["NOW"], "%Y-%m-%dT%H:%M:%SZ").replace(
+              tzinfo=timezone.utc
+          )
+          images = json.loads(Path("candidate-artifacts/images.json").read_text())
+          if set(images) != {"api", "web", "agent", "screenshotter"}:
+              raise SystemExit("candidate image evidence must contain exactly four services")
+          for name, ref in images.items():
+              expected = f"{os.environ['IMAGE_REGISTRY']}/hostlet-{name}@"
+              if not isinstance(ref, str) or not ref.startswith(expected):
+                  raise SystemExit(f"{name} image does not point to its hostlet service")
+              if not re.fullmatch(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", ref):
+                  raise SystemExit(f"{name} image is not a full digest reference: {ref!r}")
+          checksum = Path("candidate-artifacts/hostlet-linux-x64.sha256").read_text().split()[0]
+          if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+              raise SystemExit("CLI checksum is not lowercase SHA-256")
+          draft = {
+              "schema": "hostlet.core.release-candidate/v1",
+              "core": {
+                  "commit_sha": os.environ["CANDIDATE_SHA"],
+                  "tree_sha": os.environ["CANDIDATE_TREE"],
+              },
+              "version": os.environ["RELEASE_VERSION"],
+              "workflows": {
+                  "staging": {
+                      "run_id": int(os.environ["STAGING_RUN_ID"]),
+                      "job": "images",
+                      "conclusion": "success",
+                  },
+                  "candidate": {
+                      "run_id": int(os.environ["CANDIDATE_RUN_ID"]),
+                      "job": "seal-candidate",
+                      "conclusion": "success",
+                  },
+              },
+              "created_at": os.environ["NOW"],
+              "expires_at": (now + timedelta(seconds=14400)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "images": images,
+              "artifacts": {
+                  "cli": {
+                      "ref": "artifact://core-release-candidate/hostlet-linux-x64",
+                      "sha256": checksum,
+                  },
+                  "sbom": {
+                      "ref": "artifact://core-release-candidate/hostlet-linux-x64.spdx.json"
+                  },
+                  "provenance": {
+                      "ref": "artifact://core-release-candidate/provenance.json"
+                  },
+              },
+          }
+          Path("dist").mkdir(exist_ok=True)
+          Path("dist/core-release-candidate.draft.json").write_text(
+              json.dumps(draft, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          python3 scripts/release-candidate.py seal \
+            --input dist/core-release-candidate.draft.json \
+            --output dist/core-release-candidate.json \
+            --expected-sha "${CANDIDATE_SHA}" \
+            --expected-tree "${CANDIDATE_TREE}" \
+            --expected-version "${RELEASE_VERSION}" \
+            --now "${NOW}"
+          python3 scripts/release-candidate.py validate \
+            --input dist/core-release-candidate.json \
+            --expected-sha "${CANDIDATE_SHA}" \
+            --expected-tree "${CANDIDATE_TREE}" \
+            --expected-version "${RELEASE_VERSION}" \
+            --max-age-seconds "${HOSTLET_RELEASE_CANDIDATE_MAX_AGE_SECONDS}" \
+            --now "${NOW}"
+      - name: Assemble the one durable candidate artifact
+        run: |
+          set -euo pipefail
+          cp candidate-artifacts/hostlet-linux-x64 dist/hostlet-linux-x64
+          cp candidate-artifacts/hostlet-linux-x64.sha256 dist/hostlet-linux-x64.sha256
+          cp candidate-artifacts/hostlet-linux-x64.spdx.json dist/hostlet-linux-x64.spdx.json
+          cp candidate-artifacts/images.json dist/images.json
+          cp candidate-artifacts/provenance.json dist/provenance.json
+          cp candidate-tests/result.json dist/candidate-tests.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core-release-candidate
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/core-release-candidate.json
+            dist/hostlet-linux-x64
+            dist/hostlet-linux-x64.sha256
+            dist/hostlet-linux-x64.spdx.json
+            dist/images.json
+            dist/provenance.json
+            dist/candidate-tests.json
