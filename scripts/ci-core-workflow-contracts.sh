@@ -23,7 +23,6 @@ PREPARE_RELEASE_PR_SELFTEST="${ROOT}/scripts/prepare-release-pr-selftest.sh"
 SELF_HOSTED_LIB_SELFTEST="${ROOT}/scripts/ci-self-hosted-lib-selftest.sh"
 RELEASE_EVIDENCE="${ROOT}/scripts/ci-release-evidence.py"
 RELEASE_EVIDENCE_SELFTEST="${ROOT}/scripts/ci-release-evidence-selftest.py"
-
 assert_contains() {
   local file="$1"
   local needle="$2"
@@ -32,7 +31,6 @@ assert_contains() {
     exit 1
   fi
 }
-
 assert_not_contains() {
   local file="$1"
   local needle="$2"
@@ -271,6 +269,8 @@ assert_contains "${ROOT}/scripts/ci-self-hosted-api-smoke.sh" 'PostgreSQL readin
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ci_build_binary hostlet-api hostlet-api'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" '"$(ci_binary_path hostlet-api)"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'PostgreSQL readiness failed; aborting self-hosted deploy E2E before registry startup'
+assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'alpine:3.20'
+assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" '"${ROOT}/scripts/ci-docker-retry.sh" docker pull "${image}"'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" 'ci_build_binary hostlet-agent hostlet-agent'
 assert_contains "${ROOT}/scripts/ci-self-hosted-deploy-e2e.sh" '"$(ci_binary_path hostlet-agent)"'
 assert_contains "${ROOT}/scripts/ci-remote-build-e2e.sh" 'PostgreSQL readiness failed; aborting remote-build E2E before registry startup'
