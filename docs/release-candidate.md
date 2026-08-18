@@ -44,8 +44,9 @@ leading `v`.
 ```
 
 The validator requires both workflow conclusions to be exactly `success` and
-requires each `(run_id, job)` pair to identify different evidence. Run IDs may
-match when the candidate is a reusable job inside the staging workflow.
+requires each `(run_id, job)` pair to identify different evidence. Candidate
+proof is dispatched only for an explicitly selected staging SHA, so ordinary
+staging pushes do not consume release-only heavy-runner capacity.
 Mutable image tags, missing evidence, unknown fields, duplicate JSON keys,
 stale expiry, and fingerprint drift are rejected. Image names must match their
 map keys. Artifact references must use `https://`, `oci://`, or `artifact://`
