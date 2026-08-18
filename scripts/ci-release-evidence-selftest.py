@@ -136,6 +136,16 @@ with mock.patch.object(evidence, "fetch_commit_pulls", return_value=[release_pul
 ):
     assert evidence.detect_main_reuse(base_environment | {"GH_TOKEN": "test", "GITHUB_API_URL": "https://api.test"})
 
+with mock.patch.object(evidence, "fetch_commit_pulls", return_value=[release_pull]), mock.patch.object(
+    evidence, "fetch_source_version_and_tree", return_value=(TREE, "0.2.25")
+), mock.patch.object(evidence, "fetch_commit_tree", return_value="d" * 40), mock.patch.object(
+    evidence, "validate_candidate_artifact"
+) as validate:
+    assert not evidence.detect_main_reuse(
+        base_environment | {"GH_TOKEN": "test", "GITHUB_API_URL": "https://api.test"}
+    )
+    validate.assert_not_called()
+
 ordinary_environment = dict(base_environment, GITHUB_SHA=HEAD)
 with mock.patch.object(evidence, "fetch_commit_pulls", return_value=[]):
     assert not evidence.detect_main_reuse(ordinary_environment | {"GH_TOKEN": "test", "GITHUB_API_URL": "https://api.test"})
