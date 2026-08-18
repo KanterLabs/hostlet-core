@@ -434,16 +434,32 @@ artifacts = re.search(r"^  candidate-artifacts:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-
 seal = re.search(r"^  seal-candidate:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL).group("body")
 if "staging_sha" not in verify or "staging_run_id" not in verify:
     raise SystemExit("verify-staging must accept exact SHA and run inputs")
+if not re.search(r"- name: Verify runner and exact staging run\n\s+id: resolve\n", verify):
+    raise SystemExit("verify-staging output producer must retain id: resolve")
 if "needs: [verify-staging]" not in tests or "needs: [verify-staging]" not in artifacts:
     raise SystemExit("candidate tests/artifacts must run in parallel after verify-staging")
 if "needs: [verify-staging, candidate-tests, candidate-artifacts]" not in seal:
     raise SystemExit("seal-candidate must wait for both parallel lanes")
 if "cargo build --release -p hostlet" not in artifacts or "cargo build --release -p hostlet" in tests:
     raise SystemExit("only candidate-artifacts may build the CLI")
+if 'export DOCKER_CONFIG="$cfg"' not in artifacts or artifacts.index('export DOCKER_CONFIG="$cfg"') > artifacts.index("docker login"):
+    raise SystemExit("candidate registry login must activate its isolated Docker config before use")
 if "scripts/ci-self-hosted-api-smoke.sh" not in tests or "scripts/ci-self-hosted-deploy-e2e.sh" not in tests:
     raise SystemExit("candidate-tests must run API and deploy E2E")
 if "scripts/ci-install-railpack.sh" not in tests:
     raise SystemExit("candidate-tests must cover Railpack")
+install_step = re.search(r"- name: Install Railpack for candidate fixtures\n\s+run: scripts/ci-install-railpack\.sh", tests)
+fixture_step = re.search(
+    r"- name: Release-only Railpack fixtures\n"
+    r"\s+run: \|\n"
+    r"\s+test -x \"\$\{HOSTLET_RAILPACK_BIN\}\"\n"
+    r"\s+scripts/ci-railpack-generated-fixtures\.sh",
+    tests,
+)
+if not install_step or not fixture_step or install_step.end() >= fixture_step.start():
+    raise SystemExit(
+        "candidate Railpack install must be a separate step before fixture use so GITHUB_ENV is applied"
+    )
 if "cargo test --package hostlet-api --lib" not in tests or "db_long_running_build_heartbeat_renews_lease_without_duplicate_claim" not in tests:
     raise SystemExit("candidate-tests must run the focused lease-heartbeat regression")
 if "cargo test --workspace" in tests:
