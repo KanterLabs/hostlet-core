@@ -444,6 +444,22 @@ if "scripts/ci-self-hosted-api-smoke.sh" not in tests or "scripts/ci-self-hosted
     raise SystemExit("candidate-tests must run API and deploy E2E")
 if "scripts/ci-install-railpack.sh" not in tests:
     raise SystemExit("candidate-tests must cover Railpack")
+install_step = re.search(
+    r"- name: Install Railpack for candidate fixtures\n"
+    r"\s+run: scripts/ci-install-railpack\.sh",
+    tests,
+)
+fixture_step = re.search(
+    r"- name: Release-only Railpack fixtures\n"
+    r"\s+run: \|\n"
+    r"\s+test -x \"\$\{HOSTLET_RAILPACK_BIN\}\"\n"
+    r"\s+scripts/ci-railpack-generated-fixtures\.sh",
+    tests,
+)
+if not install_step or not fixture_step or install_step.end() >= fixture_step.start():
+    raise SystemExit(
+        "candidate Railpack install must be a separate step before fixture use so GITHUB_ENV is applied"
+    )
 if "cargo test --package hostlet-api --lib" not in tests or "db_long_running_build_heartbeat_renews_lease_without_duplicate_claim" not in tests:
     raise SystemExit("candidate-tests must run the focused lease-heartbeat regression")
 if "cargo test --workspace" in tests:
