@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-18T05:03:41Z",
-  "generated_from_commit": "b287ba15f33f7670810869f84af9d6eae143c990",
+  "generated_at": "2026-08-18T11:27:40Z",
+  "generated_from_commit": "103b6ad4dbec3503d91076f199576cc9ffedbdcd",
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
-  "working_tree_has_uncommitted_changes": false,
+  "working_tree_has_uncommitted_changes": true,
   "record_format": "codemap-fingerprint-v1\\0 + bytewise path order + decimal path length:path\\0 + decimal content length:content\\0; missing tracked file content is MISSING\\0",
   "scope": [
     "apps/api",
@@ -80,7 +80,7 @@
     {
       "id": "scripts",
       "file_count": 41,
-      "fingerprint": "2473c45bd41ec213b27878a0c2b0f5b44b6e1fef1b58958c62995d170392ebaf"
+      "fingerprint": "d1b918db3f9d3e795f47146e17aaab01289c671ed9839ef77d24d3d56351c76d"
     },
     {
       "id": "docs",
@@ -106,7 +106,7 @@
     "apps/web": "22c1040efdcc2c3cbd7e584d61ab002c859f50f3a859640ca90b16149c4db7d9",
     "crates/contracts": "a3dafe87002bb59f321807835ef1a9b27a8077c781c5da2eed33925e9e8ca805",
     "infra": "0b8147bcdf474c39a1497437f3340952564f1bd91b9e748674c6fb7a286c5acb",
-    "scripts": "2473c45bd41ec213b27878a0c2b0f5b44b6e1fef1b58958c62995d170392ebaf",
+    "scripts": "d1b918db3f9d3e795f47146e17aaab01289c671ed9839ef77d24d3d56351c76d",
     "docs": "f3a20b580367cfb9fb406b0264d80ee52e514129320a5a2ae9250cd0d9cec101",
     ".github": "87ed386377d01df43be7830c1230da27b0eeac98fde68fd00fc0d60a51f7efe2",
     "repository-root": "c0d2cb29513a14148587820acb2e6a6ae39c2e1cd98ac67d817d265e00cecd81"
@@ -125,5 +125,5 @@
     "repository-root": 14
   },
   "total_file_count": 382,
-  "fingerprint": "204acaa4b5f5f4843e8214fbfcdca62afcae4c3da66da3db0ab4a5172b357a68"
+  "fingerprint": "0025c2a5ed91ab82dce328c28ba71c5cde810ffe9b5602f2c2ccb57826dab365"
 }
