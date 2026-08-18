@@ -1,4 +1,7 @@
 name: Release
+run-name: >-
+  Publish ${{ inputs.release_version || github.ref_name }} from
+  ${{ inputs.candidate_sha || github.sha }}
 
 # Candidate publication is the normal release path.  It consumes the exact
 # sealed Core staging evidence, aliases its immutable image digests, reuses
