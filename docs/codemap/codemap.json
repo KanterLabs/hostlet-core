@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-18T11:27:40Z",
-  "generated_from_commit": "103b6ad4dbec3503d91076f199576cc9ffedbdcd",
+  "generated_at": "2026-08-18T13:46:25Z",
+  "generated_from_commit": "bdcaac266b338425330f99f04af0b9063ad5f562",
   "scope": [
     "apps/api",
     "apps/agent",
@@ -2039,7 +2039,7 @@
   ],
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
-  "working_tree_has_uncommitted_changes": true,
+  "working_tree_has_uncommitted_changes": false,
   "symbol_index": [
     {
       "id": "api-deployment-heartbeat",
