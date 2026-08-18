@@ -1,44 +1,190 @@
 name: Release
+run-name: >-
+  Publish ${{ inputs.release_version || github.ref_name }} from
+  ${{ inputs.candidate_sha || github.sha }}
 
+# Candidate publication is the normal release path.  It consumes the exact
+# sealed Core staging evidence, aliases its immutable image digests, reuses
+# the candidate CLI/SBOM bytes, and publishes a GitHub release.  The legacy
+# builder below is an explicitly acknowledged workflow-dispatch escape hatch.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_mode:
+        description: Publish sealed candidate evidence, or acknowledge the emergency legacy builder
+        required: true
+        default: candidate
+        type: choice
+        options:
+          - candidate
+          - legacy
+      release_version:
+        description: Stable release version (X.Y.Z or vX.Y.Z); required for dispatch
+        required: false
+        type: string
+      candidate_sha:
+        description: Exact Core candidate commit SHA; required for candidate dispatches
+        required: false
+        type: string
+      candidate_run_id:
+        description: Exact workflow run containing the core-release-candidate artifact
+        required: false
+        type: string
+      candidate_max_age_seconds:
+        description: Maximum sealed candidate age in seconds (maximum 14400)
+        required: false
+        default: "14400"
+        type: string
+      emergency_acknowledgement:
+        description: Type I_UNDERSTAND_LEGACY_RELEASE to authorize the emergency builder
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 env:
   HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_MAX_GLIBC_VERSION: "2.39"
+  HOSTLET_RELEASE_CANDIDATE_MAX_AGE_SECONDS: "14400"
+  IMAGE_REGISTRY: ghcr.io/shanekanterman04
 
 jobs:
   release-source:
+    name: release-source
     runs-on: homelab
     permissions:
+      actions: read
       contents: read
+    outputs:
+      release_mode: ${{ steps.resolve.outputs.release_mode }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+      candidate_run_id: ${{ steps.resolve.outputs.candidate_run_id }}
+      publication_sha: ${{ steps.resolve.outputs.publication_sha }}
+      publication_tree: ${{ steps.resolve.outputs.publication_tree }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Check out the release ref
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Require release source on main
         run: bash scripts/ci-release-mainline-gate.sh
-      - run: bash scripts/ci-release-mainline-gate-selftest.sh
-      - run: scripts/ci-verify-runner.sh
+      - name: Check release gate contract
+        run: bash scripts/ci-release-mainline-gate-selftest.sh
+      - name: Verify runner
+        run: scripts/ci-verify-runner.sh
+      - name: Resolve release and candidate identities
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+          INPUT_MODE: ${{ inputs.release_mode }}
+          INPUT_VERSION: ${{ inputs.release_version }}
+          INPUT_SHA: ${{ inputs.candidate_sha }}
+          INPUT_RUN_ID: ${{ inputs.candidate_run_id }}
+          INPUT_ACK: ${{ inputs.emergency_acknowledgement }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "push" ]; then
+            mode=candidate
+            release_tag="${EVENT_TAG}"
+            candidate_sha="${EVENT_SHA}"
+            candidate_run_id=""
+          else
+            mode="${INPUT_MODE:-candidate}"
+            release_tag="${INPUT_VERSION}"
+            candidate_sha="${INPUT_SHA}"
+            candidate_run_id="${INPUT_RUN_ID}"
+            if [ "${mode}" = legacy ] && [ "${INPUT_ACK}" != "I_UNDERSTAND_LEGACY_RELEASE" ]; then
+              echo "legacy release requires emergency_acknowledgement=I_UNDERSTAND_LEGACY_RELEASE" >&2
+              exit 1
+            fi
+            if [ "${mode}" = candidate ] && [ -z "${release_tag}" ]; then
+              echo "candidate workflow dispatch requires release_version" >&2
+              exit 1
+            fi
+          fi
+          if [ "${mode}" != candidate ] && [ "${mode}" != legacy ]; then
+            echo "release_mode must be candidate or legacy" >&2
+            exit 1
+          fi
+          release_tag="${release_tag#v}"
+          release_tag="v${release_tag}"
+          if [[ ! "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release version must be a stable vX.Y.Z: ${release_tag}" >&2
+            exit 1
+          fi
+          if [[ ! "${candidate_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "candidate_sha must be a full 40-character SHA: ${candidate_sha}" >&2
+            exit 1
+          fi
+          candidate_sha="${candidate_sha,,}"
+          if [ "${mode}" = candidate ] && [ "${EVENT_NAME}" = workflow_dispatch ]; then
+            if [[ ! "${candidate_run_id}" =~ ^[0-9]+$ ]]; then
+              echo "candidate dispatch requires a numeric candidate_run_id" >&2
+              exit 1
+            fi
+          fi
+          if [ "${EVENT_NAME}" = workflow_dispatch ]; then
+            # A dispatch is published against the exact current main tip, not
+            # the SHA captured when the workflow was queued.  The candidate
+            # must already be reachable from that tip and have the same tree;
+            # otherwise the sealed bytes would describe a different source.
+            git fetch --quiet --no-tags --prune origin \
+              '+refs/heads/main:refs/remotes/origin/main'
+            publication_sha="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+            publication_tree="$(git rev-parse --verify 'refs/remotes/origin/main^{tree}')"
+            candidate_commit="$(git rev-parse --verify "${candidate_sha}^{commit}")"
+            candidate_tree="$(git rev-parse --verify "${candidate_sha}^{tree}")"
+            if ! git merge-base --is-ancestor "${candidate_commit}" "${publication_sha}"; then
+              echo "candidate ${candidate_sha} is not reachable from current main ${publication_sha}" >&2
+              exit 1
+            fi
+            if [ "${candidate_tree}" != "${publication_tree}" ]; then
+              echo "candidate tree ${candidate_tree} does not match current main tree ${publication_tree}" >&2
+              exit 1
+            fi
+          else
+            # A tag push is already bound to its exact tag target.  Keep that
+            # target as publication identity while the mainline gate proves it
+            # is safely reachable from origin/main.
+            publication_sha="$(git rev-parse --verify "${candidate_sha}^{commit}")"
+            publication_tree="$(git rev-parse --verify "${candidate_sha}^{tree}")"
+          fi
+          {
+            echo "release_mode=${mode}"
+            echo "release_tag=${release_tag}"
+            echo "release_version=${release_tag#v}"
+            echo "candidate_sha=${candidate_sha}"
+            echo "candidate_run_id=${candidate_run_id}"
+            echo "publication_sha=${publication_sha}"
+            echo "publication_tree=${publication_tree}"
+          } >> "${GITHUB_OUTPUT}"
 
+  # These jobs are emergency-only.  Neither a tag push nor a normal candidate
+  # dispatch can satisfy this condition, so the normal path contains no
+  # cargo/docker build or test work.
   database:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_mode == 'legacy' && inputs.emergency_acknowledgement == 'I_UNDERSTAND_LEGACY_RELEASE'
     needs: [release-source]
     uses: ./.github/workflows/database-tests.yml
 
-  # Release gate: the heavy integration suites no longer run on every staging
-  # push, so they run here against the exact commit being released. linux-cli
-  # (which builds + publishes the release images) needs this to pass first.
-  # Runs on both tag push and workflow_dispatch so a release can be dry-run-validated.
   release-validation:
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    name: release-validation (legacy emergency)
+    if: github.event_name == 'workflow_dispatch' && inputs.release_mode == 'legacy' && inputs.emergency_acknowledgement == 'I_UNDERSTAND_LEGACY_RELEASE'
     needs: [release-source]
     runs-on: homelab-heavy
+    permissions:
+      contents: read
     env:
       CARGO_BUILD_JOBS: "8"
     steps:
@@ -46,6 +192,8 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: scripts/ci-self-hosted-api-smoke.sh
       - run: scripts/ci-install-railpack.sh
@@ -53,9 +201,273 @@ jobs:
       - run: scripts/ci-railpack-generated-fixtures.sh
       - run: scripts/ci-self-hosted-deploy-e2e.sh
 
+  candidate-publication:
+    name: candidate-publication
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'candidate')
+    needs: [release-source]
+    runs-on: homelab
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANDIDATE_SHA: ${{ needs.release-source.outputs.candidate_sha }}
+      PUBLICATION_SHA: ${{ needs.release-source.outputs.publication_sha }}
+      PUBLICATION_TREE: ${{ needs.release-source.outputs.publication_tree }}
+      RELEASE_TAG: ${{ needs.release-source.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.release-source.outputs.release_version }}
+      CANDIDATE_RUN_INPUT: ${{ needs.release-source.outputs.candidate_run_id }}
+      CANDIDATE_MAX_AGE_SECONDS: ${{ inputs.candidate_max_age_seconds || '14400' }}
+    steps:
+      - name: Check out the exact candidate commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.release-source.outputs.candidate_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+      - name: Resolve the exact successful candidate artifact run
+        id: resolve-candidate
+        env:
+          EXPECTED_SHA: ${{ needs.release-source.outputs.candidate_sha }}
+          RUN_INPUT: ${{ needs.release-source.outputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          expected_sha = os.environ["EXPECTED_SHA"].lower()
+          requested = os.environ.get("RUN_INPUT", "").strip()
+
+          def api(path):
+              return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+
+          if requested:
+              if not re.fullmatch(r"[0-9]+", requested):
+                  raise SystemExit("candidate_run_id must be numeric")
+              candidates = [api(f"repos/{repo}/actions/runs/{requested}")]
+          else:
+              candidates = sorted(
+                  api(f"repos/{repo}/actions/runs?head_sha={expected_sha}&per_page=100").get(
+                      "workflow_runs", []
+                  ),
+                  key=lambda row: row.get("run_number", 0),
+                  reverse=True,
+              )
+
+          selected = None
+          for run in candidates:
+              if run.get("status") != "completed" or run.get("conclusion") != "success":
+                  continue
+              if run.get("path") not in (
+                  ".github/workflows/staging.yml",
+                  ".github/workflows/release-candidate.yml",
+              ):
+                  continue
+              # The automatic search is exact-head; an explicit run is still
+              # bound to the receipt's exact SHA in the validation step below.
+              if not requested and run.get("head_sha", "").lower() != expected_sha:
+                  continue
+              artifacts = api(
+                  f"repos/{repo}/actions/runs/{run['id']}/artifacts?per_page=100"
+              ).get("artifacts", [])
+              if any(
+                  artifact.get("name") == "core-release-candidate"
+                  and not artifact.get("expired")
+                  for artifact in artifacts
+              ):
+                  selected = run
+                  break
+          if selected is None:
+              raise SystemExit(
+                  f"no successful core-release-candidate artifact for {expected_sha}"
+              )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"run_id={int(selected['id'])}\n")
+          PY
+      - name: Download the exact sealed candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: core-release-candidate
+          path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.resolve-candidate.outputs.run_id }}
+      - name: Validate the sealed candidate and reused bytes
+        env:
+          CANDIDATE_RUN_ID: ${{ steps.resolve-candidate.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${CANDIDATE_MAX_AGE_SECONDS}" =~ ^[0-9]+$ ]] || {
+            echo "candidate_max_age_seconds must be numeric" >&2
+            exit 1
+          }
+          if [ "${CANDIDATE_MAX_AGE_SECONDS}" -gt "${HOSTLET_RELEASE_CANDIDATE_MAX_AGE_SECONDS}" ]; then
+            echo "candidate_max_age_seconds cannot exceed 14400" >&2
+            exit 1
+          fi
+          candidate_tree="$(git rev-parse HEAD^{tree})"
+          if [ "${candidate_tree}" != "${PUBLICATION_TREE}" ]; then
+            echo "candidate tree ${candidate_tree} does not match publication tree ${PUBLICATION_TREE}" >&2
+            exit 1
+          fi
+          python3 scripts/release-candidate.py validate \
+            --input candidate/core-release-candidate.json \
+            --expected-sha "${CANDIDATE_SHA}" \
+            --expected-tree "${candidate_tree}" \
+            --expected-version "${RELEASE_VERSION}" \
+            --expected-candidate-run-id "${CANDIDATE_RUN_ID}" \
+            --max-age-seconds "${CANDIDATE_MAX_AGE_SECONDS}"
+          test -x candidate/hostlet-linux-x64
+          (cd candidate && sha256sum --check hostlet-linux-x64.sha256)
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          receipt = json.loads(Path("candidate/core-release-candidate.json").read_text())
+          images = receipt["images"]
+          if set(images) != {"api", "web", "agent", "screenshotter"}:
+              raise SystemExit("receipt images must contain exactly four services")
+          rows = []
+          for name in ("api", "web", "agent", "screenshotter"):
+              ref = images[name]
+              prefix = f"{os.environ['IMAGE_REGISTRY']}/hostlet-{name}@"
+              if not isinstance(ref, str) or not ref.startswith(prefix):
+                  raise SystemExit(f"{name} image ref has the wrong repository")
+              if not re.fullmatch(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", ref):
+                  raise SystemExit(f"{name} image ref is not a full digest: {ref!r}")
+              # The source image must be the immutable digest behind the exact
+              # staging sha tag; only that digest is ever used for aliasing.
+              digest = ref.rsplit("@", 1)[1]
+              rows.append(f"{name}\t{ref}\t{digest}")
+          Path(os.environ["RUNNER_TEMP"] + "/release-images.tsv").write_text(
+              "\n".join(rows) + "\n", encoding="utf-8"
+          )
+          checksum = Path("candidate/hostlet-linux-x64.sha256").read_text().split()[0]
+          cli_checksum = receipt["artifacts"]["cli"]["sha256"]
+          if checksum != cli_checksum:
+              raise SystemExit("candidate CLI checksum does not match receipt")
+          PY
+      - name: Log in to GHCR for digest-only aliases
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USERNAME: ShaneKanterman04
+        run: |
+          set -euo pipefail
+          cfg="$RUNNER_TEMP/release-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$cfg"
+          export DOCKER_CONFIG="$cfg"
+          echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+          echo "DOCKER_CONFIG=${cfg}" >> "$GITHUB_ENV"
+      - name: Create idempotent semantic image aliases
+        run: |
+          set -euo pipefail
+          alias_image() {
+            local name="$1"
+            local source_ref="$2"
+            local digest="$3"
+            local destination="${IMAGE_REGISTRY}/hostlet-${name}:${RELEASE_TAG}"
+            local existing
+            existing="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${destination}" 2>/dev/null || true)"
+            if [ -n "${existing}" ] && [ "${existing}" != "${digest}" ]; then
+              echo "refusing to retarget ${destination}: ${existing} != ${digest}" >&2
+              return 1
+            fi
+            if [ -z "${existing}" ]; then
+              docker buildx imagetools create --tag "${destination}" "${source_ref}"
+            fi
+            verified="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${destination}")"
+            [ "${verified}" = "${digest}" ] || {
+              echo "${destination} resolved to ${verified}; expected ${digest}" >&2
+              return 1
+            }
+          }
+          while IFS=$'\t' read -r name source_ref digest; do
+            alias_image "${name}" "${source_ref}" "${digest}"
+          done < "${RUNNER_TEMP}/release-images.tsv"
+      - name: Write release metadata from exact candidate bytes
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp candidate/core-release-candidate.json dist/core-release-candidate.json
+          cp candidate/hostlet-linux-x64 dist/hostlet-linux-x64
+          cp candidate/hostlet-linux-x64.sha256 dist/hostlet-linux-x64.sha256
+          cp candidate/hostlet-linux-x64.spdx.json dist/hostlet-linux-x64.spdx.json
+          cp candidate/images.json dist/images.json
+          cp candidate/provenance.json dist/provenance.json
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          receipt = json.loads(Path("dist/core-release-candidate.json").read_text())
+          manifest = {
+              "version": os.environ["RELEASE_VERSION"],
+              "released_at": datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "minimum_supported_version": "0.1.0",
+              "image_registry": os.environ["IMAGE_REGISTRY"],
+              "image_tag": os.environ["RELEASE_TAG"],
+              "images": {
+                  name: {"ref": ref, "digest": ref.rsplit("@", 1)[1]}
+                  for name, ref in receipt["images"].items()
+              },
+              "assets": {
+                  "hostlet-linux-x64": {
+                      "sha256": receipt["artifacts"]["cli"]["sha256"]
+                  }
+              },
+              "candidate": {
+                  "sha": receipt["core"]["commit_sha"],
+                  "tree": receipt["core"]["tree_sha"],
+                  "run_id": receipt["workflows"]["candidate"]["run_id"],
+                  "fingerprint": receipt["fingerprint"],
+              },
+              "publication": {
+                  "commit_sha": os.environ["PUBLICATION_SHA"],
+                  "tree_sha": os.environ["PUBLICATION_TREE"],
+                  "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "workflow": "release.yml",
+              },
+              "compose_migrations": True,
+              "database_migrations": True,
+              "notes_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/{os.environ['RELEASE_TAG']}",
+          }
+          Path("dist/hostlet-release.json").write_text(
+              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          node -e 'JSON.parse(require("fs").readFileSync("dist/hostlet-release.json", "utf8"))'
+      - name: Publish GitHub release from candidate bytes
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ needs.release-source.outputs.release_tag }}
+          target_commitish: ${{ needs.release-source.outputs.publication_sha }}
+          generate_release_notes: true
+          files: |
+            dist/hostlet-linux-x64
+            dist/hostlet-linux-x64.sha256
+            dist/hostlet-release.json
+            dist/core-release-candidate.json
+            dist/hostlet-linux-x64.spdx.json
+            dist/images.json
+            dist/provenance.json
+
+  # Explicitly acknowledged emergency fallback.  This entire builder is
+  # unreachable from tag pushes and from release_mode=candidate dispatches.
   linux-cli:
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    needs: [database, release-validation]
+    name: linux-cli (legacy emergency)
+    if: github.event_name == 'workflow_dispatch' && inputs.release_mode == 'legacy' && inputs.emergency_acknowledgement == 'I_UNDERSTAND_LEGACY_RELEASE'
+    needs: [release-source, database, release-validation]
     runs-on: homelab-heavy
     permissions:
       contents: write
@@ -63,186 +475,110 @@ jobs:
       id-token: write
       attestations: write
     env:
-      # The release build owns the isolated 8-CPU heavy runner.
       CARGO_BUILD_JOBS: "8"
-      HOSTLET_MAX_GLIBC_VERSION: "2.39"
+      RELEASE_TAG: ${{ needs.release-source.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.release-source.outputs.release_version }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           persist-credentials: false
       - run: scripts/ci-verify-runner.sh
+      - name: Use runner's cached rustup
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - run: cargo build --release -p hostlet
       - name: Enforce x64 CLI glibc baseline
         run: |
+          set -euo pipefail
           command -v readelf >/dev/null
-          required="$(
-            readelf --version-info target/release/hostlet |
-              grep -oE 'GLIBC_[0-9]+\.[0-9]+' |
-              sort -Vu |
-              tail -1
-          )"
-          if [ -z "${required}" ]; then
-            echo "could not determine the x64 CLI glibc requirement" >&2
-            exit 1
-          fi
+          required="$(readelf --version-info target/release/hostlet | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)"
+          [ -n "${required}" ] || { echo "could not determine CLI glibc requirement" >&2; exit 1; }
           required="${required#GLIBC_}"
-          newest="$(
-            printf '%s\n' "${required}" "${HOSTLET_MAX_GLIBC_VERSION}" |
-              sort -V |
-              tail -1
-          )"
-          if [ "${newest}" != "${HOSTLET_MAX_GLIBC_VERSION}" ]; then
+          newest="$(printf '%s\n' "${required}" "${HOSTLET_MAX_GLIBC_VERSION}" | sort -V | tail -1)"
+          [ "${newest}" = "${HOSTLET_MAX_GLIBC_VERSION}" ] || {
             echo "x64 CLI requires glibc ${required}; maximum supported is ${HOSTLET_MAX_GLIBC_VERSION}" >&2
             exit 1
-          fi
-          echo "x64 CLI requires glibc ${required} (supported maximum ${HOSTLET_MAX_GLIBC_VERSION})"
-      - run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            for manifest in apps/cli/Cargo.toml apps/api/Cargo.toml apps/agent/Cargo.toml; do
-              grep -q "^version = \"${VERSION}\"$" "$manifest" || {
-                echo "$manifest version does not match tag ${GITHUB_REF_NAME}" >&2
-                exit 1
-              }
-            done
-          fi
-      - name: Compute image tags
-        if: startsWith(github.ref, 'refs/tags/v')
+          }
+      - name: Require matching package versions
         run: |
-          echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          set -euo pipefail
+          for manifest in apps/cli/Cargo.toml apps/api/Cargo.toml apps/agent/Cargo.toml; do
+            grep -q "^version = \"${RELEASE_VERSION}\"$" "${manifest}" || {
+              echo "${manifest} does not match ${RELEASE_VERSION}" >&2
+              exit 1
+            }
+          done
+      - name: Compute legacy image tags
+        run: |
           echo "SHA_TAG=sha-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USERNAME: ShaneKanterman04
         run: echo "${GHCR_PAT}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
-      - name: Build and push release images
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          IMAGE_REGISTRY: ghcr.io/shanekanterman04
+      - name: Build and push legacy release images
         run: |
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            --label org.opencontainers.image.version="${RELEASE_TAG}" \
-            -f apps/api/Dockerfile \
-            -t "${IMAGE_REGISTRY}/hostlet-api:${RELEASE_TAG}" \
-            -t "${IMAGE_REGISTRY}/hostlet-api:${SHA_TAG}" \
-            .
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            --label org.opencontainers.image.version="${RELEASE_TAG}" \
-            -f apps/web/Dockerfile \
-            -t "${IMAGE_REGISTRY}/hostlet-web:${RELEASE_TAG}" \
-            -t "${IMAGE_REGISTRY}/hostlet-web:${SHA_TAG}" \
-            .
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            --label org.opencontainers.image.version="${RELEASE_TAG}" \
-            -f apps/agent/Dockerfile \
-            -t "${IMAGE_REGISTRY}/hostlet-agent:${RELEASE_TAG}" \
-            -t "${IMAGE_REGISTRY}/hostlet-agent:${SHA_TAG}" \
-            .
-          scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            --label org.opencontainers.image.version="${RELEASE_TAG}" \
-            -f apps/screenshotter/Dockerfile \
-            -t "${IMAGE_REGISTRY}/hostlet-screenshotter:${RELEASE_TAG}" \
-            -t "${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}" \
-            .
+          set -euo pipefail
+          for app in api web agent screenshotter; do
+            scripts/ci-docker-retry.sh docker buildx build --platform linux/amd64 --push \
+              --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+              --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+              --label org.opencontainers.image.version="${RELEASE_TAG}" \
+              -f "apps/${app}/Dockerfile" \
+              -t "${IMAGE_REGISTRY}/hostlet-${app}:${RELEASE_TAG}" \
+              -t "${IMAGE_REGISTRY}/hostlet-${app}:${SHA_TAG}" \
+              .
+          done
           HOSTLET_SCREENSHOTTER_TEST_IMAGE="${IMAGE_REGISTRY}/hostlet-screenshotter:${SHA_TAG}" \
-          HOSTLET_SCREENSHOTTER_SKIP_BUILD=1 \
-            scripts/ci-screenshotter-smoke.sh
-      - name: Capture release image digests
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          IMAGE_REGISTRY: ghcr.io/shanekanterman04
+          HOSTLET_SCREENSHOTTER_SKIP_BUILD=1 scripts/ci-screenshotter-smoke.sh
+      - name: Capture legacy image digests and assets
         run: |
+          set -euo pipefail
+          mkdir -p dist
           for image in hostlet-api hostlet-web hostlet-agent hostlet-screenshotter; do
             digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}")"
-            if [[ ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-              echo "failed to capture registry digest for ${IMAGE_REGISTRY}/${image}:${RELEASE_TAG}: ${digest}" >&2
+            [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+              echo "invalid image digest: ${digest}" >&2
               exit 1
-            fi
+            }
             key="$(printf '%s' "${image}" | tr '[:lower:]-' '[:upper:]_')"
             echo "${key}_DIGEST=${digest}" >> "$GITHUB_ENV"
           done
-      - run: |
-          mkdir -p dist
           cp target/release/hostlet dist/hostlet-linux-x64
           chmod +x dist/hostlet-linux-x64
-          cd dist
-          sha256sum hostlet-linux-x64 > hostlet-linux-x64.sha256
-          VERSION="${GITHUB_REF_NAME#v}"
-          IMAGE_TAG="${GITHUB_REF_NAME}"
-          CHECKSUM="$(cut -d ' ' -f 1 hostlet-linux-x64.sha256)"
-          RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          cat > hostlet-release.json <<EOF
+          sha256sum dist/hostlet-linux-x64 | sed 's#dist/##' > dist/hostlet-linux-x64.sha256
+          checksum="$(cut -d ' ' -f 1 dist/hostlet-linux-x64.sha256)"
+          cat > dist/hostlet-release.json <<EOF
           {
-            "version": "${VERSION}",
-            "released_at": "${RELEASED_AT}",
+            "version": "${RELEASE_VERSION}",
+            "released_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "minimum_supported_version": "0.1.0",
-            "image_registry": "ghcr.io/shanekanterman04",
-            "image_tag": "${IMAGE_TAG}",
+            "image_registry": "${IMAGE_REGISTRY}",
+            "image_tag": "${RELEASE_TAG}",
             "images": {
-              "api": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-api@${HOSTLET_API_DIGEST:-}",
-                "digest": "${HOSTLET_API_DIGEST:-}"
-              },
-              "web": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-web@${HOSTLET_WEB_DIGEST:-}",
-                "digest": "${HOSTLET_WEB_DIGEST:-}"
-              },
-              "agent": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-agent@${HOSTLET_AGENT_DIGEST:-}",
-                "digest": "${HOSTLET_AGENT_DIGEST:-}"
-              },
-              "screenshotter": {
-                "ref": "ghcr.io/shanekanterman04/hostlet-screenshotter@${HOSTLET_SCREENSHOTTER_DIGEST:-}",
-                "digest": "${HOSTLET_SCREENSHOTTER_DIGEST:-}"
-              }
+              "api": {"ref": "${IMAGE_REGISTRY}/hostlet-api@${HOSTLET_API_DIGEST}", "digest": "${HOSTLET_API_DIGEST}"},
+              "web": {"ref": "${IMAGE_REGISTRY}/hostlet-web@${HOSTLET_WEB_DIGEST}", "digest": "${HOSTLET_WEB_DIGEST}"},
+              "agent": {"ref": "${IMAGE_REGISTRY}/hostlet-agent@${HOSTLET_AGENT_DIGEST}", "digest": "${HOSTLET_AGENT_DIGEST}"},
+              "screenshotter": {"ref": "${IMAGE_REGISTRY}/hostlet-screenshotter@${HOSTLET_SCREENSHOTTER_DIGEST}", "digest": "${HOSTLET_SCREENSHOTTER_DIGEST}"}
             },
-            "assets": {
-              "hostlet-linux-x64": {
-                "sha256": "${CHECKSUM}"
-              }
-            },
+            "assets": {"hostlet-linux-x64": {"sha256": "${checksum}"}},
             "compose_migrations": true,
             "database_migrations": true,
-            "notes_url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+            "notes_url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           }
           EOF
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            # The JavaScript template literal must not expand in the shell.
-            # shellcheck disable=SC2016
-            node -e '
-              const fs = require("fs");
-              const manifest = JSON.parse(fs.readFileSync("hostlet-release.json", "utf8"));
-              for (const [name, image] of Object.entries(manifest.images)) {
-                if (!/^sha256:[a-f0-9]{64}$/.test(image.digest || "")) {
-                  throw new Error(`missing valid digest for ${name}`);
-                }
-              }
-            '
-          fi
       - name: Sign checksum
         if: env.HOSTLET_RELEASE_GPG_PRIVATE_KEY != ''
         env:
           HOSTLET_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.HOSTLET_RELEASE_GPG_PRIVATE_KEY }}
           HOSTLET_RELEASE_GPG_PASSPHRASE: ${{ secrets.HOSTLET_RELEASE_GPG_PASSPHRASE }}
         run: |
+          set -euo pipefail
           install -m 700 -d ~/.gnupg
-          printf '%s' "$HOSTLET_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
-          for checksum in dist/hostlet-linux-x64.sha256; do
-            gpg --batch --yes --pinentry-mode loopback \
-              --passphrase "$HOSTLET_RELEASE_GPG_PASSPHRASE" \
-              --armor --detach-sign "$checksum"
-          done
+          printf '%s' "${HOSTLET_RELEASE_GPG_PRIVATE_KEY}" | gpg --batch --import
+          gpg --batch --yes --pinentry-mode loopback \
+            --passphrase "${HOSTLET_RELEASE_GPG_PASSPHRASE}" \
+            --armor --detach-sign dist/hostlet-linux-x64.sha256
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
         with:
           file: dist/hostlet-linux-x64
@@ -257,7 +593,8 @@ jobs:
             dist/hostlet-linux-x64.spdx.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: hostlet-linux-x64
+          name: hostlet-linux-x64-legacy
+          if-no-files-found: error
           path: |
             dist/hostlet-linux-x64
             dist/hostlet-linux-x64.sha256
@@ -265,8 +602,8 @@ jobs:
             dist/hostlet-release.json
             dist/hostlet-linux-x64.spdx.json
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
-        if: startsWith(github.ref, 'refs/tags/')
         with:
+          tag_name: ${{ needs.release-source.outputs.release_tag }}
           generate_release_notes: true
           files: |
             dist/hostlet-linux-x64

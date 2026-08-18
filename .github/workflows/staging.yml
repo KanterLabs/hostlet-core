@@ -2,8 +2,8 @@ name: Staging
 
 # Push to the always-alive `staging` branch -> build moving staging images and
 # open a hostlet-cloud pin PR for this exact Core tip after publication succeeds.
-# No version-match gate here: staging tracks the branch, not a release tag. The
-# vX.Y.Z release path (release.yml) is unchanged and remains the only tagged build.
+# No version-match gate here: staging tracks the branch, not a release tag.
+# Release-only proof is dispatched separately for an explicitly selected SHA.
 
 on:
   push:

@@ -1,9 +1,17 @@
 name: PR Homelab CI
 
+# The release-candidate aggregate is intentionally owned by this
+# pull_request_target workflow. It checks the exact live PR head and loads
+# only base-owned validation code. Bootstrap: a newly added
+# pull_request_target workflow cannot run until it exists on the default
+# branch, so its first PR must be validated by the existing branch checks.
+
 on:
   pull_request_target:
     types:
+      - opened
       - labeled
+      - unlabeled
       - synchronize
       - reopened
 
@@ -37,7 +45,7 @@ jobs:
             "https://api.github.com/repos/${REPO}/issues/${ISSUE}/labels/homelab-ci-approved"
 
   secrets:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
     runs-on: homelab
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -50,7 +58,7 @@ jobs:
       - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --config=/repo/.gitleaks.toml --redact --verbose
 
   rust:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
     runs-on: homelab-heavy
     env:
       CARGO_BUILD_JOBS: "8"
@@ -62,6 +70,8 @@ jobs:
           persist-credentials: false
       - run: scripts/ci-verify-runner.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - run: scripts/check-line-cap.sh
       - run: scripts/check-line-cap-selftest.sh
@@ -77,7 +87,7 @@ jobs:
       - run: cargo test --workspace
 
   web:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
     runs-on: homelab-heavy
     defaults:
       run:
@@ -100,7 +110,7 @@ jobs:
       - run: ../../scripts/ci-security-artifact-smoke.sh
 
   compose:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
     runs-on: homelab
     env:
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
@@ -134,7 +144,7 @@ jobs:
       - run: docker compose -f infra/docker-compose.prod.yml config >/dev/null
 
   docker:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
     runs-on: homelab-heavy
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -149,7 +159,7 @@ jobs:
       - run: scripts/ci-screenshotter-smoke.sh
 
   remote-build:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
     runs-on: homelab-heavy
     env:
       CARGO_BUILD_JOBS: "8"
@@ -163,3 +173,45 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - run: scripts/ci-remote-build-e2e.sh
+
+  release-candidate-gate:
+    name: release-candidate-gate
+    if: always()
+    needs: [clear-approval, secrets, rust, web, compose, docker, remote-build]
+    runs-on: homelab
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out base-owned release evidence evaluator
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .hostlet-release-evidence
+          sparse-checkout: |
+            /scripts/ci-release-evidence.py
+            /scripts/release-candidate.py
+            /scripts/ci-verify-runner.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - run: scripts/ci-verify-runner.sh
+        working-directory: .hostlet-release-evidence
+      - name: Require exact release evidence or truthful ordinary PR lanes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_LABEL: ${{ github.event.label.name }}
+          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HOSTLET_PR_RESULTS_JSON: ${{ toJSON(needs) }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          HOSTLET_APPROVAL_LABEL: homelab-ci-approved
+          HOSTLET_RELEASE_EVIDENCE_MODE: pr
+        run: python3 .hostlet-release-evidence/scripts/ci-release-evidence.py
