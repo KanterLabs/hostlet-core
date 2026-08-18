@@ -66,6 +66,8 @@ jobs:
       release_version: ${{ steps.resolve.outputs.release_version }}
       candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
       candidate_run_id: ${{ steps.resolve.outputs.candidate_run_id }}
+      publication_sha: ${{ steps.resolve.outputs.publication_sha }}
+      publication_tree: ${{ steps.resolve.outputs.publication_tree }}
     steps:
       - name: Check out the release ref
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -132,12 +134,40 @@ jobs:
               exit 1
             fi
           fi
+          if [ "${EVENT_NAME}" = workflow_dispatch ]; then
+            # A dispatch is published against the exact current main tip, not
+            # the SHA captured when the workflow was queued.  The candidate
+            # must already be reachable from that tip and have the same tree;
+            # otherwise the sealed bytes would describe a different source.
+            git fetch --quiet --no-tags --prune origin \
+              '+refs/heads/main:refs/remotes/origin/main'
+            publication_sha="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+            publication_tree="$(git rev-parse --verify 'refs/remotes/origin/main^{tree}')"
+            candidate_commit="$(git rev-parse --verify "${candidate_sha}^{commit}")"
+            candidate_tree="$(git rev-parse --verify "${candidate_sha}^{tree}")"
+            if ! git merge-base --is-ancestor "${candidate_commit}" "${publication_sha}"; then
+              echo "candidate ${candidate_sha} is not reachable from current main ${publication_sha}" >&2
+              exit 1
+            fi
+            if [ "${candidate_tree}" != "${publication_tree}" ]; then
+              echo "candidate tree ${candidate_tree} does not match current main tree ${publication_tree}" >&2
+              exit 1
+            fi
+          else
+            # A tag push is already bound to its exact tag target.  Keep that
+            # target as publication identity while the mainline gate proves it
+            # is safely reachable from origin/main.
+            publication_sha="$(git rev-parse --verify "${candidate_sha}^{commit}")"
+            publication_tree="$(git rev-parse --verify "${candidate_sha}^{tree}")"
+          fi
           {
             echo "release_mode=${mode}"
             echo "release_tag=${release_tag}"
             echo "release_version=${release_tag#v}"
             echo "candidate_sha=${candidate_sha}"
             echo "candidate_run_id=${candidate_run_id}"
+            echo "publication_sha=${publication_sha}"
+            echo "publication_tree=${publication_tree}"
           } >> "${GITHUB_OUTPUT}"
 
   # These jobs are emergency-only.  Neither a tag push nor a normal candidate
@@ -183,6 +213,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       CANDIDATE_SHA: ${{ needs.release-source.outputs.candidate_sha }}
+      PUBLICATION_SHA: ${{ needs.release-source.outputs.publication_sha }}
+      PUBLICATION_TREE: ${{ needs.release-source.outputs.publication_tree }}
       RELEASE_TAG: ${{ needs.release-source.outputs.release_tag }}
       RELEASE_VERSION: ${{ needs.release-source.outputs.release_version }}
       CANDIDATE_RUN_INPUT: ${{ needs.release-source.outputs.candidate_run_id }}
@@ -280,6 +312,10 @@ jobs:
             exit 1
           fi
           candidate_tree="$(git rev-parse HEAD^{tree})"
+          if [ "${candidate_tree}" != "${PUBLICATION_TREE}" ]; then
+            echo "candidate tree ${candidate_tree} does not match publication tree ${PUBLICATION_TREE}" >&2
+            exit 1
+          fi
           python3 scripts/release-candidate.py validate \
             --input candidate/core-release-candidate.json \
             --expected-sha "${CANDIDATE_SHA}" \
@@ -395,6 +431,8 @@ jobs:
                   "fingerprint": receipt["fingerprint"],
               },
               "publication": {
+                  "commit_sha": os.environ["PUBLICATION_SHA"],
+                  "tree_sha": os.environ["PUBLICATION_TREE"],
                   "run_id": int(os.environ["GITHUB_RUN_ID"]),
                   "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
                   "workflow": "release.yml",
@@ -413,7 +451,7 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: ${{ needs.release-source.outputs.release_tag }}
-          target_commitish: ${{ needs.release-source.outputs.candidate_sha }}
+          target_commitish: ${{ needs.release-source.outputs.publication_sha }}
           generate_release_notes: true
           files: |
             dist/hostlet-linux-x64
