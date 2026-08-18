@@ -878,6 +878,8 @@ assert_contains "${RELEASE_EVIDENCE}" '--expected-staging-run-id'
 assert_contains "${RELEASE_EVIDENCE}" '--expected-candidate-run-id'
 assert_contains "${RELEASE_EVIDENCE}" 'GITHUB_EVENT_NAME'
 assert_contains "${RELEASE_EVIDENCE}" 'merge_commit_sha'
+assert_contains "${RELEASE_EVIDENCE}" 'fetch_commit_tree'
+assert_contains "${RELEASE_EVIDENCE}" '!= tree_sha'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'ordinary-approved-pr-skipped-old-job'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'missing-artifact'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'stale-artifact'
@@ -885,6 +887,52 @@ assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'mismatched-staging-head'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'detect_main_reuse'
 
 PYTHONDONTWRITEBYTECODE=1 python3 "${RELEASE_EVIDENCE_SELFTEST}"
+
+python3 - "${CI_WORKFLOW}" "${FULL_CI_WORKFLOW}" "${STAGING_DEPLOYABILITY}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+for path_text in sys.argv[1:]:
+    path = Path(path_text)
+    workflow = path.read_text()
+    detector = re.search(
+        r"^  release-evidence:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        workflow,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not detector:
+        raise SystemExit(f"{path} is missing release-evidence detector")
+    detector_body = detector.group("body")
+    for marker in (
+        "    runs-on: homelab\n",
+        "actions: read",
+        "HOSTLET_RELEASE_EVIDENCE_MODE: main",
+        "github.event.before",
+        "reuse_heavy: ${{ steps.detect.outputs.reuse_heavy }}",
+        "scripts/ci-release-evidence.py",
+        "trusted release evidence evaluator is absent on the pre-push base",
+        'echo "reuse_heavy=false" >> "${GITHUB_OUTPUT}"',
+    ):
+        if marker not in detector_body:
+            raise SystemExit(f"{path} release-evidence detector missing {marker}")
+    jobs_section = workflow.split("\njobs:\n", 1)[1]
+    jobs = re.findall(r"^  ([a-zA-Z0-9_-]+):\n", jobs_section, re.MULTILINE)
+    for name in jobs:
+        if name in {"release-evidence", "self-hosted-api"}:
+            continue
+        body_match = re.search(
+            rf"^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        body = body_match.group("body") if body_match else ""
+        if "runs-on: homelab-heavy\n" in body:
+            if "needs: [release-evidence]\n" not in body:
+                raise SystemExit(f"{path} heavy job {name} does not wait for release evidence")
+            if "needs.release-evidence.outputs.reuse_heavy != 'true'" not in body:
+                raise SystemExit(f"{path} heavy job {name} does not gate reuse")
+PY
 
 for workflow in "${CI_WORKFLOW}" "${FULL_CI_WORKFLOW}" "${STAGING_DEPLOYABILITY}" "${PR_WORKFLOW}"; do
   python3 - "${workflow}" <<'PY'
