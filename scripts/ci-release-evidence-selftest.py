@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 from datetime import datetime, timezone
@@ -102,6 +103,47 @@ expect_failure("skipped-staging-run", lambda: select([artifact()], successful_ru
 expect_failure("cancelled-staging-run", lambda: select([artifact()], successful_run(conclusion="cancelled")))
 expect_failure("mismatched-staging-head", lambda: select([artifact()], successful_run(head_sha=PUSH)))
 assert select([artifact()])[1] == RUN_ID
+
+
+# The GitHub Contents API wraps base64 payloads across lines.  Release PR
+# evidence must accept that transport format without weakening base64 checks.
+manifest_text = 'version = "0.2.25"\n'
+manifest_base64 = base64.b64encode(manifest_text.encode("utf-8")).decode("ascii")
+wrapped_manifest_base64 = "\n".join(
+    manifest_base64[offset : offset + 8]
+    for offset in range(0, len(manifest_base64), 8)
+)
+source_responses = iter(
+    [
+        {"sha": HEAD, "commit": {"tree": {"sha": TREE}}},
+        *(
+            {"encoding": "base64", "content": wrapped_manifest_base64}
+            for _manifest in range(3)
+        ),
+    ]
+)
+with mock.patch.object(evidence, "_json_request", side_effect=lambda *_args, **_kwargs: next(source_responses)):
+    assert evidence.fetch_source_version_and_tree(
+        {"GITHUB_REPOSITORY": "KanterLabs/hostlet-core"}, HEAD
+    ) == (TREE, "0.2.25")
+
+invalid_source_responses = iter(
+    [
+        {"sha": HEAD, "commit": {"tree": {"sha": TREE}}},
+        {"encoding": "base64", "content": "not base64!"},
+    ]
+)
+with mock.patch.object(
+    evidence,
+    "_json_request",
+    side_effect=lambda *_args, **_kwargs: next(invalid_source_responses),
+):
+    expect_failure(
+        "invalid-source-base64",
+        lambda: evidence.fetch_source_version_and_tree(
+            {"GITHUB_REPOSITORY": "KanterLabs/hostlet-core"}, HEAD
+        ),
+    )
 
 
 release_pull = {

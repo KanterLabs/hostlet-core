@@ -335,8 +335,13 @@ def fetch_source_version_and_tree(
         )
         if not isinstance(content, dict) or content.get("encoding") != "base64":
             raise EvidenceFailure(f"{manifest} content API response is malformed")
+        encoded = content.get("content")
+        if not isinstance(encoded, str):
+            raise EvidenceFailure(f"{manifest} content API response is malformed")
         try:
-            text = base64.b64decode(content.get("content", ""), validate=True).decode("utf-8")
+            # GitHub wraps Contents API base64 at fixed-width lines.  Strip
+            # only whitespace, then retain strict alphabet/padding validation.
+            text = base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             raise EvidenceFailure(f"{manifest} content is not valid base64 UTF-8") from exc
         match = re.search(r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"$', text, re.MULTILINE)
