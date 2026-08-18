@@ -914,7 +914,9 @@ assert_contains "${RELEASE_EVIDENCE}" '!= tree_sha'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'ordinary-approved-pr-skipped-old-job'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'missing-artifact'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'stale-artifact'
-assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'mismatched-staging-head'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'mismatched-candidate-head'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'staging-run-cannot-own-candidate-artifact'
+assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'candidate-run-cannot-satisfy-staging-proof'
 assert_contains "${RELEASE_EVIDENCE_SELFTEST}" 'detect_main_reuse'
 
 PYTHONDONTWRITEBYTECODE=1 python3 "${RELEASE_EVIDENCE_SELFTEST}"

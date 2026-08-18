@@ -256,7 +256,7 @@ def select_latest_artifact(
     now: datetime,
     run_fetcher: Callable[[int], Mapping[str, Any]],
 ) -> tuple[Mapping[str, Any], int]:
-    """Select the newest fresh artifact whose staging run is exact and successful."""
+    """Select the newest fresh artifact from an exact successful candidate run."""
 
     expected_sha = require_sha(expected_sha, "expected candidate SHA")
     if not isinstance(artifacts, list):
@@ -284,7 +284,7 @@ def select_latest_artifact(
             run.get("status") != "completed"
             or run.get("conclusion") != "success"
             or run.get("head_branch") != "staging"
-            or run.get("path") != ".github/workflows/staging.yml"
+            or run.get("path") != ".github/workflows/release-candidate.yml"
             or str(run.get("head_sha", "")).lower() != expected_sha
         ):
             continue
@@ -292,7 +292,7 @@ def select_latest_artifact(
     if not ranked:
         if stale == len(candidates):
             raise EvidenceFailure("all core-release-candidate artifacts are stale or expired")
-        raise EvidenceFailure("no successful exact-head staging run owns a candidate artifact")
+        raise EvidenceFailure("no successful exact-head candidate run owns a candidate artifact")
     ranked.sort(key=lambda item: item[0], reverse=True)
     _, artifact, run_id = ranked[0]
     return artifact, run_id
@@ -315,6 +315,40 @@ def fetch_run(environment: Mapping[str, str], run_id: int) -> Mapping[str, Any]:
     if not isinstance(payload, dict):
         raise EvidenceFailure("workflow run API response is malformed")
     return payload
+
+
+def receipt_workflow_run_ids(receipt: bytes) -> tuple[int, int]:
+    """Return the sealed receipt's staging and candidate workflow run IDs."""
+
+    try:
+        payload = json.loads(receipt)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceFailure("candidate receipt is not valid JSON") from exc
+    staging_run_id = require_run_id(
+        nested(payload, "workflows", "staging", "run_id"),
+        "candidate receipt staging run ID",
+    )
+    candidate_run_id = require_run_id(
+        nested(payload, "workflows", "candidate", "run_id"),
+        "candidate receipt candidate run ID",
+    )
+    return staging_run_id, candidate_run_id
+
+
+def validate_staging_run(run: Mapping[str, Any], *, run_id: int, expected_sha: str) -> None:
+    """Require the receipt's staging run to be the exact successful producer."""
+
+    observed_id = require_run_id(run.get("id"), "staging workflow run ID")
+    if observed_id != run_id:
+        raise EvidenceFailure("staging workflow run ID changed during validation")
+    if (
+        run.get("status") != "completed"
+        or run.get("conclusion") != "success"
+        or run.get("head_branch") != "staging"
+        or run.get("path") != ".github/workflows/staging.yml"
+        or str(run.get("head_sha", "")).lower() != expected_sha
+    ):
+        raise EvidenceFailure("candidate receipt staging run is not an exact successful producer")
 
 
 def fetch_source_version_and_tree(
@@ -392,13 +426,21 @@ def validate_candidate_artifact(
     now: datetime,
 ) -> None:
     artifacts = fetch_artifacts(environment)
-    artifact, run_id = select_latest_artifact(
+    artifact, candidate_run_id = select_latest_artifact(
         artifacts,
         expected_sha=expected_sha,
         now=now,
         run_fetcher=lambda candidate_run_id: fetch_run(environment, candidate_run_id),
     )
     receipt = _receipt_from_archive(environment, artifact)
+    staging_run_id, receipt_candidate_run_id = receipt_workflow_run_ids(receipt)
+    if receipt_candidate_run_id != candidate_run_id:
+        raise EvidenceFailure("candidate receipt does not belong to its artifact workflow run")
+    validate_staging_run(
+        fetch_run(environment, staging_run_id),
+        run_id=staging_run_id,
+        expected_sha=expected_sha,
+    )
     validator = Path(__file__).with_name("release-candidate.py")
     if not validator.is_file():
         raise EvidenceFailure("authoritative release-candidate validator is missing")
@@ -418,9 +460,9 @@ def validate_candidate_artifact(
             "--expected-version",
             expected_version,
             "--expected-staging-run-id",
-            str(run_id),
+            str(staging_run_id),
             "--expected-candidate-run-id",
-            str(run_id),
+            str(candidate_run_id),
             "--max-age-seconds",
             str(MAX_AGE_SECONDS),
             "--now",
