@@ -106,10 +106,17 @@ assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '--expected-tree'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '--expected-version'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'name: core-release-candidate'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'retention-days: 14'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'HOSTLET_DB_TEST_REQUIRED: "1"'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'Long-running lease heartbeat regression'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'cargo test --package hostlet-api --lib'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'db_long_running_build_heartbeat_renews_lease_without_duplicate_claim'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" '"lease_heartbeat":"success"'
 assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'certify-candidate:'
 assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'candidate_sha":'
 assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'docker build'
-assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'cargo test'
+assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'cargo test --workspace'
+assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'cargo test --all-targets'
+assert_not_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'cargo test --all-features'
 assert_contains "${RELEASE_WORKFLOW}" 'candidate_max_age_seconds:'
 assert_contains "${RELEASE_WORKFLOW}" 'Publish ${{ inputs.release_version || github.ref_name }} from'
 assert_contains "${RELEASE_WORKFLOW}" '${{ inputs.candidate_sha || github.sha }}'
@@ -437,6 +444,12 @@ if "scripts/ci-self-hosted-api-smoke.sh" not in tests or "scripts/ci-self-hosted
     raise SystemExit("candidate-tests must run API and deploy E2E")
 if "scripts/ci-install-railpack.sh" not in tests:
     raise SystemExit("candidate-tests must cover Railpack")
+if "cargo test --package hostlet-api --lib" not in tests or "db_long_running_build_heartbeat_renews_lease_without_duplicate_claim" not in tests:
+    raise SystemExit("candidate-tests must run the focused lease-heartbeat regression")
+if "cargo test --workspace" in tests:
+    raise SystemExit("candidate-tests must not duplicate the full workspace test suite")
+if '"lease_heartbeat":"success"' not in tests or '["lease_heartbeat"]' not in seal:
+    raise SystemExit("candidate seal must require lease-heartbeat evidence")
 if "--expected-sha" not in seal or "--expected-tree" not in seal or "--expected-version" not in seal:
     raise SystemExit("seal-candidate must bind all expected receipt identities")
 if 'name: core-release-candidate' not in seal or 'retention-days: 14' not in seal:

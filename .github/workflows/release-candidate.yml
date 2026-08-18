@@ -203,6 +203,21 @@ jobs:
       contents: read
     env:
       CARGO_BUILD_JOBS: "8"
+      HOSTLET_DB_TEST_REQUIRED: "1"
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_USER: hostlet_ci
+          POSTGRES_PASSWORD: hostlet-ci-test-password
+          POSTGRES_DB: hostlet_ci_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U hostlet_ci -d hostlet_ci_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Check out the candidate commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -214,6 +229,13 @@ jobs:
       - name: Use runner's cached rustup
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - name: Long-running lease heartbeat regression
+        env:
+          HOSTLET_DB_TEST_URL: postgresql://hostlet_ci:hostlet-ci-test-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/hostlet_ci_test
+        run: |
+          cargo test --package hostlet-api --lib \
+            agent::tests::authority::db_long_running_build_heartbeat_renews_lease_without_duplicate_claim \
+            -- --exact --test-threads=1
       - name: Release-only API smoke
         run: scripts/ci-self-hosted-api-smoke.sh
       - name: Release-only Railpack fixtures
@@ -226,7 +248,7 @@ jobs:
       - name: Record candidate test evidence
         run: |
           mkdir -p candidate-tests
-          printf '{"api":"success","railpack":"success","deploy_e2e":"success"}\n' \
+          printf '{"api":"success","lease_heartbeat":"success","railpack":"success","deploy_e2e":"success"}\n' \
             > candidate-tests/result.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -409,6 +431,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["api"])')" = success
+          test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["lease_heartbeat"])')" = success
           test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["railpack"])')" = success
           test "$(python3 -c 'import json; print(json.load(open("candidate-tests/result.json"))["deploy_e2e"])')" = success
           test -x candidate-artifacts/hostlet-linux-x64
