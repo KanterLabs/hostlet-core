@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-18T09:38:49Z",
-  "generated_from_commit": "1d45fbace3dd3ad9f0408ffbb788ee7830f77abf",
+  "generated_at": "2026-08-18T10:06:57Z",
+  "generated_from_commit": "fc01c07042d3e83eb6c145fe1568ec702f992ec3",
   "scope": [
     "apps/api",
     "apps/agent",
