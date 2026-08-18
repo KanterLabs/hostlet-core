@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-18T07:56:31Z",
-  "generated_from_commit": "4c693c551827b484642fc2190a994f6962c58fe5",
+  "generated_at": "2026-08-18T09:38:49Z",
+  "generated_from_commit": "1d45fbace3dd3ad9f0408ffbb788ee7830f77abf",
   "algorithm": "sha256",
   "fingerprint_algorithm": "sha256 / codemap-fingerprint-v1",
   "working_tree_has_uncommitted_changes": false,
@@ -79,8 +79,8 @@
     },
     {
       "id": "scripts",
-      "file_count": 43,
-      "fingerprint": "19851595b41df494f133db350f353c27ea3fd551ecfe019ae55a85d823400286"
+      "file_count": 44,
+      "fingerprint": "5ad94323acc044d7e3472f99e66d7da9e9a143107e9b055cae20cc87c6962618"
     },
     {
       "id": "docs",
@@ -90,7 +90,7 @@
     {
       "id": ".github",
       "file_count": 17,
-      "fingerprint": "65985f1b170d28448d953ad24bedced24c73f29ecff4a9d561c2d4da493c4e96"
+      "fingerprint": "a97920035aced425d7c04014cbfd130a7bd3aa3c724d3da4e520dd151930ab3b"
     },
     {
       "id": "repository-root",
@@ -106,9 +106,9 @@
     "apps/web": "22c1040efdcc2c3cbd7e584d61ab002c859f50f3a859640ca90b16149c4db7d9",
     "crates/contracts": "a3dafe87002bb59f321807835ef1a9b27a8077c781c5da2eed33925e9e8ca805",
     "infra": "0b8147bcdf474c39a1497437f3340952564f1bd91b9e748674c6fb7a286c5acb",
-    "scripts": "19851595b41df494f133db350f353c27ea3fd551ecfe019ae55a85d823400286",
+    "scripts": "5ad94323acc044d7e3472f99e66d7da9e9a143107e9b055cae20cc87c6962618",
     "docs": "f3a20b580367cfb9fb406b0264d80ee52e514129320a5a2ae9250cd0d9cec101",
-    ".github": "65985f1b170d28448d953ad24bedced24c73f29ecff4a9d561c2d4da493c4e96",
+    ".github": "a97920035aced425d7c04014cbfd130a7bd3aa3c724d3da4e520dd151930ab3b",
     "repository-root": "5a8fd5b160902223e89d27b3ca7053163d750cb1ba4d1b465d10955e06bbb5ba"
   },
   "module_file_counts": {
@@ -119,11 +119,11 @@
     "apps/web": 98,
     "crates/contracts": 17,
     "infra": 6,
-    "scripts": 43,
+    "scripts": 44,
     "docs": 11,
     ".github": 17,
     "repository-root": 14
   },
-  "total_file_count": 384,
-  "fingerprint": "ae65b2a4424d3d1b28ccd7fbe9e434bf5108fe5c103a620b75922475d5599c21"
+  "total_file_count": 385,
+  "fingerprint": "88065f0329c4a3cbd0cfc19b5c4fccf83e9e2b07a3f197884d1364b46489b293"
 }
