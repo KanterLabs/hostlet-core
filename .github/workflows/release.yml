@@ -391,6 +391,11 @@ jobs:
                   "run_id": receipt["workflows"]["candidate"]["run_id"],
                   "fingerprint": receipt["fingerprint"],
               },
+              "publication": {
+                  "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "workflow": "release.yml",
+              },
               "compose_migrations": True,
               "database_migrations": True,
               "notes_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/{os.environ['RELEASE_TAG']}",
