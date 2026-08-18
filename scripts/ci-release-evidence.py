@@ -348,6 +348,15 @@ def fetch_source_version_and_tree(
     return tree_sha, versions[0]
 
 
+def fetch_commit_tree(environment: Mapping[str, str], expected_sha: str) -> str:
+    repository = _repository(environment)
+    expected_sha = require_sha(expected_sha, "expected merge SHA")
+    commit = _json_request(environment, f"repos/{repository}/commits/{expected_sha}")
+    if not isinstance(commit, dict) or str(commit.get("sha", "")).lower() != expected_sha:
+        raise EvidenceFailure("merge commit API did not return the exact push SHA")
+    return require_sha(nested(commit, "commit", "tree", "sha"), "merged tree")
+
+
 def _receipt_from_archive(environment: Mapping[str, str], artifact: Mapping[str, Any]) -> bytes:
     artifact_id = require_run_id(artifact.get("id"), "candidate artifact ID")
     archive = _bytes_request(
@@ -479,6 +488,8 @@ def detect_main_reuse(environment: Mapping[str, str]) -> bool:
         return False
     tree_sha, source_version = fetch_source_version_and_tree(environment, head_sha)
     if source_version != version:
+        return False
+    if fetch_commit_tree(environment, push_sha) != tree_sha:
         return False
     validate_candidate_artifact(
         environment,
