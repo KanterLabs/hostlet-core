@@ -434,6 +434,8 @@ artifacts = re.search(r"^  candidate-artifacts:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-
 seal = re.search(r"^  seal-candidate:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL).group("body")
 if "staging_sha" not in verify or "staging_run_id" not in verify:
     raise SystemExit("verify-staging must accept exact SHA and run inputs")
+if not re.search(r"- name: Verify runner and exact staging run\n\s+id: resolve\n", verify):
+    raise SystemExit("verify-staging output producer must retain id: resolve")
 if "needs: [verify-staging]" not in tests or "needs: [verify-staging]" not in artifacts:
     raise SystemExit("candidate tests/artifacts must run in parallel after verify-staging")
 if "needs: [verify-staging, candidate-tests, candidate-artifacts]" not in seal:
