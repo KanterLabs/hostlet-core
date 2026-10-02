@@ -65,7 +65,7 @@ jobs:
 
   web:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab-heavy
+    runs-on: homelab
     defaults:
       run:
         working-directory: apps/web
