@@ -8,11 +8,12 @@ permissions:
 
 jobs:
   database:
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       CARGO_BUILD_JOBS: "2"
-      HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+      HOSTLET_EXPECTED_RUNNER_OS: Linux
+      HOSTLET_EXPECTED_RUNNER_ARCH: X64
       HOSTLET_DB_TEST_REQUIRED: "1"
     services:
       postgres:

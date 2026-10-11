@@ -13,7 +13,7 @@ STAGING_DEPLOYABILITY="${ROOT}/.github/workflows/deployability.yml"
 FULL_CI_WORKFLOW="${ROOT}/.github/workflows/full-ci.yml"
 RELEASE_WORKFLOW="${ROOT}/.github/workflows/release.yml"
 RELEASE_CANDIDATE_WORKFLOW="${ROOT}/.github/workflows/release-candidate.yml"
-PREWARM_WORKFLOW="${ROOT}/.github/workflows/runner-fleet-prewarm.yml"
+
 DATABASE_WORKFLOW="${ROOT}/.github/workflows/database-tests.yml"
 ACTIONLINT_CONFIG="${ROOT}/.github/actionlint.yaml"
 RELEASE_MAINLINE_GATE="${ROOT}/scripts/ci-release-mainline-gate.sh"
@@ -64,7 +64,7 @@ assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-verify-runner-selftest.sh'
 assert_contains "${STAGING_WORKFLOW}" 'scripts/ci-self-hosted-lib-selftest.sh'
 assert_contains "${STAGING_WORKFLOW}" 'bash scripts/ci-db-tests-selftest.sh'
 assert_contains "${STAGING_WORKFLOW}" 'bash scripts/ci-release-mainline-gate-selftest.sh'
-assert_contains "${STAGING_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
+assert_contains "${STAGING_WORKFLOW}" 'HOSTLET_EXPECTED_RUNNER_OS: Linux'
 assert_contains "${STAGING_WORKFLOW}" 'uses: ./.github/workflows/database-tests.yml'
 assert_contains "${STAGING_WORKFLOW}" 'needs: [secrets, rust, database, web, topology-e2e, remote-build]'
 assert_contains "${STAGING_WORKFLOW}" 'GHCR_PAT: ${{ secrets.GHCR_PAT }}'
@@ -88,7 +88,7 @@ assert_not_contains "${STAGING_WORKFLOW}" 'actions/checkout@v4'
 assert_not_contains "${STAGING_WORKFLOW}" 'dtolnay/rust-toolchain@stable'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'workflow_call:'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'workflow_dispatch:'
-assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'runs-on: homelab'
+assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'runs-on: ubuntu-24.04'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'candidate-tests:'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'candidate-artifacts:'
 assert_contains "${RELEASE_CANDIDATE_WORKFLOW}" 'seal-candidate:'
@@ -163,7 +163,7 @@ for action in re.findall(r"^\s+uses:\s+([^\s]+)$", workflow, re.MULTILINE):
     if "@" not in action or not re.fullmatch(r"[0-9a-f]{40}", action.rsplit("@", 1)[1]):
         raise SystemExit(f"release action is not full-SHA pinned: {action}")
 PY
-assert_contains "${CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
+assert_contains "${CI_WORKFLOW}" 'HOSTLET_EXPECTED_RUNNER_OS: Linux'
 assert_contains "${CI_WORKFLOW}" 'uses: ./.github/workflows/database-tests.yml'
 assert_contains "${CI_WORKFLOW}" 'bash scripts/ci-db-tests-selftest.sh'
 assert_contains "${CI_WORKFLOW}" 'bash scripts/ci-release-mainline-gate-selftest.sh'
@@ -172,7 +172,7 @@ assert_contains "${PR_WORKFLOW}" 'pull_request_target:'
 assert_contains "${PR_WORKFLOW}" 'scripts/ci-self-hosted-lib-selftest.sh'
 assert_contains "${PR_WORKFLOW}" "homelab-ci-approved"
 assert_contains "${PR_WORKFLOW}" 'bash scripts/ci-backup-selftest.sh'
-assert_contains "${PR_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
+assert_contains "${PR_WORKFLOW}" 'HOSTLET_EXPECTED_RUNNER_OS: Linux'
 assert_contains "${PR_WORKFLOW}" 'persist-credentials: false'
 assert_contains "${PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
 assert_contains "${PR_WORKFLOW}" 'components: rustfmt, clippy'
@@ -185,7 +185,7 @@ assert_contains "${STAGING_PR_WORKFLOW}" 'fork PRs fail the same-repo'
 assert_contains "${STAGING_PR_WORKFLOW}" 'not eliminate this boundary without default-branch workflow ownership'
 assert_contains "${STAGING_PR_WORKFLOW}" 'the evaluator is not present on its base SHA yet'
 assert_contains "${STAGING_PR_WORKFLOW}" 'HOSTLET_STAGING_PR_APPROVAL_LABEL: staging-homelab-ci-approved'
-assert_contains "${STAGING_PR_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
+assert_contains "${STAGING_PR_WORKFLOW}" 'HOSTLET_EXPECTED_RUNNER_OS: Linux'
 assert_contains "${STAGING_PR_WORKFLOW}" 'group: staging-pr-${{ github.event.pull_request.number }}'
 assert_contains "${STAGING_PR_WORKFLOW}" 'ref: ${{ github.event.pull_request.head.sha }}'
 assert_contains "${STAGING_PR_WORKFLOW}" 'persist-credentials: false'
@@ -208,19 +208,18 @@ assert_contains "${STAGING_PR_GATE_SELFTEST}" 'missing-approval'
 assert_contains "${STAGING_PR_GATE_SELFTEST}" 'api-failure'
 assert_contains "${CI_WORKFLOW}" 'scripts/ci-verify-runner.sh'
 assert_contains "${CI_WORKFLOW}" 'node --version && pnpm --version'
-assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
-assert_contains "${RELEASE_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
-assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
-assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "8"'
-assert_contains "${STAGING_DEPLOYABILITY}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
-assert_contains "${FULL_CI_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
-assert_contains "${PREWARM_WORKFLOW}" 'HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-'
-assert_contains "${ACTIONLINT_CONFIG}" 'homelab'
-assert_contains "${ACTIONLINT_CONFIG}" 'homelab-heavy'
+assert_contains "${CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
+assert_contains "${RELEASE_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
+assert_contains "${STAGING_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
+assert_contains "${FULL_CI_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
+assert_contains "${STAGING_DEPLOYABILITY}" 'HOSTLET_EXPECTED_RUNNER_OS: Linux'
+assert_contains "${FULL_CI_WORKFLOW}" 'HOSTLET_EXPECTED_RUNNER_OS: Linux'
+assert_contains "${ACTIONLINT_CONFIG}" 'labels: []'
+assert_not_contains "${ACTIONLINT_CONFIG}" 'homelab-heavy'
 assert_not_contains "${ACTIONLINT_CONFIG}" 'hostlet-core-v2'
 assert_contains "${FULL_CI_WORKFLOW}" "group: full-ci-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
 assert_contains "${STAGING_DEPLOYABILITY}" "group: deployability-\${{ github.event_name == 'schedule' && 'staging' || github.ref }}"
-assert_contains "${DATABASE_WORKFLOW}" 'runs-on: homelab-heavy'
+assert_contains "${DATABASE_WORKFLOW}" 'runs-on: ubuntu-24.04'
 assert_contains "${DATABASE_WORKFLOW}" 'CARGO_BUILD_JOBS: "2"'
 assert_contains "${DATABASE_WORKFLOW}" 'timeout-minutes: 20'
 assert_contains "${DATABASE_WORKFLOW}" 'HOSTLET_DB_TEST_REQUIRED: "1"'
@@ -306,7 +305,6 @@ for workflow in \
   "${FULL_CI_WORKFLOW}" \
   "${RELEASE_WORKFLOW}" \
   "${RELEASE_CANDIDATE_WORKFLOW}" \
-  "${PREWARM_WORKFLOW}" \
   "${DATABASE_WORKFLOW}"; do
   assert_not_contains "${workflow}" 'runs-on: [self-hosted'
   assert_not_contains "${workflow}" 'hostlet-core-v2'
@@ -322,7 +320,6 @@ python3 - \
   "${FULL_CI_WORKFLOW}" \
   "${PR_WORKFLOW}" \
   "${STAGING_PR_WORKFLOW}" \
-  "${PREWARM_WORKFLOW}" \
   "${RELEASE_WORKFLOW}" \
   "${DATABASE_WORKFLOW}" <<'PY'
 import re
@@ -331,60 +328,59 @@ from pathlib import Path
 
 expected = {
     sys.argv[1]: {
-        "secrets": "homelab",
-        "rust": "homelab-heavy",
-        "web": "homelab-heavy",
-        "compose": "homelab",
-        "docker": "homelab-heavy",
+        "secrets": "ubuntu-24.04",
+        "rust": "ubuntu-24.04",
+        "web": "ubuntu-24.04",
+        "compose": "ubuntu-24.04",
+        "docker": "ubuntu-24.04",
     },
     sys.argv[2]: {
-        "secrets": "homelab",
-        "rust": "homelab-heavy",
-        "web": "homelab-heavy",
-        "topology-e2e": "homelab-heavy",
-        "remote-build": "homelab-heavy",
-        "images": "homelab-heavy",
-        "pin-cloud-staging": "homelab",
+        "secrets": "ubuntu-24.04",
+        "rust": "ubuntu-24.04",
+        "web": "ubuntu-24.04",
+        "topology-e2e": "ubuntu-24.04",
+        "remote-build": "ubuntu-24.04",
+        "images": "ubuntu-24.04",
+        "pin-cloud-staging": "ubuntu-24.04",
     },
     sys.argv[3]: {
-        "generated-apps": "homelab-heavy",
-        "self-hosted-api": "homelab",
-        "patchwork-canary": "homelab-heavy",
+        "generated-apps": "ubuntu-24.04",
+        "self-hosted-api": "ubuntu-24.04",
+        "patchwork-canary": "ubuntu-24.04",
     },
     sys.argv[4]: {
-        "full-web-visual": "homelab-heavy",
-        "full-self-hosted-deploy": "homelab-heavy",
-        "full-compose-and-release": "homelab-heavy",
+        "full-web-visual": "ubuntu-24.04",
+        "full-self-hosted-deploy": "ubuntu-24.04",
+        "full-compose-and-release": "ubuntu-24.04",
     },
     sys.argv[5]: {
-        "clear-approval": "homelab",
-        "secrets": "homelab",
-        "rust": "homelab-heavy",
-        "web": "homelab-heavy",
-        "compose": "homelab",
-        "docker": "homelab-heavy",
-        "remote-build": "homelab-heavy",
+        "clear-approval": "ubuntu-24.04",
+        "secrets": "ubuntu-24.04",
+        "rust": "ubuntu-24.04",
+        "web": "ubuntu-24.04",
+        "compose": "ubuntu-24.04",
+        "docker": "ubuntu-24.04",
+        "remote-build": "ubuntu-24.04",
     },
     sys.argv[6]: {
-        "revoke-approval-on-update": "homelab",
-        "secrets": "homelab",
-        "rust": "homelab-heavy",
-        "database": "homelab-heavy",
-        "web": "homelab-heavy",
-        "compose": "homelab",
-        "docker": "homelab-heavy",
-        "topology-e2e": "homelab-heavy",
-        "remote-build": "homelab-heavy",
-        "staging-pr-gate": "homelab",
+        "revoke-approval-on-update": "ubuntu-24.04",
+        "secrets": "ubuntu-24.04",
+        "rust": "ubuntu-24.04",
+        "database": "ubuntu-24.04",
+        "web": "ubuntu-24.04",
+        "compose": "ubuntu-24.04",
+        "docker": "ubuntu-24.04",
+        "topology-e2e": "ubuntu-24.04",
+        "remote-build": "ubuntu-24.04",
+        "staging-pr-gate": "ubuntu-24.04",
     },
-    sys.argv[7]: {"prewarm": "homelab"},
-    sys.argv[8]: {
-        "release-source": "homelab",
-        "candidate-publication": "homelab",
-        "release-validation": "homelab-heavy",
-        "linux-cli": "homelab-heavy",
+    sys.argv[7]: {
+        "release-source": "ubuntu-24.04",
+        "candidate-publication": "ubuntu-24.04",
+        "release-validation": "ubuntu-24.04",
+        "linux-cli": "ubuntu-24.04",
     },
-    sys.argv[9]: {"database": "homelab-heavy"},
+    sys.argv[8]: {"database": "ubuntu-24.04"},
 }
 for workflow_path, expected_runners in expected.items():
     workflow = Path(workflow_path).read_text()
@@ -407,10 +403,10 @@ from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
 expected = {
-    "verify-staging": "homelab",
-    "candidate-tests": "homelab-heavy",
-    "candidate-artifacts": "homelab-heavy",
-    "seal-candidate": "homelab",
+    "verify-staging": "ubuntu-24.04",
+    "candidate-tests": "ubuntu-24.04",
+    "candidate-artifacts": "ubuntu-24.04",
+    "seal-candidate": "ubuntu-24.04",
 }
 for job, runner in expected.items():
     match = re.search(
@@ -478,8 +474,8 @@ import sys
 from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
-light_jobs = workflow.count("runs-on: homelab\n")
-heavy_jobs = workflow.count("runs-on: homelab-heavy\n")
+light_jobs = workflow.count("runs-on: ubuntu-24.04\n")
+heavy_jobs = workflow.count("runs-on: ubuntu-24.04\n")
 approval_guards = workflow.count("github.event.label.name == 'homelab-ci-approved'")
 release_exclusions = workflow.count("!startsWith(github.event.pull_request.head.ref, 'release-candidate/v')")
 if light_jobs != 4 or heavy_jobs != 4 or approval_guards != 6 or release_exclusions != 6:
@@ -592,7 +588,7 @@ if "uses: ./.github/workflows/database-tests.yml" in database:
 
 topology = job_body(workflow, "topology-e2e")
 for needle in (
-    '      CARGO_BUILD_JOBS: "8"\n',
+    '      CARGO_BUILD_JOBS: "2"\n',
     '      HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"\n',
     "scripts/ci-install-railpack.sh",
     "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
@@ -936,7 +932,7 @@ for path_text in sys.argv[1:]:
         raise SystemExit(f"{path} is missing release-evidence detector")
     detector_body = detector.group("body")
     for marker in (
-        "    runs-on: homelab\n",
+        "    runs-on: ubuntu-24.04\n",
         "actions: read",
         "HOSTLET_RELEASE_EVIDENCE_MODE: main",
         "github.event.before",
@@ -958,7 +954,7 @@ for path_text in sys.argv[1:]:
             re.MULTILINE | re.DOTALL,
         )
         body = body_match.group("body") if body_match else ""
-        if "runs-on: homelab-heavy\n" in body:
+        if "needs.release-evidence.outputs.reuse_heavy" in body:
             if "needs: [release-evidence]\n" not in body:
                 raise SystemExit(f"{path} heavy job {name} does not wait for release evidence")
             if "needs.release-evidence.outputs.reuse_heavy != 'true'" not in body:

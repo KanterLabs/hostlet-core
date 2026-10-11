@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_EXPECTED_RUNNER_OS: Linux
+  HOSTLET_EXPECTED_RUNNER_ARCH: X64
 
 concurrency:
   group: staging-${{ github.ref }}
@@ -24,7 +25,8 @@ concurrency:
 jobs:
   secrets:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -35,10 +37,11 @@ jobs:
 
   rust:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       # This full workspace check owns the isolated 8-CPU heavy runner.
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -65,7 +68,8 @@ jobs:
 
   web:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: apps/web
@@ -73,6 +77,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Set up the locked pnpm version
+        run: corepack enable && corepack prepare "$(node -p "require('./package.json').packageManager || 'pnpm@10.11.0'")" --activate
       - run: ../../scripts/ci-verify-runner.sh
       - run: node --version && pnpm --version
       - run: pnpm install --frozen-lockfile
@@ -81,9 +91,10 @@ jobs:
 
   topology-e2e:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
       HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -98,9 +109,10 @@ jobs:
 
   remote-build:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -114,7 +126,8 @@ jobs:
   images:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [secrets, rust, database, web, topology-e2e, remote-build]
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Isolate docker credentials for this run
         # Per-run DOCKER_CONFIG keeps registry credentials in this ephemeral
@@ -159,7 +172,8 @@ jobs:
   pin-cloud-staging:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/staging'
     needs: [images]
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
