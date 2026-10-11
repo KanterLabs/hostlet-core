@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_EXPECTED_RUNNER_OS: Linux
+  HOSTLET_EXPECTED_RUNNER_ARCH: X64
 
 concurrency:
   group: pr-homelab-ci-${{ github.event.pull_request.number }}
@@ -28,7 +29,8 @@ concurrency:
 jobs:
   clear-approval:
     if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'homelab-ci-approved')
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       pull-requests: write
     steps:
@@ -46,7 +48,8 @@ jobs:
 
   secrets:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -59,9 +62,10 @@ jobs:
 
   rust:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -88,7 +92,8 @@ jobs:
 
   web:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: apps/web
@@ -98,20 +103,27 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Set up the locked pnpm version
+        run: corepack enable && corepack prepare "$(node -p "require('./package.json').packageManager || 'pnpm@10.11.0'")" --activate
       - run: ../../scripts/ci-verify-runner.sh
       - run: node --version && pnpm --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm build
       - run: ../../scripts/ci-web-route-smoke.sh
-      - run: pnpm exec playwright install chromium
+      - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:web
       - run: pnpm responsive:qa
       - run: ../../scripts/ci-security-artifact-smoke.sh
 
   compose:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
@@ -145,7 +157,8 @@ jobs:
 
   docker:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -160,9 +173,10 @@ jobs:
 
   remote-build:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'labeled' && github.event.label.name == 'homelab-ci-approved' && !startsWith(github.event.pull_request.head.ref, 'release-candidate/v')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -178,7 +192,7 @@ jobs:
     name: release-candidate-gate
     if: always()
     needs: [clear-approval, secrets, rust, web, compose, docker, remote-build]
-    runs-on: homelab
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
