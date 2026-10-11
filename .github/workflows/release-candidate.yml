@@ -43,7 +43,8 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_EXPECTED_RUNNER_OS: Linux
+  HOSTLET_EXPECTED_RUNNER_ARCH: X64
   HOSTLET_MAX_GLIBC_VERSION: "2.39"
   HOSTLET_RELEASE_CANDIDATE_MAX_AGE_SECONDS: "14400"
   IMAGE_REGISTRY: ghcr.io/shanekanterman04
@@ -51,7 +52,8 @@ env:
 jobs:
   verify-staging:
     name: verify-staging
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: read
@@ -199,11 +201,12 @@ jobs:
   candidate-tests:
     name: candidate-tests
     needs: [verify-staging]
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
       HOSTLET_DB_TEST_REQUIRED: "1"
     services:
       postgres:
@@ -264,14 +267,15 @@ jobs:
   candidate-artifacts:
     name: candidate-artifacts
     needs: [verify-staging]
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: read
       id-token: write
       attestations: write
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
       CANDIDATE_SHA: ${{ needs.verify-staging.outputs.candidate_sha }}
       CANDIDATE_TREE: ${{ needs.verify-staging.outputs.candidate_tree }}
       RELEASE_VERSION: ${{ needs.verify-staging.outputs.release_version }}
@@ -406,7 +410,8 @@ jobs:
   seal-candidate:
     name: seal-candidate
     needs: [verify-staging, candidate-tests, candidate-artifacts]
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: read
