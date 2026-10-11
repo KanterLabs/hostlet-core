@@ -74,22 +74,13 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ "${RUNNER_NAME}" == homelab-* ]]; then
-  if [ "${HOSTLET_ALLOW_ARC_HOST_PATHS:-0}" != "1" ] &&
-    { [ -e "${forbidden_home_path}" ] || [ -e "${forbidden_k8s_token_path}" ]; }; then
-    echo "ARC runner exposes a forbidden host path or Kubernetes token" >&2
-    exit 1
-  fi
-else
-  if ! mountpoint -q /var/lib/docker; then
-    echo "/var/lib/docker is not a dedicated mount; refusing CI without isolated Docker storage" >&2
-    exit 1
-  fi
-
-  if [ "${HOSTLET_ALLOW_LOW_DOCKER_DISK:-0}" != "1" ]; then
-    docker_disk_fail_percent="${HOSTLET_RUNNER_DOCKER_DISK_FAIL_PERCENT:-92}"
-    check_disk_below_threshold /var/lib/docker Docker "${docker_disk_fail_percent}"
-  fi
+if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
+  echo "this workflow requires the disposable GitHub-hosted runner environment" >&2
+  exit 1
+fi
+if [ -e "${forbidden_home_path}" ] || [ -e "${forbidden_k8s_token_path}" ]; then
+  echo "hosted runner exposes a forbidden host path or Kubernetes token" >&2
+  exit 1
 fi
 
-echo "verified self-hosted runner ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
+echo "verified hosted runner ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
