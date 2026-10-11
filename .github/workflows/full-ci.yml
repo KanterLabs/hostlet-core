@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_EXPECTED_RUNNER_OS: Linux
+  HOSTLET_EXPECTED_RUNNER_ARCH: X64
 
 concurrency:
   group: full-ci-${{ github.event_name == 'schedule' && 'staging' || github.ref }}
@@ -24,7 +25,7 @@ concurrency:
 jobs:
   release-evidence:
     name: release-evidence
-    runs-on: homelab
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -66,7 +67,8 @@ jobs:
   full-web-visual:
     needs: [release-evidence]
     if: needs.release-evidence.outputs.reuse_heavy != 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: apps/web
@@ -75,11 +77,17 @@ jobs:
         with:
           # Scheduled runs validate staging, not the default branch.
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Set up the locked pnpm version
+        run: corepack enable && corepack prepare "$(node -p "require('./package.json').packageManager || 'pnpm@10.11.0'")" --activate
       - run: ../../scripts/ci-verify-runner.sh
       - run: node --version && pnpm --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm exec playwright install chromium
+      - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:web
       - run: pnpm responsive:qa
         env:
@@ -94,9 +102,10 @@ jobs:
   full-self-hosted-deploy:
     needs: [release-evidence]
     if: needs.release-evidence.outputs.reuse_heavy != 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -113,10 +122,11 @@ jobs:
   full-compose-and-release:
     needs: [release-evidence]
     if: needs.release-evidence.outputs.reuse_heavy != 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       # The release build owns the isolated 8-CPU heavy runner.
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
       POSTGRES_PASSWORD: ci-only-not-a-secret-postgres
       PUBLIC_API_URL: http://localhost:8080
       PUBLIC_WEB_URL: http://localhost:3000
