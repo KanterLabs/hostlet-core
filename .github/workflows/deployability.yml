@@ -14,7 +14,8 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_EXPECTED_RUNNER_OS: Linux
+  HOSTLET_EXPECTED_RUNNER_ARCH: X64
 
 concurrency:
   group: deployability-${{ github.event_name == 'schedule' && 'staging' || github.ref }}
@@ -23,7 +24,7 @@ concurrency:
 jobs:
   release-evidence:
     name: release-evidence
-    runs-on: homelab
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -65,7 +66,8 @@ jobs:
   generated-apps:
     needs: [release-evidence]
     if: needs.release-evidence.outputs.reuse_heavy != 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -87,7 +89,8 @@ jobs:
 
   self-hosted-api:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "2"
     steps:
@@ -105,9 +108,10 @@ jobs:
     needs: [release-evidence]
     if: needs.release-evidence.outputs.reuse_heavy != 'true' && github.event_name == 'schedule'
     continue-on-error: true
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
       HOSTLET_E2E_SKIP_RAILPACK_FIXTURES: "1"
       HOSTLET_TOPOLOGY_CANARY_REPO: ShaneKanterman04/patchwork-pirates
       HOSTLET_TOPOLOGY_CANARY_SHA: fae18d0fab8bc5586a33af598fa4371a06f51576

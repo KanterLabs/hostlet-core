@@ -48,7 +48,8 @@ permissions:
   contents: read
 
 env:
-  HOSTLET_ALLOWED_RUNNER_PREFIX: homelab-
+  HOSTLET_EXPECTED_RUNNER_OS: Linux
+  HOSTLET_EXPECTED_RUNNER_ARCH: X64
   HOSTLET_MAX_GLIBC_VERSION: "2.39"
   HOSTLET_RELEASE_CANDIDATE_MAX_AGE_SECONDS: "14400"
   IMAGE_REGISTRY: ghcr.io/shanekanterman04
@@ -56,7 +57,8 @@ env:
 jobs:
   release-source:
     name: release-source
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: read
@@ -74,6 +76,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up the project Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "stable"
+          components: rustfmt, clippy
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Require release source on main
         run: bash scripts/ci-release-mainline-gate.sh
       - name: Check release gate contract
@@ -182,11 +193,12 @@ jobs:
     name: release-validation (legacy emergency)
     if: github.event_name == 'workflow_dispatch' && inputs.release_mode == 'legacy' && inputs.emergency_acknowledgement == 'I_UNDERSTAND_LEGACY_RELEASE'
     needs: [release-source]
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -205,7 +217,8 @@ jobs:
     name: candidate-publication
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'candidate')
     needs: [release-source]
-    runs-on: homelab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: write
@@ -226,6 +239,10 @@ jobs:
           ref: ${{ needs.release-source.outputs.candidate_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
       - run: scripts/ci-verify-runner.sh
       - name: Resolve the exact successful candidate artifact run
         id: resolve-candidate
@@ -468,14 +485,15 @@ jobs:
     name: linux-cli (legacy emergency)
     if: github.event_name == 'workflow_dispatch' && inputs.release_mode == 'legacy' && inputs.emergency_acknowledgement == 'I_UNDERSTAND_LEGACY_RELEASE'
     needs: [release-source, database, release-validation]
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
     env:
-      CARGO_BUILD_JOBS: "8"
+      CARGO_BUILD_JOBS: "2"
       RELEASE_TAG: ${{ needs.release-source.outputs.release_tag }}
       RELEASE_VERSION: ${{ needs.release-source.outputs.release_version }}
     steps:
