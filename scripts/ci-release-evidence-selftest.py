@@ -18,6 +18,7 @@ HEAD = "a" * 40
 TREE = "b" * 40
 PUSH = "c" * 40
 RUN_ID = 12345
+STAGING_RUN_ID = 12344
 NOW = datetime(2026, 8, 18, 2, 0, tzinfo=timezone.utc)
 
 
@@ -52,13 +53,18 @@ def artifact(created_at: str = "2026-08-18T01:00:00Z", expires_at: str = "2026-0
     }
 
 
-def successful_run(head_sha: str = HEAD, conclusion: str = "success") -> dict[str, object]:
+def successful_run(
+    head_sha: str = HEAD,
+    conclusion: str = "success",
+    path: str = ".github/workflows/release-candidate.yml",
+) -> dict[str, object]:
     return {
+        "id": RUN_ID,
         "status": "completed",
         "conclusion": conclusion,
         "head_branch": "staging",
         "head_sha": head_sha,
-        "path": ".github/workflows/staging.yml",
+        "path": path,
     }
 
 
@@ -99,10 +105,51 @@ expect_failure("ordinary-approved-pr-skipped-old-job", lambda: evidence.validate
 # Missing, stale, skipped, cancelled, and mismatched artifacts all fail closed.
 expect_failure("missing-artifact", lambda: select([]))
 expect_failure("stale-artifact", lambda: select([artifact(expires_at="2026-08-18T02:00:00Z")]))
-expect_failure("skipped-staging-run", lambda: select([artifact()], successful_run(conclusion="skipped")))
-expect_failure("cancelled-staging-run", lambda: select([artifact()], successful_run(conclusion="cancelled")))
-expect_failure("mismatched-staging-head", lambda: select([artifact()], successful_run(head_sha=PUSH)))
+expect_failure("skipped-candidate-run", lambda: select([artifact()], successful_run(conclusion="skipped")))
+expect_failure("cancelled-candidate-run", lambda: select([artifact()], successful_run(conclusion="cancelled")))
+expect_failure("mismatched-candidate-head", lambda: select([artifact()], successful_run(head_sha=PUSH)))
+expect_failure(
+    "staging-run-cannot-own-candidate-artifact",
+    lambda: select([artifact()], successful_run(path=".github/workflows/staging.yml")),
+)
 assert select([artifact()])[1] == RUN_ID
+
+receipt = json.dumps(
+    {
+        "workflows": {
+            "staging": {"run_id": STAGING_RUN_ID},
+            "candidate": {"run_id": RUN_ID},
+        }
+    }
+).encode()
+assert evidence.receipt_workflow_run_ids(receipt) == (STAGING_RUN_ID, RUN_ID)
+expect_failure("missing-receipt-runs", lambda: evidence.receipt_workflow_run_ids(b"{}"))
+
+staging_run = {
+    "id": STAGING_RUN_ID,
+    "status": "completed",
+    "conclusion": "success",
+    "head_branch": "staging",
+    "head_sha": HEAD,
+    "path": ".github/workflows/staging.yml",
+}
+evidence.validate_staging_run(staging_run, run_id=STAGING_RUN_ID, expected_sha=HEAD)
+expect_failure(
+    "candidate-run-cannot-satisfy-staging-proof",
+    lambda: evidence.validate_staging_run(
+        {**staging_run, "path": ".github/workflows/release-candidate.yml"},
+        run_id=STAGING_RUN_ID,
+        expected_sha=HEAD,
+    ),
+)
+expect_failure(
+    "mismatched-receipt-staging-head",
+    lambda: evidence.validate_staging_run(
+        {**staging_run, "head_sha": PUSH},
+        run_id=STAGING_RUN_ID,
+        expected_sha=HEAD,
+    ),
+)
 
 
 # The GitHub Contents API wraps base64 payloads across lines.  Release PR
